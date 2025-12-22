@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 采购单数据采集任务
-从灵星API获取采购单数据并存入数据库
+从领星API获取采购单数据并存入数据库
 """
 import asyncio
 from datetime import datetime
