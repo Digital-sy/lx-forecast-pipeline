@@ -12,7 +12,7 @@ def normalize_shop_name(shop_name: str) -> str:
     规范化店铺名称
     
     规则：
-    - 所有RR-开头的店铺统一转换为RR-EU
+    - 所有RR-开头或RR_开头的店铺统一转换为RR-EU
     - 其他店铺保持原样
     
     Args:
@@ -24,11 +24,13 @@ def normalize_shop_name(shop_name: str) -> str:
     if not shop_name:
         return shop_name
     
-    # 所有RR-开头的店铺统一转换为RR-EU
-    if str(shop_name).startswith('RR-'):
+    shop_str = str(shop_name).strip()
+    
+    # 所有RR-开头或RR_开头的店铺统一转换为RR-EU
+    if shop_str.startswith('RR-') or shop_str.startswith('RR_'):
         return 'RR-EU'
     
-    return shop_name
+    return shop_str
 
 
 def convert_feishu_record_to_dict(records: List[Dict[str, Any]], 

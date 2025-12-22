@@ -11,8 +11,9 @@ from typing import List, Dict, Any
 # 导入公共模块
 from common import settings, get_logger
 from common.database import db_cursor
-from lingxing import OpenApiBase, fetch_sid_to_name_map
+from lingxing import OpenApiBase
 from utils import normalize_shop_name
+from .shop_mapping import get_shop_mapping
 
 # 获取日志记录器
 logger = get_logger('purchase_order')
@@ -256,10 +257,10 @@ async def main():
     
     logger.info(f"查询日期范围：{start_date_str} 至 {end_date_str}（全量更新，从5月开始）")
     
-    # 获取店铺映射
+    # 获取店铺映射（使用新的shop_mapping模块）
     logger.info("正在加载店铺映射...")
     try:
-        sid_to_name_map = await fetch_sid_to_name_map(op_api, token_resp.access_token)
+        sid_to_name_map = await get_shop_mapping()
         logger.info(f"已加载 {len(sid_to_name_map)} 个店铺映射")
     except Exception as e:
         logger.warning(f"获取店铺映射失败: {e}，使用预定义映射")
