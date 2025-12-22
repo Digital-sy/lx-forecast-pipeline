@@ -1,0 +1,367 @@
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+"""
+生成下单分析表
+从MySQL的采购单表和运营下单表中读取数据，生成下单分析表
+只获取前2个月+本月+未来3个月的数据（共6个月）
+"""
+from datetime import datetime
+from collections import defaultdict
+from typing import List, Dict, Any
+
+from common import settings, get_logger
+from common.database import db_cursor
+from utils import parse_month, get_valid_months, normalize_shop_name
+
+logger = get_logger('analysis_table')
+
+
+def get_purchase_data() -> Dict:
+    """从采购单表获取实际下单数据，按SKU+店铺+月份分组"""
+    logger.info("\n1. 正在从采购单表读取数据...")
+    
+    # 获取有效月份范围
+    valid_months = get_valid_months()
+    logger.info(f"   有效月份范围: {valid_months[0]} 至 {valid_months[-1]}")
+    
+    with db_cursor(dictionary=True) as cursor:
+        # 查询采购单数据
+        sql = """
+        SELECT 
+            SKU,
+            店铺名 as 店铺,
+            实际数量,
+            创建时间
+        FROM 采购单
+        WHERE SKU IS NOT NULL AND SKU != ''
+        """
+        
+        cursor.execute(sql)
+        results = cursor.fetchall()
+    
+    logger.info(f"   从采购单表读取 {len(results)} 条记录")
+    
+    # 按 SKU+店铺+月份 分组汇总
+    purchase_dict = defaultdict(lambda: {'实际已下单数量': 0})
+    filtered_count = 0
+    
+    for row in results:
+        sku = row['SKU']
+        shop = normalize_shop_name(row['店铺'] or '')
+        quantity = row['实际数量'] or 0
+        create_time = row['创建时间']
+        
+        month = parse_month(str(create_time))
+        if not month:
+            continue
+        
+        # 只保留有效月份范围内的数据
+        if month not in valid_months:
+            filtered_count += 1
+            continue
+        
+        key = (sku, shop, month)
+        purchase_dict[key]['实际已下单数量'] += int(quantity)
+    
+    logger.info(f"   过滤掉 {filtered_count} 条不在有效月份范围内的记录")
+    logger.info(f"   汇总后共 {len(purchase_dict)} 个SKU+店铺+月份组合")
+    return purchase_dict
+
+
+def get_fabric_data() -> Dict[str, str]:
+    """从产品信息表获取面料信息，按SKU映射"""
+    logger.info("\n2. 正在从产品信息表读取面料数据...")
+    
+    try:
+        with db_cursor(dictionary=True) as cursor:
+            # 查询产品信息表的面料数据
+            sql = """
+            SELECT 
+                SKU,
+                面料
+            FROM 产品信息
+            WHERE SKU IS NOT NULL AND SKU != ''
+            """
+            
+            cursor.execute(sql)
+            results = cursor.fetchall()
+        
+        logger.info(f"   从产品信息表读取 {len(results)} 条面料记录")
+        
+        # 构建SKU到面料的映射
+        fabric_dict = {}
+        for row in results:
+            sku = row['SKU']
+            fabric = row['面料'] or ''
+            if sku:
+                fabric_dict[sku] = fabric
+        
+        logger.info(f"   构建了 {len(fabric_dict)} 个SKU的面料映射")
+        return fabric_dict
+        
+    except Exception as e:
+        logger.warning(f"   获取面料数据失败: {e}")
+        logger.warning("   将使用空面料数据继续")
+        return {}
+
+
+def get_operation_order_data() -> Dict:
+    """从运营下单表获取预计下单数据，按SKU+店铺+月份分组"""
+    logger.info("\n3. 正在从运营下单表读取数据...")
+    
+    # 获取有效月份范围
+    valid_months = get_valid_months()
+    logger.info(f"   有效月份范围: {valid_months[0]} 至 {valid_months[-1]}")
+    
+    with db_cursor(dictionary=True) as cursor:
+        # 查询运营下单表数据
+        sql = """
+        SELECT 
+            sku as SKU,
+            店铺,
+            下单数量,
+            下单时间,
+            下单人,
+            所属部门
+        FROM 运营下单表
+        WHERE sku IS NOT NULL AND sku != ''
+        """
+        
+        cursor.execute(sql)
+        results = cursor.fetchall()
+    
+    logger.info(f"   从运营下单表读取 {len(results)} 条记录")
+    
+    # 按 SKU+店铺+月份 分组汇总
+    operation_dict = defaultdict(lambda: {'预计下单数量': 0, '下单人': set(), '所属部门': set()})
+    filtered_count = 0
+    
+    for row in results:
+        sku = row['SKU']
+        shop = normalize_shop_name(row['店铺'] or '')
+        quantity = row['下单数量'] or 0
+        order_time = row['下单时间']
+        orderer = row['下单人'] or ''
+        department = row['所属部门'] or ''
+        
+        month = parse_month(str(order_time))
+        if not month:
+            continue
+        
+        # 只保留有效月份范围内的数据
+        if month not in valid_months:
+            filtered_count += 1
+            continue
+        
+        key = (sku, shop, month)
+        operation_dict[key]['预计下单数量'] += int(quantity)
+        if orderer:
+            operation_dict[key]['下单人'].add(orderer)
+        if department:
+            operation_dict[key]['所属部门'].add(department)
+    
+    # 将set转换为字符串
+    for key in operation_dict:
+        operation_dict[key]['下单人'] = ', '.join(operation_dict[key]['下单人'])
+        operation_dict[key]['所属部门'] = ', '.join(operation_dict[key]['所属部门'])
+    
+    logger.info(f"   过滤掉 {filtered_count} 条不在有效月份范围内的记录")
+    logger.info(f"   汇总后共 {len(operation_dict)} 个SKU+店铺+月份组合")
+    return operation_dict
+
+
+def merge_data(purchase_dict: Dict, operation_dict: Dict, fabric_dict: Dict) -> List[Dict[str, Any]]:
+    """合并采购单和运营下单表的数据"""
+    logger.info("\n4. 正在合并数据...")
+    
+    # 获取所有的key（SKU+店铺+月份组合）
+    all_keys = set(purchase_dict.keys()) | set(operation_dict.keys())
+    
+    merged_data = []
+    
+    for key in all_keys:
+        sku, shop, month = key
+        
+        # 规范化店铺名称
+        shop = normalize_shop_name(shop)
+        
+        # 实际下单数量
+        actual_quantity = purchase_dict.get(key, {}).get('实际已下单数量', 0)
+        
+        # 预计下单数量
+        operation_data = operation_dict.get(key, {})
+        expected_quantity = operation_data.get('预计下单数量', 0)
+        orderer = operation_data.get('下单人', '')
+        department = operation_data.get('所属部门', '')
+        
+        # 计算差值
+        difference = expected_quantity - actual_quantity
+        
+        # 更新时间
+        update_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # 从产品信息表获取面料
+        fabric = fabric_dict.get(sku, '')
+        
+        # 组装数据
+        record = {
+            'SKU': sku,
+            '店铺': shop,
+            '面料': fabric,
+            '下单人': orderer,
+            '所属部门': department,
+            '月份': month,
+            '实际已下单数量': actual_quantity,
+            '预计下单数量': expected_quantity,
+            '下单差值': difference,
+            '更新时间': update_time
+        }
+        
+        merged_data.append(record)
+    
+    logger.info(f"   合并后共 {len(merged_data)} 条记录")
+    return merged_data
+
+
+def create_analysis_table_if_not_exists() -> None:
+    """创建下单分析表（如果不存在）"""
+    with db_cursor(dictionary=False) as cursor:
+        sql = """
+        CREATE TABLE IF NOT EXISTS `下单分析表` (
+            `id` INT AUTO_INCREMENT PRIMARY KEY,
+            `SKU` VARCHAR(255),
+            `店铺` VARCHAR(255),
+            `面料` VARCHAR(255),
+            `下单人` VARCHAR(255),
+            `所属部门` VARCHAR(255),
+            `月份` VARCHAR(50),
+            `实际已下单数量` INT,
+            `预计下单数量` INT,
+            `下单差值` INT,
+            `更新时间` DATETIME,
+            INDEX idx_sku_shop_month (SKU, 店铺, 月份)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+        
+        cursor.execute(sql)
+
+
+def save_to_database(data_list: List[Dict[str, Any]]) -> None:
+    """保存数据到下单分析表"""
+    logger.info("\n5. 正在保存到数据库...")
+    
+    if not data_list:
+        logger.warning("   没有数据需要保存")
+        return
+    
+    # 创建表
+    create_analysis_table_if_not_exists()
+    
+    with db_cursor(dictionary=False) as cursor:
+        # 清空旧数据
+        logger.info("   正在清空旧数据...")
+        cursor.execute("TRUNCATE TABLE `下单分析表`")
+        
+        # 插入新数据
+        logger.info("   正在插入新数据...")
+        keys = data_list[0].keys()
+        fields = ','.join(f"`{k}`" for k in keys)
+        values_placeholder = ','.join(['%s'] * len(keys))
+        sql = f"INSERT INTO `下单分析表` ({fields}) VALUES ({values_placeholder})"
+        
+        batch_size = 200
+        for i in range(0, len(data_list), batch_size):
+            batch = [tuple(row.values()) for row in data_list[i:i+batch_size]]
+            cursor.executemany(sql, batch)
+            logger.info(f"   已录入 {min(i+batch_size, len(data_list))} 条...")
+    
+    logger.info(f"   成功写入 {len(data_list)} 条数据到下单分析表")
+
+
+def print_statistics(data_list: List[Dict[str, Any]]) -> None:
+    """打印统计信息"""
+    logger.info("\n" + "="*80)
+    logger.info("统计信息：")
+    
+    # 显示有效月份范围
+    valid_months = get_valid_months()
+    logger.info(f"  时间范围: {valid_months[0]} 至 {valid_months[-1]} (共6个月)")
+    logger.info(f"  总记录数: {len(data_list)}")
+    
+    if not data_list:
+        return
+    
+    # 统计月份分布
+    month_counts = defaultdict(int)
+    for record in data_list:
+        month_counts[record['月份']] += 1
+    
+    logger.info(f"\n  各月份记录数：")
+    for month in sorted(month_counts.keys()):
+        logger.info(f"    {month}: {month_counts[month]} 条")
+    
+    # 统计店铺分布
+    shop_counts = defaultdict(int)
+    for record in data_list:
+        shop_counts[record['店铺']] += 1
+    
+    logger.info(f"\n  各店铺记录数：")
+    for shop, count in sorted(shop_counts.items(), key=lambda x: x[1], reverse=True):
+        logger.info(f"    {shop}: {count} 条")
+    
+    # 统计差值情况
+    positive_diff = sum(1 for r in data_list if r['下单差值'] > 0)
+    negative_diff = sum(1 for r in data_list if r['下单差值'] < 0)
+    zero_diff = sum(1 for r in data_list if r['下单差值'] == 0)
+    
+    logger.info(f"\n  下单差值统计：")
+    logger.info(f"    欠额下单（差值>0，实际少于预计）: {positive_diff} 条")
+    logger.info(f"    超额下单（差值<0，实际多于预计）: {negative_diff} 条")
+    logger.info(f"    准确下单（差值=0）: {zero_diff} 条")
+    
+    logger.info("="*80)
+
+
+def main():
+    """主函数"""
+    logger.info("="*80)
+    logger.info("生成下单分析表")
+    logger.info("时间范围：前2个月+本月+未来3个月（共6个月）")
+    logger.info("="*80)
+    
+    # 显示有效月份范围
+    valid_months = get_valid_months()
+    logger.info(f"\n有效月份范围：")
+    logger.info(f"  开始月份: {valid_months[0]}")
+    logger.info(f"  结束月份: {valid_months[-1]}")
+    logger.info(f"  包含月份: {', '.join(valid_months)}")
+    
+    try:
+        # 1. 从采购单表获取实际下单数据
+        purchase_dict = get_purchase_data()
+        
+        # 2. 从产品信息表获取面料数据
+        fabric_dict = get_fabric_data()
+        
+        # 3. 从运营下单表获取预计下单数据
+        operation_dict = get_operation_order_data()
+        
+        # 4. 合并数据
+        merged_data = merge_data(purchase_dict, operation_dict, fabric_dict)
+        
+        # 5. 保存到数据库
+        save_to_database(merged_data)
+        
+        # 6. 打印统计信息
+        print_statistics(merged_data)
+        
+        logger.info("\n✅ 处理完成！")
+        
+    except Exception as e:
+        logger.error(f"\n❌ 发生错误: {e}", exc_info=True)
+        raise
+
+
+if __name__ == '__main__':
+    main()
+
