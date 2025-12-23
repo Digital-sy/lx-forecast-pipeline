@@ -53,7 +53,11 @@ async def fetch_all_purchase_orders(op_api: OpenApiBase, token: str,
                 "POST", 
                 req_body=req_body
             )
-            result = resp.model_dump()
+            # 兼容Pydantic v1和v2
+            try:
+                result = resp.model_dump()  # Pydantic v2
+            except AttributeError:
+                result = resp.dict()  # Pydantic v1
             orders = result.get('data', [])
             
             if not orders:

@@ -42,7 +42,11 @@ async def fetch_marketplace_list(op_api: OpenApiBase, token: str) -> list:
             req_body={}
         )
         
-        result = resp.model_dump()
+        # 兼容Pydantic v1和v2
+        try:
+            result = resp.model_dump()  # Pydantic v2
+        except AttributeError:
+            result = resp.dict()  # Pydantic v1
         
         if result.get('code') != 0:
             logger.warning(f"获取市场列表失败: {result.get('message')}")
@@ -87,7 +91,11 @@ async def fetch_shops_from_api(op_api: OpenApiBase, token: str) -> Dict[str, str
             req_body={}
         )
         
-        result = resp.model_dump()
+        # 兼容Pydantic v1和v2
+        try:
+            result = resp.model_dump()  # Pydantic v2
+        except AttributeError:
+            result = resp.dict()  # Pydantic v1
         
         # 检查返回码
         if result.get('code') != 0:
