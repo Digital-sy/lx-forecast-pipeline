@@ -244,6 +244,11 @@ def merge_data(purchase_dict: Dict, operation_dict: Dict, fabric_dict: Dict) -> 
         # 从产品信息表获取面料
         fabric = fabric_dict.get(sku, '')
         
+        # 处理空值：如果字段为空则填充为"无"
+        shop = shop if shop and shop.strip() else '无'
+        orderer = orderer if orderer and orderer.strip() else '无'
+        department = department if department and department.strip() else '无'
+        
         # 组装数据
         record = {
             'SKU': sku,
