@@ -5,7 +5,7 @@
 从领星API获取采购单数据并存入数据库
 """
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Any
 
 # 导入公共模块
@@ -224,11 +224,35 @@ def insert_data_batch(table_name: str, data_list: List[Dict[str, Any]]) -> None:
     logger.info(f"成功写入 {len(data_list)} 条数据到表 {table_name}")
 
 
+def calculate_months_ago(months: int) -> datetime:
+    """
+    计算N个月前的日期
+    
+    Args:
+        months: 月份数
+        
+    Returns:
+        datetime: N个月前的日期
+    """
+    now = datetime.now()
+    year = now.year
+    month = now.month - months
+    
+    # 处理跨年情况
+    while month < 1:
+        month += 12
+        year -= 1
+    
+    # 处理日期溢出（例如1月31日往前推1个月，2月没有31日）
+    day = min(now.day, 28)  # 安全起见，使用每月都有的日期
+    
+    return datetime(year, month, 1)  # 返回该月的1号
+
+
 async def main():
     """主函数"""
     logger.info("="*80)
-    logger.info("采购单全量更新（从5月1日开始）")
-    logger.info("注意：全量更新将处理大量数据，可能需要较长时间，请耐心等待...")
+    logger.info("采购单增量更新（最近4个月数据）")
     logger.info("="*80)
     
     # 验证配置
@@ -253,13 +277,13 @@ async def main():
         logger.error(f"获取访问令牌失败: {e}")
         return
     
-    # 设置日期范围（从当前年份的5月1日到现在）
+    # 设置日期范围（最近4个月）
     end_date = datetime.now()
-    start_date = datetime(end_date.year, 5, 1)
+    start_date = calculate_months_ago(4)  # 4个月前的月初
     start_date_str = start_date.strftime("%Y-%m-%d")
     end_date_str = end_date.strftime("%Y-%m-%d")
     
-    logger.info(f"查询日期范围：{start_date_str} 至 {end_date_str}（全量更新，从5月开始）")
+    logger.info(f"查询日期范围：{start_date_str} 至 {end_date_str}（最近4个月）")
     
     # 获取店铺映射（使用新的shop_mapping模块）
     logger.info("正在加载店铺映射...")
@@ -300,9 +324,9 @@ async def main():
         # 创建或检查表结构
         create_table_if_needed(table_name, sku_data_list[0])
         
-        # 删除旧数据
-        logger.info(f"正在删除 {start_date_str} 至今的旧数据...")
-        delete_by_date_range(table_name, start_date_str, end_date_str)
+        # 删除该时间段的旧数据
+        logger.info(f"正在删除 {start_date_str} 至 {end_date_str} 的旧数据...")
+        deleted_count = delete_by_date_range(table_name, start_date_str, end_date_str)
         
         # 插入新数据
         logger.info("正在写入新数据...")
@@ -311,9 +335,11 @@ async def main():
         # 输出统计信息
         logger.info("="*80)
         logger.info("统计信息：")
+        logger.info(f"  更新策略: 增量更新（最近4个月）")
         logger.info(f"  数据范围: {start_date_str} 至 {end_date_str}")
+        logger.info(f"  删除旧记录: {deleted_count} 条")
         logger.info(f"  采购单数量: {len(orders)}")
-        logger.info(f"  SKU记录数: {len(sku_data_list)}")
+        logger.info(f"  新增SKU记录: {len(sku_data_list)} 条")
         
         if sku_data_list:
             logger.info(f"  平均每个采购单包含: {len(sku_data_list) / len(orders):.2f} 个SKU")
@@ -329,7 +355,7 @@ async def main():
                 logger.info(f"    {shop_name}: {count} 条")
         
         logger.info("="*80)
-        logger.info("全量更新完成！")
+        logger.info("增量更新完成！（保留4个月前的历史数据）")
         logger.info("="*80)
         
     except Exception as e:
