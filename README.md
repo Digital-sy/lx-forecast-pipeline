@@ -23,16 +23,24 @@ pythondata/
 ### 本地运行
 
 ```bash
-# 1. 配置环境变量
-copy env.example .env
-# 编辑 .env 填入配置
+# 1. 创建虚拟环境（推荐）
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+# 或 venv\Scripts\activate  # Windows
 
 # 2. 安装依赖
 pip install -r requirements.txt
 
-# 3. 运行项目（必须用 -m 参数）
+# 3. 配置环境变量
+copy env.example .env  # Windows
+# 或 cp env.example .env  # Linux/Mac
+# 编辑 .env 填入配置
+
+# 4. 运行项目（必须用 -m 参数）
 python -m jobs.purchase_analysis.main
 ```
+
+> 💡 **安装问题？** 查看 [INSTALL.md](INSTALL.md) 获取详细安装说明和问题解决方案
 
 ### 服务器部署
 
