@@ -4,13 +4,14 @@
 
 ### 🔄 主要变更
 
-为下单分析表添加空值处理逻辑：如果"店铺"、"下单人"、"所属部门"字段为空，则自动填充为"无"。
+为下单分析表添加空值处理逻辑：如果"店铺"、"面料"、"下单人"、"所属部门"字段为空，则自动填充为"无"。
 
 ### 📊 处理逻辑
 
 ```python
 # 处理空值：如果字段为空则填充为"无"
 shop = shop if shop and shop.strip() else '无'
+fabric = fabric if fabric and fabric.strip() else '无'
 orderer = orderer if orderer and orderer.strip() else '无'
 department = department if department and department.strip() else '无'
 ```
@@ -22,6 +23,7 @@ department = department if department and department.strip() else '无'
 | 店铺 | 空字符串 `""` | `"无"` |
 | 店铺 | 空格 `"   "` | `"无"` |
 | 店铺 | `None` 或不存在 | `"无"` |
+| 面料 | 空字符串/空格/None | `"无"` |
 | 下单人 | 空字符串/空格/None | `"无"` |
 | 所属部门 | 空字符串/空格/None | `"无"` |
 
@@ -45,6 +47,7 @@ department = department if department and department.strip() else '无'
 {
     'SKU': 'ABC123',
     '店铺': '',           # 空字符串
+    '面料': '',           # 空字符串
     '下单人': '',         # 空字符串
     '所属部门': ''        # 空字符串
 }
@@ -55,6 +58,7 @@ department = department if department and department.strip() else '无'
 {
     'SKU': 'ABC123',
     '店铺': '无',         # 自动填充
+    '面料': '无',         # 自动填充
     '下单人': '无',       # 自动填充
     '所属部门': '无'      # 自动填充
 }
