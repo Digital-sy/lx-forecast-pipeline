@@ -1,199 +1,306 @@
-# 采购下单分析项目
+# 采购下单分析系统 - 代码逻辑说明
 
-## 📋 项目说明
+## 📋 系统概述
 
-本项目用于分析采购单与运营下单计划的差异。
+这是一个基于领星API的采购下单分析系统，用于采集、整合和分析电商业务的库存、销量、采购等数据，支持智能下单决策。
 
-### 功能模块
+## 🏗️ 系统架构
 
-1. **fetch_purchase.py** - 从灵星API采集采购单数据
-2. **fetch_operation.py** - 从飞书多维表格采集运营下单计划
-3. **generate_analysis.py** - 生成采购vs计划的分析表
-4. **shop_mapping.py** - 店铺映射管理（新增）
-5. **main.py** - 主入口，按顺序执行所有任务
-
-## 🏪 店铺映射功能
-
-### 功能说明
-
-`shop_mapping.py` 模块负责管理店铺ID到店铺名称的映射关系。
-
-#### 映射来源
-
-1. **固定映射（优先级最高）**：
-   ```python
-   '110521897148377600' → 'TK本土店-1店'
-   '122513373670998016' → 'RR-EU'
-   '110521891393331200' → 'TK跨境店-2店'
-   ```
-
-2. **API动态获取**：
-   - 接口：`/erp/sc/data/seller/lists`
-   - 自动获取企业已授权到领星ERP的所有亚马逊店铺
-   - 通常可获取 15-20 个店铺（根据实际授权情况）
-
-3. **RR开头统一规则**：
-   - 所有 `RR-` 或 `RR_` 开头的店铺名称统一显示为 `RR-EU`
-   - 示例：`RR-UK`, `RR-FR`, `RR_DE` 等都显示为 `RR-EU`
-
-#### 实际效果
-
-系统会自动合并固定映射和API映射，通常得到 **20+ 个店铺映射**：
-- 固定映射：3 个（TK本土店-1店、TK跨境店-2店、RR-EU）
-- API映射：17 个（JQ-US、MT-US、SY-US、多个RR店铺等）
-- RR统一：6 个RR开头的店铺 → 统一为 RR-EU
-
-### 使用方式
-
-#### 方式一：在主程序中自动加载（推荐）
-
-```python
-# main.py 中已自动加载
-from .shop_mapping import get_shop_mapping
-shop_mapping = await get_shop_mapping()
+```
+purchase_analysis/
+├── main.py                          # 主入口，协调所有任务
+├── shop_mapping.py                  # 店铺映射管理
+├── fetch_fba_inventory.py           # FBA库存数据采集
+├── fetch_inventory_details.py       # 本地仓库库存明细采集
+├── fetch_sale_stat_v2_msku_monthly.py  # 销量统计数据采集
+├── fetch_purchase.py                # 采购单数据采集
+├── fetch_operation.py               # 运营下单计划采集
+├── generate_analysis.py             # 生成下单分析表
+└── generate_inventory_estimate.py   # 生成库存预估表
 ```
 
-#### 方式二：在各个任务中单独使用
+## 🔄 数据流程
 
-```python
-from .shop_mapping import get_shop_mapping, normalize_shop_id
+### 1. 主流程（main.py）
 
-# 获取完整映射
-shop_mapping = await get_shop_mapping()
+系统按以下顺序执行任务，每个任务间隔1分钟：
 
-# 规范化店铺ID或名称
-shop_name = normalize_shop_id('110521897148377600', shop_mapping)
-# 返回: 'TK本土店-1店'
-
-shop_name = normalize_shop_id('RR-US', shop_mapping)
-# 返回: 'RR-EU'
-
-shop_name = normalize_shop_id('RR_UK', shop_mapping)
-# 返回: 'RR-EU'
 ```
-
-#### 方式三：只使用固定映射（不调用API）
-
-```python
-from .shop_mapping import get_fixed_shop_mapping, normalize_shop_id
-
-# 只获取固定映射（不调用API，更快）
-shop_mapping = get_fixed_shop_mapping()
-
-shop_name = normalize_shop_id(shop_id, shop_mapping)
-```
-
-### 添加新的固定映射
-
-如果需要添加新的店铺映射，编辑 `shop_mapping.py` 中的 `FIXED_SHOP_MAPPINGS`：
-
-```python
-FIXED_SHOP_MAPPINGS = {
-    '110521897148377600': 'TK本土店-1店',
-    '122513373670998016': 'RR-EU',
-    '110521891393331200': 'TK跨境店-2店',
-    '新店铺ID': '新店铺名称',  # 添加新映射
-}
-```
-
-### 测试店铺映射
-
-```bash
-# 运行测试代码
-python -m jobs.purchase_analysis.shop_mapping
-```
-
-输出示例：
-```
-获取到 3 个店铺映射:
-  110521897148377600 → TK本土店-1店
-  110521891393331200 → TK跨境店-2店
-  122513373670998016 → RR-EU
-
-测试店铺ID规范化:
-  110521897148377600 → TK本土店-1店
-  122513373670998016 → RR-EU
-  RR-US → RR-EU
-  RR_UK → RR-EU
-  JQ-US → JQ-US
-  999999 → 999999
-```
-
-## ▶️ 运行方式
-
-### 运行整个项目
-
-```bash
-python -m jobs.purchase_analysis.main
-```
-
-### 运行单个任务
-
-```bash
-# 只采集采购单
-python -m jobs.purchase_analysis.fetch_purchase
-
-# 只采集运营计划
-python -m jobs.purchase_analysis.fetch_operation
-
-# 只生成分析表
-python -m jobs.purchase_analysis.generate_analysis
-
-# 测试店铺映射
-python -m jobs.purchase_analysis.shop_mapping
+[0/6] 加载店铺映射
+  ↓
+[1/6] 采集FBA库存数据（全量更新）
+  ↓ (等待1分钟)
+[2/6] 采集仓库库存明细（全仓数据，过滤预估总量=0）
+  ↓ (等待1分钟)
+[3/6] 采集销量统计数据（MSKU维度-月度，增量更新当月和上个月）
+  ↓ (等待1分钟)
+[4/6] 采集采购单数据（最近4个月，增量更新）
+  ↓ (等待1分钟)
+[5/6] 采集运营下单计划（从飞书）
+  ↓ (等待1分钟)
+[6/6] 生成分析表
+  ├── 生成下单分析表（采购单 vs 运营下单计划）
+  └── 生成库存预估表（FBA库存 + 本地库存）
 ```
 
 ## 📊 数据表结构
 
-### 采购单表 (lx_purchase_orders)
-- 采购单号、SKU、店铺名、仓库、数量等
+### 1. FBA库存表（`FBA库存明细`）
+- **数据源**: 领星API `/basicOpen/openapi/storage/fbaWarehouseDetail`
+- **更新策略**: 全量更新（每次删除所有旧数据）
+- **维度**: SKU + 店铺 + 仓库
+- **关键字段**:
+  - SKU, MSKU, 店铺, 仓库, ASIN, 品名, FNSKU
+  - 总数, FBA可售, 可用总数, 待调仓, 调仓中, 待发货, 不可售
+  - 计划入库, 在途, 入库中, 实际在途, 总可用库存
+  - 库龄字段（0-1个月、1-2个月、2-3个月...12个月以上）
 
-### 运营下单表 (operation_orders)
-- SKU、店铺、下单数量、下单人、下单时间等
+### 2. 仓库库存明细表（`仓库库存明细`）
+- **数据源**: 领星API `/erp/sc/routing/data/local_inventory/inventoryDetails`
+- **更新策略**: 全量更新
+- **维度**: SKU + 店铺 + 仓库
+- **关键字段**:
+  - SKU, 店铺, 仓库
+  - 可用量, 待到货量, 预估总量（= 可用量 + 待到货量）
+- **优化**: 预估总量为0的记录不写入数据库
 
-### 分析表 (order_analysis)
-- SKU、店铺、月份
-- 实际已下单、预计下单、下单差值
+### 3. 销量统计表（`销量统计_MSKU月度`）
+- **数据源**: 领星API `/erp/sc/routing/data/sale_stat/v2/saleStatList`
+- **更新策略**: 增量更新（默认更新当月和上个月）
+- **维度**: MSKU + 店铺 + 月份
+- **关键字段**:
+  - SKU, MSKU, 店铺, 品名, 销量, 统计日期（每月1号）
+- **时间范围**: 支持命令行参数指定，默认当月+上个月
 
-## 🔄 定时任务
+### 4. 采购单表（`采购单`）
+- **数据源**: 领星API `/erp/sc/routing/data/local_inventory/purchaseOrderList`
+- **更新策略**: 增量更新（最近4个月）
+- **维度**: SKU + 店铺
+- **关键字段**:
+  - 订单号, SKU, FNSKU, 实际数量, 店铺名, 仓库, 供应商
+  - 创建时间, 状态, 到货状态, 产品名称, MSKU
 
-在服务器上配置定时任务：
+### 5. 运营下单表（`运营下单表`）
+- **数据源**: 飞书多维表格
+- **更新策略**: 全量更新
+- **维度**: SKU + 店铺 + 日期
+- **关键字段**:
+  - sku, 店铺, 下单数量, 下单时间, 下单人, 所属部门
 
+### 6. 下单分析表（`下单分析表`）
+- **数据源**: 合并采购单表和运营下单表
+- **更新策略**: 增量更新（最近4个月 + 未来所有时间）
+- **维度**: SKU + 店铺 + 日期
+- **关键字段**:
+  - SKU, 店铺, 面料, 下单人, 所属部门
+  - 日期, 月份
+  - 实际已下单数量, 预计下单数量, 下单差值（= 预计 - 实际）
+
+### 7. 库存预估表（`库存预估表`）
+- **数据源**: 合并FBA库存表和仓库库存明细表
+- **更新策略**: 全量更新
+- **维度**: SKU + 店铺
+- **关键字段**:
+  - SKU, 店铺
+  - FBA库存（来自FBA库存明细的"总数"字段）
+  - 本地库存（来自仓库库存明细的"预估总量"字段）
+  - 库存总量（= FBA库存 + 本地库存）
+
+## 🔧 核心功能模块
+
+### 1. 店铺映射管理（shop_mapping.py）
+
+**功能**: 统一管理店铺ID到店铺名称的映射关系
+
+**特点**:
+- 固定映射优先（FIXED_SHOP_MAPPINGS）
+- 从领星API动态获取店铺列表
+- 自动规范化店铺名称（RR-开头统一为RR-EU）
+- 支持异步和同步两种方式
+
+**使用场景**: 所有需要将店铺ID转换为店铺名称的地方
+
+### 2. FBA库存采集（fetch_fba_inventory.py）
+
+**API**: `/basicOpen/openapi/storage/fbaWarehouseDetail`
+
+**特点**:
+- 分页获取（每页200条）
+- 支持重试机制（指数退避）
+- 自动token刷新
+- 令牌桶感知（动态调整请求间隔）
+- 包含详细的库龄信息（10个时间段）
+
+**数据转换**:
+- 店铺ID → 店铺名称（通过shop_mapping）
+- 空店铺名称 → "无"
+- 库龄字段：10个独立的年龄区间
+
+### 3. 本地库存采集（fetch_inventory_details.py）
+
+**API**: 
+- `/erp/sc/data/local_inventory/warehouse` (获取仓库列表)
+- `/erp/sc/routing/data/local_inventory/inventoryDetails` (获取库存明细)
+
+**特点**:
+- 只查询本地仓（type=1）
+- 分页获取（每页800条）
+- 预估总量=0的记录自动过滤
+- 支持重试和token刷新
+
+**数据转换**:
+- 仓库ID → 仓库名称
+- 店铺ID → 店铺名称
+- 预估总量 = 可用量 + 待到货量
+
+### 4. 销量统计采集（fetch_sale_stat_v2_msku_monthly.py）
+
+**API**: `/erp/sc/routing/data/sale_stat/v2/saleStatList`
+
+**特点**:
+- 按月维度查询（每月1号到月末）
+- 默认增量更新（当月+上个月）
+- 支持命令行参数指定日期范围
+- MSKU维度汇总
+- 支持重试和token刷新（包括2001005错误码）
+
+**数据转换**:
+- 聚合维度：MSKU
+- 统计日期：每月1号（DATE类型）
+- 空字段默认值：字符串→"无"，数字→0，日期→NULL
+
+### 5. 采购单采集（fetch_purchase.py）
+
+**API**: `/erp/sc/routing/data/local_inventory/purchaseOrderList`
+
+**特点**:
+- 增量更新（最近4个月）
+- 按SKU维度转换
+- 支持分页和重试
+
+### 6. 运营下单计划采集（fetch_operation.py）
+
+**数据源**: 飞书多维表格
+
+**特点**:
+- 全量更新
+- 从飞书API获取数据
+
+### 7. 下单分析表生成（generate_analysis.py）
+
+**功能**: 合并采购单表和运营下单表，生成对比分析
+
+**逻辑**:
+1. 从采购单表获取实际已下单数量（按SKU+店铺+日期汇总）
+2. 从运营下单表获取预计下单数量（按SKU+店铺+日期汇总）
+3. 从产品信息表获取面料信息
+4. 合并数据，计算下单差值
+5. 增量更新（保留4个月之前的历史数据）
+
+**输出**: 下单分析表，包含实际vs预计的对比
+
+### 8. 库存预估表生成（generate_inventory_estimate.py）
+
+**功能**: 合并FBA库存和本地库存，生成统一的库存视图
+
+**合并逻辑**:
+1. **相交部分**（SKU和店铺都匹配，且店铺都不是"无"）: 直接合并
+2. **本地库存店铺为"无"**:
+   - 如果FBA有该SKU：优先匹配US结尾的FBA店铺
+   - 如果FBA没有该SKU：优先匹配US结尾的本地店铺
+3. **FBA库存店铺为"无"**: 匹配对应SKU的所有本地店铺
+4. **两个地方都没有店铺**: 合并到"无"店铺
+5. **只有FBA或只有本地**: 另一个为0
+
+**输出**: 库存预估表，包含FBA库存、本地库存和库存总量
+
+
+## 🛡️ 错误处理和重试机制
+
+### Token管理
+- **自动刷新**: 检测到token过期（401, 403, 2001003, 2001005, 3001001, 3001002）时自动刷新
+- **Token Provider**: 使用`LingxingTokenProvider`管理token生命周期
+
+### 重试策略
+- **限流错误（3001008）**: 指数退避（10秒 → 20秒 → 40秒 → 80秒 → 160秒）
+- **其他错误**: 线性退避（10秒 → 20秒 → 30秒 → 40秒 → 50秒）
+- **最大重试次数**: 5次
+
+### 令牌桶感知
+- **动态调整**: 根据是否遇到限流动态调整请求间隔
+- **成功时**: 可适当减少间隔（但不少于基础间隔）
+- **限流时**: 增加间隔（最大5秒）
+
+## 📈 数据更新策略
+
+| 数据表 | 更新策略 | 时间范围 | 说明 |
+|--------|---------|---------|------|
+| FBA库存明细 | 全量更新 | 全部 | 每次删除所有旧数据 |
+| 仓库库存明细 | 全量更新 | 全部 | 每次删除所有旧数据，过滤预估总量=0 |
+| 销量统计_MSKU月度 | 增量更新 | 当月+上个月 | 支持命令行参数指定范围 |
+| 采购单 | 增量更新 | 最近4个月 | 保留4个月之前的历史数据 |
+| 运营下单表 | 全量更新 | 全部 | 每次删除所有旧数据 |
+| 下单分析表 | 增量更新 | 最近4个月+未来 | 保留4个月之前的历史数据 |
+| 库存预估表 | 全量更新 | 全部 | 每次删除所有旧数据 |
+
+## 🚀 运行方式
+
+### 完整流程
 ```bash
-# 每天凌晨2点执行
-0 2 * * * cd /opt/apps/pythondata && /opt/apps/pythondata/venv/bin/python -m jobs.purchase_analysis.main >> /opt/apps/pythondata/logs/cron_purchase_analysis.log 2>&1
+python -m jobs.purchase_analysis.main
 ```
 
-## 📝 日志
-
-日志文件位置：`logs/YYYY-MM-DD/purchase_analysis.*.log`
-
+### 单独运行某个任务
 ```bash
-# 查看主程序日志
-tail -f logs/$(date +%Y-%m-%d)/purchase_analysis.main.log
+# FBA库存采集
+python -m jobs.purchase_analysis.fetch_fba_inventory
 
-# 查看店铺映射日志
-tail -f logs/$(date +%Y-%m-%d)/purchase_analysis.shop_mapping.log
+# 本地库存采集
+python -m jobs.purchase_analysis.fetch_inventory_details
+
+# 销量统计采集（默认当月+上个月）
+python -m jobs.purchase_analysis.fetch_sale_stat_v2_msku_monthly
+
+# 销量统计采集（指定日期范围）
+python -m jobs.purchase_analysis.fetch_sale_stat_v2_msku_monthly 2024-01-01 2024-12-31
+
+# 生成库存预估表
+python -m jobs.purchase_analysis.generate_inventory_estimate
+
+# 生成下单分析表
+python -m jobs.purchase_analysis.generate_analysis
+
 ```
 
-## 🐛 常见问题
+## 🔍 数据关系图
 
-### Q: 为什么有些店铺显示的是ID而不是名称？
-
-**A**: 可能是因为该店铺ID不在固定映射中，且API未返回该店铺信息。请在 `shop_mapping.py` 的 `FIXED_SHOP_MAPPINGS` 中添加映射。
-
-### Q: 如何确认RR开头的店铺是否都统一为RR-EU了？
-
-**A**: 查看分析表的输出统计，或运行：
-```bash
-python -m jobs.purchase_analysis.shop_mapping
+```
+领星API
+  ├── FBA库存明细 ──┐
+  ├── 仓库库存明细 ──┤
+  ├── 销量统计 ──────┼──→ 库存预估表（SKU+店铺维度）
+  ├── 采购单 ────────┤
+  └── 店铺映射 ──────┘
+                          ↓
+                    下单分析表（SKU+店铺+日期维度）
+                          ↑
+飞书API ──→ 运营下单表 ───┘
 ```
 
-### Q: 店铺映射加载失败怎么办？
+## 📝 注意事项
 
-**A**: 系统会自动降级使用固定映射，不影响程序运行。检查网络和API配置。
+1. **API限流**: 系统已实现令牌桶感知和动态调整，但仍需注意请求频率
+2. **数据一致性**: 全量更新的表在更新期间可能有短暂的数据不一致
+3. **店铺映射**: 如果API获取失败，会使用固定映射继续运行
+4. **预估总量过滤**: 本地库存明细中预估总量为0的记录不会写入数据库
+5. **时间维度**: 销量统计按月维度，统计日期为每月1号
+6. **增量更新**: 销量统计和采购单采用增量更新，保留历史数据
 
----
+## 🎯 系统优势
 
-**最后更新**: 2025-12-22
+1. **自动化**: 全流程自动化，减少人工干预
+2. **容错性**: 完善的错误处理和重试机制
+3. **灵活性**: 支持增量更新和全量更新，适应不同场景
+4. **可扩展**: 模块化设计，易于添加新功能
+5. **数据完整性**: 多重验证确保数据准确性
 

@@ -6,7 +6,7 @@
 """
 from typing import Dict
 from common import get_logger
-from lingxing import OpenApiBase
+from lingxing import OpenApiBase, LingxingTokenProvider
 
 logger = get_logger('purchase_analysis.shop_mapping')
 
@@ -205,9 +205,9 @@ async def get_shop_mapping() -> Dict[str, str]:
             proxy_url=settings.LINGXING_PROXY_URL
         )
         
-        # 获取访问令牌
-        token_dto = await op_api.generate_access_token()
-        token = token_dto.access_token
+        # 获取访问令牌（带缓存/续期能力）
+        token_provider = LingxingTokenProvider(op_api=op_api, refresh_margin_seconds=60, logger=logger)
+        token = await token_provider.get_token()
         
         api_mappings = await fetch_shops_from_api(op_api, token)
         

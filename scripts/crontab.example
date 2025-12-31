@@ -30,10 +30,13 @@
 0 4 * * * cd /opt/apps/pythondata && /opt/apps/pythondata/venv/bin/python -m jobs.analysis_table >> /opt/apps/pythondata/logs/cron_analysis.log 2>&1
 
 # ============================================
-# 方案二：使用统一脚本执行所有任务
+# 方案二：使用统一脚本执行所有任务（推荐）
 # ============================================
 
-# 每天凌晨 2:00 执行所有数据采集任务
+# 每天晚上 22:30 执行所有数据采集任务（采购下单分析项目）
+30 22 * * * /opt/apps/pythondata/scripts/run_jobs.sh >> /opt/apps/pythondata/logs/cron_all.log 2>&1
+
+# 如果需要每天凌晨 2:00 执行，使用以下配置：
 # 0 2 * * * /opt/apps/pythondata/scripts/run_jobs.sh >> /opt/apps/pythondata/logs/cron_all.log 2>&1
 
 # ============================================
@@ -86,6 +89,9 @@
 
 # 每 30 分钟执行一次：
 # */30 * * * * command
+
+# 每天晚上 22:30 执行：
+# 30 22 * * * command
 
 # ============================================
 # 注意事项

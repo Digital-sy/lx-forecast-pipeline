@@ -20,6 +20,9 @@ class HttpBase(object):
                       headers: Optional[dict] = None,
                       **kwargs) -> ResponseResult:
         timeout = kwargs.pop('timeout', self.default_timeout)
+        # aiohttp 的 timeout 推荐使用 ClientTimeout；直接传 int 在不同版本下可能不生效，导致请求“卡死”
+        if isinstance(timeout, (int, float)):
+            timeout = aiohttp.ClientTimeout(total=float(timeout))
         
         # 处理请求数据
         request_data = None
@@ -35,9 +38,9 @@ class HttpBase(object):
         if self.proxy_url:
             request_kwargs['proxy'] = self.proxy_url
         
-        async with aiohttp.ClientSession() as aio_session:
+        async with aiohttp.ClientSession(timeout=timeout) as aio_session:
             async with aio_session.request(method=method, url=req_url, params=params, data=request_data,
-                                           timeout=timeout, headers=headers, **request_kwargs, **kwargs) as resp:
+                                           headers=headers, **request_kwargs, **kwargs) as resp:
                 if resp.status != 200:
                     raise ValueError(f"Response error, status code: {resp.status}, body: {await resp.text()}")
                 resp_json = await resp.json()
