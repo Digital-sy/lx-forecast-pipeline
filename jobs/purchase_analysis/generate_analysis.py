@@ -227,6 +227,11 @@ def get_operation_order_data(start_date: str) -> Dict:
         orderer = row['下单人'] or ''
         department = row['所属部门'] or ''
         
+        # 处理时间字段：如果 order_time 为 None，跳过这条记录
+        if order_time is None:
+            skipped_count += 1
+            continue
+        
         # 提取月份（仅用于存储）
         month = parse_month(str(order_time))
         if not month:
@@ -234,7 +239,16 @@ def get_operation_order_data(start_date: str) -> Dict:
             continue
         
         # 转换日期为字符串格式
-        date_str = str(date) if date else str(order_time)[:10]
+        # 优先使用 DATE() 函数提取的日期，如果没有则从 order_time 中提取
+        if date:
+            date_str = str(date)
+        elif order_time:
+            # 如果 order_time 是 datetime 对象，转换为字符串后取前10位
+            # 如果已经是字符串，直接取前10位
+            date_str = str(order_time)[:10]
+        else:
+            skipped_count += 1
+            continue
         
         key = (sku, shop, date_str)
         operation_dict[key]['预计下单数量'] += int(quantity)

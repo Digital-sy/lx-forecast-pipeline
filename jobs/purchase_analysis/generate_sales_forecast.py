@@ -265,8 +265,18 @@ def determine_unified_forecast_method(sku_sales_dict: Dict[str, int],
                                      sku: str, shop: str,
                                      target_months: List[str]) -> Dict[str, Any]:
     """
-    为同一SKU+店铺的所有月份确定统一的预估方法和参数
+    为同一SPU+店铺的所有月份确定统一的预估方法和参数
     确保所有月份使用相同的计算方法，保证趋势一致
+    
+    修正逻辑（重要）：
+    1. 不包含本月（因为本月数据不完整，不能用于计算趋势因子）
+    2. 使用前N个月（例如现在是6月，用3、4、5月）vs 去年同期的3、4、5月计算趋势因子
+    3. 将该趋势因子应用到去年本月及未来三月的销量
+    例如：现在是6月，用去年3、4、5月 vs 今年3、4、5月计算趋势因子，然后应用到去年6、7、8、9月
+    预估6月 = 去年6月销量 × 趋势因子
+    预估7月 = 去年7月销量 × 趋势因子
+    预估8月 = 去年8月销量 × 趋势因子
+    预估9月 = 去年9月销量 × 趋势因子
     
     Args:
         sku_sales_dict: 该SKU+店铺的销量字典 {月份: 销量}
@@ -284,142 +294,61 @@ def determine_unified_forecast_method(sku_sales_dict: Dict[str, int],
     current_month_str = now.strftime('%Y-%m')
     current_year_actual, current_month_actual = map(int, current_month_str.split('-'))
     
-    # 策略1：优先使用趋势因子法（同期数据）- 这是最准确的方法
-    # 尝试使用3个月、2个月、1个月的同期数据
-    for months_count in range(3, 0, -1):
-        # 检查第一个目标月份（通常是当前月）
-        if not target_months:
-            break
-        
-        first_target_month = target_months[0]
-        try:
-            target_year, target_month_num = map(int, first_target_month.split('-'))
-        except:
-            continue
-        
-        last_year = target_year - 1
-        last_year_same_month = f"{last_year}-{target_month_num:02d}"
-        last_year_same_month_sales = sku_sales_dict.get(last_year_same_month, 0)
-        
-        # 检查今年同期月份是否已过去
-        current_year_same_month = f"{current_year_actual}-{target_month_num:02d}"
-        if current_year_same_month > current_month_str:
-            continue  # 今年同期月份还没到，无法使用同期数据
-        
-        # 获取今年已过去的同期月份
-        same_period_months = []
-        for i in range(months_count):
-            month_num = target_month_num + i
-            year = current_year_actual
-            if month_num > 12:
-                month_num -= 12
-                year += 1
-            month_str = f"{year}-{month_num:02d}"
-            if month_str <= current_month_str:
-                same_period_months.append((year, month_num))
-        
-        if len(same_period_months) < months_count:
-            continue  # 数据不够，尝试更少的月份
-        
-        # 获取今年同期月份的销量
-        current_year_sales = []
-        for year, month_num in same_period_months:
-            month_str = f"{year}-{month_num:02d}"
-            if month_str in sku_sales_dict:
-                current_year_sales.append(sku_sales_dict[month_str])
-        
-        # 获取去年前一年同期月份的销量
-        last_year_sales = []
-        for year, month_num in same_period_months:
-            year -= 1
-            month_str = f"{year}-{month_num:02d}"
-            if month_str in sku_sales_dict:
-                last_year_sales.append(sku_sales_dict[month_str])
-        
-        # 如果去年同月销量>0，且今年和去年前一年同期都有足够数据
-        if last_year_same_month_sales > 0:
-            if len(current_year_sales) == months_count and len(last_year_sales) == months_count:
-                current_avg = sum(current_year_sales) / len(current_year_sales)
-                last_avg = sum(last_year_sales) / len(last_year_sales)
-                
-                if last_avg > 0:
-                    trend_factor = current_avg / last_avg
-                    return {
-                        'method_type': 'trend_factor_same_period',
-                        'method_name': f'趋势因子法(同期{months_count}个月)',
-                        'trend_factor': round(trend_factor, 4),
-                        'months_count': months_count,
-                        'same_period_months': same_period_months
-                    }
-        
-        # 如果去年同月销量=0，但今年同期月份有销量
-        elif len(current_year_sales) >= months_count and sum(current_year_sales) > 0:
-            avg_sales = sum(current_year_sales) / len(current_year_sales)
-            return {
-                'method_type': 'current_year_avg',
-                'method_name': f'今年同期平均(同期{len(current_year_sales)}个月)',
-                'trend_factor': 0.0,
-                'avg_sales': int(avg_sales),
-                'months_count': len(current_year_sales)
-            }
-    
-    # 策略2：如果同期数据不够，使用前几个月的数据
-    for months_count in range(3, 0, -1):
-        if not target_months:
-            break
-        
-        first_target_month = target_months[0]
-        try:
-            target_year, target_month_num = map(int, first_target_month.split('-'))
-        except:
-            continue
-        
-        last_year = target_year - 1
-        last_year_same_month = f"{last_year}-{target_month_num:02d}"
-        last_year_same_month_sales = sku_sales_dict.get(last_year_same_month, 0)
-        
-        if last_year_same_month_sales <= 0:
-            continue
-        
-        # 获取前N个月的月份
+    # 策略1：使用前N个月（不包含本月）计算趋势因子
+    # 逻辑：根据今年的销量情况（前N个月）结合去年的趋势线（去年同月销量）去预估
+    # 例如：现在是6月，使用3、4、5月 vs 去年3、4、5月计算趋势因子
+    # 然后应用到去年6、7、8、9月的销量，既考虑了今年的增长趋势，又保持了去年的季节性趋势
+    for months_count in range(3, 0, -1):  # 优先尝试3个月，然后2个月，最后1个月
+        # 获取前N个月（不包含本月）
+        # 例如：现在是6月，months_count=3，获取3、4、5月（不包含6月）
         prev_months = []
-        for i in range(months_count, 0, -1):
-            month_num = target_month_num - i
-            year = target_year
+        for i in range(months_count, 0, -1):  # 从N个月前到1个月前
+            month_num = current_month_actual - i
+            year = current_year_actual
             if month_num <= 0:
                 month_num += 12
                 year -= 1
-            prev_months.append((year, month_num))
+            month_str = f"{year}-{month_num:02d}"
+            # 确保是已过去的月份（不包含本月，因为本月数据不完整）
+            if month_str < current_month_str:
+                prev_months.append((year, month_num))
         
-        # 获取今年前N个月的销量
+        if len(prev_months) < months_count:
+            continue  # 数据不够，尝试更少的月份
+        
+        # 获取今年前N个月的销量（今年的销量情况）
         current_year_sales = []
         for year, month_num in prev_months:
             month_str = f"{year}-{month_num:02d}"
             if month_str in sku_sales_dict:
                 current_year_sales.append(sku_sales_dict[month_str])
         
-        # 获取去年前N个月的销量
+        # 获取去年同期的N个月销量（去年的趋势线）
         last_year_sales = []
         for year, month_num in prev_months:
-            year -= 1
+            year -= 1  # 去年
             month_str = f"{year}-{month_num:02d}"
             if month_str in sku_sales_dict:
                 last_year_sales.append(sku_sales_dict[month_str])
         
+        # 如果今年和去年都有足够数据
         if len(current_year_sales) == months_count and len(last_year_sales) == months_count:
+            # 计算趋势因子：今年平均 / 去年平均（反映今年的增长趋势）
             current_avg = sum(current_year_sales) / len(current_year_sales)
             last_avg = sum(last_year_sales) / len(last_year_sales)
             
             if last_avg > 0:
                 trend_factor = current_avg / last_avg
+                # 这个趋势因子会应用到去年同月销量，既考虑了今年的增长趋势，又保持了去年的季节性趋势
                 return {
                     'method_type': 'trend_factor_prev_months',
                     'method_name': f'趋势因子法(前{months_count}个月)',
                     'trend_factor': round(trend_factor, 4),
-                    'months_count': months_count
+                    'months_count': months_count,
+                    'prev_months': prev_months
                 }
     
-    # 策略3：趋势走向法（作为备选）
+    # 策略2：如果前几个月数据不够，尝试使用更早的数据（作为备选）
     if not target_months:
         return {'method_type': 'no_data', 'method_name': '无数据', 'trend_factor': 0.0}
     
@@ -429,15 +358,20 @@ def determine_unified_forecast_method(sku_sales_dict: Dict[str, int],
     except:
         return {'method_type': 'no_data', 'method_name': '无数据', 'trend_factor': 0.0}
     
+    last_year = target_year - 1
+    last_year_same_month = f"{last_year}-{target_month_num:02d}"
+    last_year_same_month_sales = sku_sales_dict.get(last_year_same_month, 0)
+    
+    # 策略3：趋势走向法（作为备选）
     recent_sales_data = []
-    for i in range(1, 4):
-        month_num = target_month_num - i
-        year = target_year
+    for i in range(1, 4):  # 1个月前、2个月前、3个月前（不包含本月）
+        month_num = current_month_actual - i
+        year = current_year_actual
         if month_num <= 0:
             month_num += 12
             year -= 1
         month_str = f"{year}-{month_num:02d}"
-        if month_str in sku_sales_dict:
+        if month_str in sku_sales_dict and month_str < current_month_str:
             recent_sales_data.append((i, sku_sales_dict[month_str]))
     
     if len(recent_sales_data) >= 2:
@@ -468,8 +402,8 @@ def determine_unified_forecast_method(sku_sales_dict: Dict[str, int],
         }
     
     # 策略4：上个月数据
-    last_month_num = target_month_num - 1
-    last_month_year = target_year
+    last_month_num = current_month_actual - 1
+    last_month_year = current_year_actual
     if last_month_num <= 0:
         last_month_num += 12
         last_month_year -= 1
@@ -493,6 +427,10 @@ def calculate_forecast_sales_with_unified_method(sku_sales_dict: Dict[str, int],
                                                  unified_method: Dict[str, Any]) -> Tuple[int, str, float]:
     """
     使用统一的预估方法计算指定月份的预估销量
+    
+    修正逻辑：
+    对于每个目标月份，使用：去年同月销量 × 趋势因子
+    例如：预估6月 = 去年6月销量 × 趋势因子（基于前几个月计算）
     
     Args:
         sku_sales_dict: 该SKU+店铺的销量字典 {月份: 销量}
@@ -518,29 +456,36 @@ def calculate_forecast_sales_with_unified_method(sku_sales_dict: Dict[str, int],
     last_year_same_month = f"{last_year}-{target_month_num:02d}"
     last_year_same_month_sales = sku_sales_dict.get(last_year_same_month, 0)
     
-    if method_type == 'trend_factor_same_period':
-        # 趋势因子法（同期数据）
+    if method_type == 'trend_factor_prev_months':
+        # 趋势因子法（前几个月数据）- 修正后的方法
+        # 逻辑：根据今年的销量情况（前N个月，不包含本月）结合去年的趋势线（去年同月销量）去预估
+        # 1. 计算趋势因子：今年前N个月平均 / 去年同期前N个月平均（反映今年vs去年的增长趋势）
+        # 2. 应用趋势因子：去年同月销量 × 趋势因子（保持去年的季节性趋势，同时应用增长趋势）
+        # 例如：现在是6月，用今年3、4、5月 vs 去年3、4、5月计算趋势因子1.2
+        #       然后：预估6月 = 去年6月(150) × 1.2 = 180
+        #             预估7月 = 去年7月(180) × 1.2 = 216
+        #             预估8月 = 去年8月(200) × 1.2 = 240
+        #             预估9月 = 去年9月(220) × 1.2 = 264
+        # 这样既考虑了今年的增长趋势，也保持了去年的季节性模式
+        trend_factor = unified_method.get('trend_factor', 1.0)
+        if last_year_same_month_sales > 0:
+            # 预估 = 去年同月销量 × 趋势因子
+            # 这样既应用了今年的增长趋势，又保持了去年的季节性趋势
+            forecast = int(last_year_same_month_sales * trend_factor)
+            return forecast, unified_method.get('method_name', '趋势因子法'), trend_factor
+        else:
+            # 如果去年同月销量为0，返回0（没有历史数据，无法预估）
+            return 0, unified_method.get('method_name', '趋势因子法'), trend_factor
+    
+    elif method_type == 'trend_factor_same_period':
+        # 趋势因子法（同期数据）- 保留作为备选
         trend_factor = unified_method.get('trend_factor', 1.0)
         if last_year_same_month_sales > 0:
             forecast = int(last_year_same_month_sales * trend_factor)
             return forecast, unified_method.get('method_name', '趋势因子法'), trend_factor
         else:
-            # 如果去年同月销量为0，尝试使用今年同期月份的数据
-            now = datetime.now()
-            current_month_str = now.strftime('%Y-%m')
-            current_year_actual, _ = map(int, current_month_str.split('-'))
-            current_year_same_month = f"{current_year_actual}-{target_month_num:02d}"
-            if current_year_same_month <= current_month_str:
-                current_sales = sku_sales_dict.get(current_year_same_month, 0)
-                if current_sales > 0:
-                    return current_sales, unified_method.get('method_name', '趋势因子法'), trend_factor
-    
-    elif method_type == 'trend_factor_prev_months':
-        # 趋势因子法（前几个月数据）
-        trend_factor = unified_method.get('trend_factor', 1.0)
-        if last_year_same_month_sales > 0:
-            forecast = int(last_year_same_month_sales * trend_factor)
-            return forecast, unified_method.get('method_name', '趋势因子法'), trend_factor
+            # 如果去年同月销量为0，返回0
+            return 0, unified_method.get('method_name', '趋势因子法'), trend_factor
     
     elif method_type == 'current_year_avg':
         # 今年同期平均
@@ -584,7 +529,10 @@ def calculate_forecast_sales_with_unified_method(sku_sales_dict: Dict[str, int],
 def calculate_forecast_sales(sku_sales_dict: Dict[str, int],
                             sku: str, shop: str, target_month: str) -> Tuple[int, str, float]:
     """
-    计算预估销量、预估方式和趋势因子
+    计算预估销量、预估方式和趋势因子（旧方法，保留作为备选）
+    
+    注意：此函数已被 determine_unified_forecast_method + calculate_forecast_sales_with_unified_method 替代
+    新的逻辑使用前N个月（不包含本月）计算趋势因子，然后应用到去年同月销量
     
     优先级：
     1. 趋势因子法：计算今年和去年前三个月的趋势参数，用去年同月销量×趋势因子
