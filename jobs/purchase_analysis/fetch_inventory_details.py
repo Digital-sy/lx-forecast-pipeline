@@ -190,10 +190,6 @@ async def fetch_warehouse_list(op_api: OpenApiBase, token_resp) -> Dict[str, str
                 elif isinstance(is_delete, (int, float)):
                     is_deleted = int(is_delete) != 0
                 
-                # 调试：打印前几个仓库的信息
-                if len(wid_to_name_map) + skipped_count < 5:
-                    logger.info(f"仓库信息: wid={wid}, name={name}, is_delete={is_delete} (parsed={is_deleted})")
-                
                 # 只保留未删除的仓库
                 if wid and not is_deleted:
                     wid_to_name_map[str(wid)] = name or f'仓库{wid}'
@@ -221,6 +217,11 @@ async def fetch_warehouse_list(op_api: OpenApiBase, token_resp) -> Dict[str, str
             break
     
     logger.info(f"✅ 共获取 {len(wid_to_name_map)} 个仓库映射")
+    # 打印所有仓库映射
+    if wid_to_name_map:
+        logger.info("仓库映射列表：")
+        for wid, name in sorted(wid_to_name_map.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 0):
+            logger.info(f"    wid={wid} → {name}")
     return wid_to_name_map
 
 
@@ -339,7 +340,7 @@ def convert_inventory_data(items: List[Dict[str, Any]],
                            wid_to_name_map: Dict[str, str] = None,
                            sid_to_name_map: Dict[str, str] = None) -> List[Dict[str, Any]]:
     """
-    转换库存明细数据（简化版）
+    转换库存明细数据
     过滤掉预估总量为0的记录
     
     Args:
@@ -365,15 +366,33 @@ def convert_inventory_data(items: List[Dict[str, Any]],
         else:
             shop_name = '无'
         
-        # 仓库ID转仓库名
+        # 仓库ID转仓库名（有映射就用，没有给兜底）
         wid = item.get('wid', 0)
         if wid and wid_to_name_map:
-            warehouse_name = wid_to_name_map.get(str(wid), '无')
+            warehouse_name = wid_to_name_map.get(str(wid), '未知仓库')
         else:
-            warehouse_name = '无'
+            warehouse_name = '未知仓库'
         
-        # 可用量
+        # 基础字段
+        fnsku = item.get('fnsku', '') or ''
+        
+        # 库存数量相关字段
+        product_total = item.get('product_total', 0) or 0
         product_valid_num = item.get('product_valid_num', 0) or 0
+        product_qc_num = item.get('product_qc_num', 0) or 0
+        
+        # 成本相关字段（字符串转数字）
+        stock_cost_total = item.get('stock_cost_total', '0') or '0'
+        try:
+            stock_cost_total_float = float(stock_cost_total)
+        except:
+            stock_cost_total_float = 0.0
+        
+        stock_cost = item.get('stock_cost', '0') or '0'
+        try:
+            stock_cost_float = float(stock_cost)
+        except:
+            stock_cost_float = 0.0
         
         # 待到货量
         quantity_receive = item.get('quantity_receive', '0') or '0'
@@ -381,6 +400,50 @@ def convert_inventory_data(items: List[Dict[str, Any]],
             quantity_receive_int = int(float(quantity_receive))
         except:
             quantity_receive_int = 0
+        
+        # 调拨在途相关
+        product_onway = item.get('product_onway', 0) or 0
+        transit_head_cost = item.get('transit_head_cost', '0') or '0'
+        try:
+            transit_head_cost_float = float(transit_head_cost)
+        except:
+            transit_head_cost_float = 0.0
+        
+        # 平均库龄
+        average_age = item.get('average_age', 0) or 0
+        
+        # 库龄信息（展开为多个独立字段）
+        stock_age_list = item.get('stock_age_list', []) or []
+        
+        # 初始化库龄字段
+        age_0_15 = 0
+        age_16_30 = 0
+        age_31_60 = 0
+        age_61_90 = 0
+        age_91_120 = 0
+        age_121_180 = 0
+        age_181_360 = 0
+        age_361_plus = 0
+        
+        # 从库龄列表中提取数据（按索引匹配，与JavaScript代码一致）
+        if isinstance(stock_age_list, list) and len(stock_age_list) > 0:
+            # 按索引访问，对应 ageList[0]?.qty || 0 的逻辑
+            if len(stock_age_list) > 0 and isinstance(stock_age_list[0], dict):
+                age_0_15 = stock_age_list[0].get('qty', 0) or 0
+            if len(stock_age_list) > 1 and isinstance(stock_age_list[1], dict):
+                age_16_30 = stock_age_list[1].get('qty', 0) or 0
+            if len(stock_age_list) > 2 and isinstance(stock_age_list[2], dict):
+                age_31_60 = stock_age_list[2].get('qty', 0) or 0
+            if len(stock_age_list) > 3 and isinstance(stock_age_list[3], dict):
+                age_61_90 = stock_age_list[3].get('qty', 0) or 0
+            if len(stock_age_list) > 4 and isinstance(stock_age_list[4], dict):
+                age_91_120 = stock_age_list[4].get('qty', 0) or 0
+            if len(stock_age_list) > 5 and isinstance(stock_age_list[5], dict):
+                age_121_180 = stock_age_list[5].get('qty', 0) or 0
+            if len(stock_age_list) > 6 and isinstance(stock_age_list[6], dict):
+                age_181_360 = stock_age_list[6].get('qty', 0) or 0
+            if len(stock_age_list) > 7 and isinstance(stock_age_list[7], dict):
+                age_361_plus = stock_age_list[7].get('qty', 0) or 0
         
         # 预估总量 = 可用量 + 待到货量
         estimated_total = product_valid_num + quantity_receive_int
@@ -395,9 +458,24 @@ def convert_inventory_data(items: List[Dict[str, Any]],
             'SKU': sku,
             '店铺': shop_name,
             '仓库': warehouse_name,
+            'FNSKU': fnsku,
+            '实际库存总量': product_total,
             '可用量': product_valid_num,
             '待到货量': quantity_receive_int,
-            '预估总量': estimated_total,
+            '在途数量': product_onway,
+            '待检待上架量': product_qc_num,
+            '调拨在途头程成本': transit_head_cost_float,
+            '每件库存成本': stock_cost_float,
+            '总库存成本': stock_cost_total_float,
+            '平均库龄': average_age,
+            '0-15天库龄': age_0_15,
+            '16-30天库龄': age_16_30,
+            '31-60天库龄': age_31_60,
+            '61-90天库龄': age_61_90,
+            '91-120天库龄': age_91_120,
+            '121-180天库龄': age_121_180,
+            '181-360天库龄': age_181_360,
+            '361天以上库龄': age_361_plus,
         }
         
         inventory_list.append(inventory_record)
@@ -442,7 +520,11 @@ def create_table_if_needed(table_name: str, sample_row: Dict[str, Any]) -> None:
             elif isinstance(v, float):
                 fields.append(f"`{k}` DOUBLE")
             else:
-                fields.append(f"`{k}` VARCHAR(500)")
+                # 对于可能包含JSON的字段（如库龄信息），使用TEXT类型
+                if '信息' in k or 'JSON' in k.upper():
+                    fields.append(f"`{k}` TEXT")
+                else:
+                    fields.append(f"`{k}` VARCHAR(500)")
         
         fields_sql = ", ".join(fields)
         sql = f"CREATE TABLE `{table_name}` (id INT AUTO_INCREMENT PRIMARY KEY, {fields_sql})"
@@ -595,12 +677,12 @@ async def main():
                 cursor.execute(f"SELECT COUNT(*) as total FROM `{table_name}`")
                 total_in_db = cursor.fetchone()['total']
                 
-                # 统计总可用量和预估总量
+                # 统计总可用量和预估总量（预估总量 = 可用量 + 待到货量）
                 cursor.execute(f"""
                     SELECT 
                         SUM(`可用量`) as total_available,
                         SUM(`待到货量`) as total_pending,
-                        SUM(`预估总量`) as total_estimated
+                        SUM(`可用量` + `待到货量`) as total_estimated
                     FROM `{table_name}`
                 """)
                 inventory_stats = cursor.fetchone()
@@ -615,7 +697,7 @@ async def main():
                         COUNT(*) as count, 
                         SUM(`可用量`) as total_available,
                         SUM(`待到货量`) as total_pending,
-                        SUM(`预估总量`) as total_estimated
+                        SUM(`可用量` + `待到货量`) as total_estimated
                     FROM `{table_name}`
                     GROUP BY `仓库`
                     ORDER BY count DESC
@@ -625,7 +707,7 @@ async def main():
                 logger.info(f"  数据库总记录: {total_in_db} 条")
                 logger.info(f"  总可用量: {total_available}")
                 logger.info(f"  总待到货量: {total_pending}")
-                logger.info(f"  总预估总量: {total_estimated}")
+                logger.info(f"  总预估总量: {total_estimated} (可用量+待到货量)")
                 logger.info("  各仓库统计：")
                 for warehouse in warehouse_stats:
                     logger.info(f"    {warehouse['仓库']}: {warehouse['count']} 条记录, "

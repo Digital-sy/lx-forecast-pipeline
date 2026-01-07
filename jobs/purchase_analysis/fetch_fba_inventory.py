@@ -287,8 +287,38 @@ def convert_fba_data(items: List[Dict[str, Any]],
         # 品名
         product_name = item.get('product_name', '') or '无'
         
+        # 预览图链接
+        small_image_url = item.get('small_image_url', '') or '无'
+        
         # FNSKU
         fnsku = item.get('fnsku', '') or '无'
+        
+        # 分类文本
+        category_text = item.get('category_text', '') or '无'
+        
+        # 分类Id
+        cid = item.get('cid', 0)
+        try:
+            cid = int(cid)
+        except:
+            cid = 0
+        
+        # 品牌文本
+        product_brand_text = item.get('product_brand_text', '') or '无'
+        
+        # 品牌Id
+        bid = item.get('bid', 0)
+        try:
+            bid = int(bid)
+        except:
+            bid = 0
+        
+        # 共享类型
+        share_type = item.get('share_type', 0)
+        try:
+            share_type = int(share_type)
+        except:
+            share_type = 0
         
         # 总数
         total = item.get('total', 0)
@@ -297,12 +327,22 @@ def convert_fba_data(items: List[Dict[str, Any]],
         except:
             total = 0
         
+        # 总价
+        total_price = item.get('total_price', 0.0)
+        try:
+            total_price = float(total_price)
+        except:
+            total_price = 0.0
+        
         # FBA可售
         afn_fulfillable_quantity = item.get('afn_fulfillable_quantity', 0)
         try:
             afn_fulfillable_quantity = int(afn_fulfillable_quantity)
         except:
             afn_fulfillable_quantity = 0
+        
+        # FBA可售成本价
+        afn_fulfillable_quantity_price = item.get('afn_fulfillable_quantity_price', '') or '0'
         
         # 可用总数
         available_total = item.get('available_total', 0)
@@ -311,12 +351,18 @@ def convert_fba_data(items: List[Dict[str, Any]],
         except:
             available_total = 0
         
+        # 可用总数成本价
+        available_total_price = item.get('available_total_price', '') or '0'
+        
         # 待调仓
         reserved_fc_transfers = item.get('reserved_fc_transfers', 0)
         try:
             reserved_fc_transfers = int(reserved_fc_transfers)
         except:
             reserved_fc_transfers = 0
+        
+        # 待调仓成本价
+        reserved_fc_transfers_price = item.get('reserved_fc_transfers_price', '') or '0'
         
         # 调仓中
         reserved_fc_processing = item.get('reserved_fc_processing', 0)
@@ -325,12 +371,28 @@ def convert_fba_data(items: List[Dict[str, Any]],
         except:
             reserved_fc_processing = 0
         
+        # 调仓中成本价
+        reserved_fc_processing_price = item.get('reserved_fc_processing_price', '') or '0'
+        
         # 待发货
         reserved_customerorders = item.get('reserved_customerorders', 0)
         try:
             reserved_customerorders = int(reserved_customerorders)
         except:
             reserved_customerorders = 0
+        
+        # 待发货成本价
+        reserved_customerorders_price = item.get('reserved_customerorders_price', '') or '0'
+        
+        # FBM可售
+        quantity = item.get('quantity', 0)
+        try:
+            quantity = int(quantity)
+        except:
+            quantity = 0
+        
+        # FBM可售成本价
+        quantity_price = item.get('quantity_price', '') or '0'
         
         # 不可售
         afn_unsellable_quantity = item.get('afn_unsellable_quantity', 0)
@@ -339,12 +401,18 @@ def convert_fba_data(items: List[Dict[str, Any]],
         except:
             afn_unsellable_quantity = 0
         
+        # 不可售成本价
+        afn_unsellable_quantity_price = item.get('afn_unsellable_quantity_price', '') or '0'
+        
         # 计划入库
         afn_inbound_working_quantity = item.get('afn_inbound_working_quantity', 0)
         try:
             afn_inbound_working_quantity = int(afn_inbound_working_quantity)
         except:
             afn_inbound_working_quantity = 0
+        
+        # 计划入库成本价
+        afn_inbound_working_quantity_price = item.get('afn_inbound_working_quantity_price', '') or '0'
         
         # 在途
         afn_inbound_shipped_quantity = item.get('afn_inbound_shipped_quantity', 0)
@@ -353,6 +421,9 @@ def convert_fba_data(items: List[Dict[str, Any]],
         except:
             afn_inbound_shipped_quantity = 0
         
+        # 在途成本价
+        afn_inbound_shipped_quantity_price = item.get('afn_inbound_shipped_quantity_price', '') or '0'
+        
         # 入库中
         afn_inbound_receiving_quantity = item.get('afn_inbound_receiving_quantity', 0)
         try:
@@ -360,12 +431,28 @@ def convert_fba_data(items: List[Dict[str, Any]],
         except:
             afn_inbound_receiving_quantity = 0
         
+        # 入库中成本价
+        afn_inbound_receiving_quantity_price = item.get('afn_inbound_receiving_quantity_price', '') or '0'
+        
         # 实际在途
         stock_up_num = item.get('stock_up_num', 0)
         try:
             stock_up_num = int(stock_up_num)
         except:
             stock_up_num = 0
+        
+        # 实际在途成本价
+        stock_up_num_price = item.get('stock_up_num_price', '') or '0'
+        
+        # 调查中数量
+        afn_researching_quantity = item.get('afn_researching_quantity', 0)
+        try:
+            afn_researching_quantity = int(afn_researching_quantity)
+        except:
+            afn_researching_quantity = 0
+        
+        # 调查中数量成本价
+        afn_researching_quantity_price = item.get('afn_researching_quantity_price', '') or '0'
         
         # 总可用库存
         total_fulfillable_quantity = item.get('total_fulfillable_quantity', 0)
@@ -427,6 +514,65 @@ def convert_fba_data(items: List[Dict[str, Any]],
         except:
             inv_age_365_plus = 0
         
+        # 库龄相关的价格字段
+        inv_age_0_to_30_price = item.get('inv_age_0_to_30_price', '') or '0'
+        inv_age_31_to_60_price = item.get('inv_age_31_to_60_price', '') or '0'
+        inv_age_61_to_90_price = item.get('inv_age_61_to_90_price', '') or '0'
+        inv_age_0_to_90_price = item.get('inv_age_0_to_90_price', '') or '0'
+        inv_age_91_to_180_price = item.get('inv_age_91_to_180_price', '') or '0'
+        inv_age_181_to_270_price = item.get('inv_age_181_to_270_price', '') or '0'
+        inv_age_271_to_330_price = item.get('inv_age_271_to_330_price', '') or '0'
+        inv_age_271_to_365_price = item.get('inv_age_271_to_365_price', '') or '0'
+        inv_age_331_to_365_price = item.get('inv_age_331_to_365_price', '') or '0'
+        inv_age_365_plus_price = item.get('inv_age_365_plus_price', '') or '0'
+        
+        # 推荐操作
+        recommended_action = item.get('recommended_action', '') or '无'
+        
+        # 售出率
+        sell_through = item.get('sell_through', 0.0)
+        try:
+            sell_through = float(sell_through)
+        except:
+            sell_through = 0.0
+        
+        # 预计冗余数量
+        estimated_excess_quantity = item.get('estimated_excess_quantity', 0.0)
+        try:
+            estimated_excess_quantity = float(estimated_excess_quantity)
+        except:
+            estimated_excess_quantity = 0.0
+        
+        # 预计30天仓储费用
+        estimated_storage_cost_next_month = item.get('estimated_storage_cost_next_month', 0.0)
+        try:
+            estimated_storage_cost_next_month = float(estimated_storage_cost_next_month)
+        except:
+            estimated_storage_cost_next_month = 0.0
+        
+        # 最低库存水平
+        fba_minimum_inventory_level = item.get('fba_minimum_inventory_level', 0.0)
+        try:
+            fba_minimum_inventory_level = float(fba_minimum_inventory_level)
+        except:
+            fba_minimum_inventory_level = 0.0
+        
+        # 库存水平健康度
+        fba_inventory_level_health_status = item.get('fba_inventory_level_health_status', '') or '无'
+        
+        # 历史供货天数
+        historical_days_of_supply = item.get('historical_days_of_supply', 0.0)
+        try:
+            historical_days_of_supply = float(historical_days_of_supply)
+        except:
+            historical_days_of_supply = 0.0
+        
+        # 历史供货天数成本价
+        historical_days_of_supply_price = item.get('historical_days_of_supply_price', '') or '0'
+        
+        # 低库存水平费收取情况
+        low_inventory_level_fee_applied = item.get('low_inventory_level_fee_applied', '') or '无'
+        
         fba_record = {
             'SKU': sku,
             'MSKU': msku,
@@ -434,29 +580,69 @@ def convert_fba_data(items: List[Dict[str, Any]],
             '仓库': warehouse_name,
             'ASIN': asin,
             '品名': product_name,
+            '预览图链接': small_image_url,
             'FNSKU': fnsku,
+            '分类文本': category_text,
+            '分类Id': cid,
+            '品牌文本': product_brand_text,
+            '品牌Id': bid,
+            '共享类型': share_type,
             '总数': total,
+            '总价': total_price,
             'FBA可售': afn_fulfillable_quantity,
+            'FBA可售成本价': afn_fulfillable_quantity_price,
             '可用总数': available_total,
+            '可用总数成本价': available_total_price,
             '待调仓': reserved_fc_transfers,
+            '待调仓成本价': reserved_fc_transfers_price,
             '调仓中': reserved_fc_processing,
+            '调仓中成本价': reserved_fc_processing_price,
             '待发货': reserved_customerorders,
+            '待发货成本价': reserved_customerorders_price,
+            'FBM可售': quantity,
+            'FBM可售成本价': quantity_price,
             '不可售': afn_unsellable_quantity,
+            '不可售成本价': afn_unsellable_quantity_price,
             '计划入库': afn_inbound_working_quantity,
+            '计划入库成本价': afn_inbound_working_quantity_price,
             '在途': afn_inbound_shipped_quantity,
+            '在途成本价': afn_inbound_shipped_quantity_price,
             '入库中': afn_inbound_receiving_quantity,
+            '入库中成本价': afn_inbound_receiving_quantity_price,
             '实际在途': stock_up_num,
+            '实际在途成本价': stock_up_num_price,
+            '调查中数量': afn_researching_quantity,
+            '调查中数量成本价': afn_researching_quantity_price,
             '总可用库存': total_fulfillable_quantity,
             '库龄0-1个月': inv_age_0_to_30,
+            '库龄0-1个月成本价': inv_age_0_to_30_price,
             '库龄1-2个月': inv_age_31_to_60,
+            '库龄1-2个月成本价': inv_age_31_to_60_price,
             '库龄2-3个月': inv_age_61_to_90,
+            '库龄2-3个月成本价': inv_age_61_to_90_price,
             '库龄0-3个月': inv_age_0_to_90,
+            '库龄0-3个月成本价': inv_age_0_to_90_price,
             '库龄3-6个月': inv_age_91_to_180,
+            '库龄3-6个月成本价': inv_age_91_to_180_price,
             '库龄6-9个月': inv_age_181_to_270,
+            '库龄6-9个月成本价': inv_age_181_to_270_price,
             '库龄9-11个月': inv_age_271_to_330,
+            '库龄9-11个月成本价': inv_age_271_to_330_price,
             '库龄9-12个月': inv_age_271_to_365,
+            '库龄9-12个月成本价': inv_age_271_to_365_price,
             '库龄11-12个月': inv_age_331_to_365,
+            '库龄11-12个月成本价': inv_age_331_to_365_price,
             '库龄12个月以上': inv_age_365_plus,
+            '库龄12个月以上成本价': inv_age_365_plus_price,
+            '推荐操作': recommended_action,
+            '售出率': sell_through,
+            '预计冗余数量': estimated_excess_quantity,
+            '预计30天仓储费用': estimated_storage_cost_next_month,
+            '最低库存水平': fba_minimum_inventory_level,
+            '库存水平健康度': fba_inventory_level_health_status,
+            '历史供货天数': historical_days_of_supply,
+            '历史供货天数成本价': historical_days_of_supply_price,
+            '低库存水平费收取情况': low_inventory_level_fee_applied,
         }
         
         fba_list.append(fba_record)
@@ -490,7 +676,7 @@ def create_table_if_needed(table_name: str, sample_row: Dict[str, Any]) -> None:
                 logger.warning(f"表 {table_name} 结构不符，正在重建...")
                 cursor.execute(f"DROP TABLE IF EXISTS `{table_name}`")
         
-        # 创建表
+        # 创建表 - 根据字段类型和名称智能选择数据类型
         fields = []
         for k, v in sample_row.items():
             if isinstance(v, int):
@@ -498,7 +684,20 @@ def create_table_if_needed(table_name: str, sample_row: Dict[str, Any]) -> None:
             elif isinstance(v, float):
                 fields.append(f"`{k}` DOUBLE")
             else:
-                fields.append(f"`{k}` VARCHAR(500)")
+                # 字符串字段：根据字段名称和内容选择合适的类型
+                k_lower = k.lower()
+                # 长文本字段使用TEXT（不占用行大小限制）
+                if any(keyword in k_lower for keyword in ['预览图', '链接', '推荐操作', '健康度', '收取情况']):
+                    fields.append(f"`{k}` TEXT")
+                # 成本价字段通常较短，使用VARCHAR(100)
+                elif '成本价' in k_lower or '价格' in k_lower:
+                    fields.append(f"`{k}` VARCHAR(100)")
+                # SKU、ASIN等标识符字段使用VARCHAR(200)
+                elif any(keyword in k_lower for keyword in ['sku', 'asin', 'fnsku', 'msku', '品名', '店铺', '仓库']):
+                    fields.append(f"`{k}` VARCHAR(200)")
+                # 其他短字符串字段使用VARCHAR(100)
+                else:
+                    fields.append(f"`{k}` VARCHAR(100)")
         
         fields_sql = ", ".join(fields)
         sql = f"CREATE TABLE `{table_name}` (id INT AUTO_INCREMENT PRIMARY KEY, {fields_sql})"
@@ -589,8 +788,8 @@ async def main():
         logger.warning(f"获取店铺映射失败: {e}")
         sid_to_name_map = {}
     
-    # 获取FBA库存数据（全量）
-    logger.info("正在获取FBA库存数据（全量）...")
+    # 获取FBA库存数据（全量更新）
+    logger.info("正在获取FBA库存数据（全量更新）...")
     logger.info(f"⏱️  配置参数（优先保证数据完整性）:")
     logger.info(f"   - 请求间隔: {REQUEST_DELAY}秒（令牌桶容量只有1，需要更长间隔）")
     logger.info(f"   - 最大重试: {MAX_RETRIES}次")
