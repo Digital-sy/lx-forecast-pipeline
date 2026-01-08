@@ -132,7 +132,7 @@ async def fetch_products_by_time_range(op_api: OpenApiBase, token: str,
 async def fetch_all_products(op_api: OpenApiBase, token: str, 
                              time_start: int, time_end: int) -> List[Dict[str, Any]]:
     """
-    获取最近7天内创建或更新的所有产品数据（合并去重）
+    获取最近30天内创建或更新的所有产品数据（合并去重）
     
     Args:
         op_api: OpenAPI客户端
@@ -319,7 +319,7 @@ def insert_data_batch(table_name: str, data_list: List[Dict[str, Any]]) -> None:
 async def main():
     """主函数"""
     logger.info("="*80)
-    logger.info("产品管理数据增量更新（最近7天）")
+    logger.info("产品管理数据增量更新（最近30天）")
     logger.info("="*80)
     
     # 验证配置
@@ -344,9 +344,9 @@ async def main():
         logger.error(f"获取访问令牌失败: {e}")
         return
     
-    # 计算最近7天的日期范围
+    # 计算最近30天的日期范围
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=7)
+    start_date = end_date - timedelta(days=30)
     start_date_str = start_date.strftime("%Y-%m-%d")
     end_date_str = end_date.strftime("%Y-%m-%d")
     
@@ -354,7 +354,7 @@ async def main():
     time_start = int(start_date.timestamp())
     time_end = int(end_date.timestamp())
     
-    logger.info(f"查询时间范围：{start_date_str} 至 {end_date_str}（最近7天）")
+    logger.info(f"查询时间范围：{start_date_str} 至 {end_date_str}（最近30天）")
     logger.info(f"时间戳范围：{time_start} 至 {time_end}")
     logger.info(f"查询策略：同时查询创建时间和更新时间范围内的产品，然后合并去重")
     
@@ -396,7 +396,7 @@ async def main():
         # 输出统计信息
         logger.info("="*80)
         logger.info("统计信息：")
-        logger.info(f"  更新策略: 增量更新（最近7天，基于创建时间或更新时间）")
+        logger.info(f"  更新策略: 增量更新（最近30天，基于创建时间或更新时间）")
         logger.info(f"  数据范围: {start_date_str} 至 {end_date_str}")
         logger.info(f"  删除旧记录: {deleted_count} 条")
         logger.info(f"  新增产品记录: {len(converted_data)} 条")
@@ -412,7 +412,7 @@ async def main():
             logger.info(f"    {status}: {count} 条")
         
         logger.info("="*80)
-        logger.info("增量更新完成！（保留7天前的历史数据）")
+        logger.info("增量更新完成！（保留30天前的历史数据）")
         logger.info("="*80)
         
     except Exception as e:
