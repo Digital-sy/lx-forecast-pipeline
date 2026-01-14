@@ -218,51 +218,71 @@ def get_recent_3_months_labels(current_date: datetime = None) -> List[str]:
     return labels
 
 
-def filter_skus_with_recent_sales(aggregated_data: Dict[str, Dict[str, Dict[str, Any]]], 
-                                  current_date: datetime = None) -> Dict[str, Dict[str, Dict[str, Any]]]:
+def filter_skus_by_spu_sales(aggregated_data: Dict[str, Dict[str, Dict[str, Any]]], 
+                              month_labels: List[str]) -> Dict[str, Dict[str, Dict[str, Any]]]:
     """
-    过滤掉最近3个月（包括本月）都没有销量的SKU
+    按SPU过滤：如果SPU在所有查询月份的总销量为0，则过滤掉该SPU下的所有SKU
+    否则，保留该SPU下的所有SKU（包括销量为0的SKU）
     
     Args:
         aggregated_data: 聚合后的数据
-        current_date: 当前日期，如果为None则使用今天
+        month_labels: 所有查询的月份标签列表
         
     Returns:
         Dict[str, Dict[str, Dict[str, Any]]]: 过滤后的数据
     """
-    if current_date is None:
-        current_date = datetime.now()
-    
-    # 获取最近3个月的月份标签
-    recent_months = get_recent_3_months_labels(current_date)
-    logger.info(f"过滤条件：只保留最近3个月（{', '.join(recent_months)}）有销量的SKU")
+    logger.info(f"过滤条件：如果SPU在所有查询月份（共{len(month_labels)}个月）的总销量为0，则过滤掉该SPU")
+    logger.info(f"查询月份：{', '.join(month_labels)}")
     
     filtered_data = {}
     total_skus = 0
     filtered_skus = 0
+    total_spus = 0
+    filtered_spus = 0
     
     for shop_name, shop_data in aggregated_data.items():
-        filtered_shop_data = {}
+        # 第一步：按SPU聚合，计算每个SPU在所有月份的总销量
+        spu_total_sales = {}  # {spu: 总销量}
+        spu_skus = defaultdict(list)  # {spu: [sku1, sku2, ...]}
         
         for sku, sku_data in shop_data.items():
             total_skus += 1
-            # 检查最近3个月是否有销量
-            has_sales = False
-            for month_label in recent_months:
-                sales = sku_data.get(month_label, 0) or 0
-                if sales > 0:
-                    has_sales = True
-                    break
+            spu = sku_data.get('spu', '').strip() if sku_data.get('spu') else extract_spu_from_sku(sku)
+            if not spu:
+                # 如果没有SPU，使用SKU本身作为SPU
+                spu = sku
             
-            if has_sales:
-                filtered_shop_data[sku] = sku_data
+            # 初始化SPU的总销量
+            if spu not in spu_total_sales:
+                spu_total_sales[spu] = 0
+                total_spus += 1
+            
+            # 累加该SKU在所有月份的销量
+            for month_label in month_labels:
+                sales = sku_data.get(month_label, 0) or 0
+                spu_total_sales[spu] += sales
+            
+            # 记录该SPU下的SKU列表
+            spu_skus[spu].append(sku)
+        
+        # 第二步：根据SPU总销量决定是否保留
+        filtered_shop_data = {}
+        for spu, total_sales in spu_total_sales.items():
+            if total_sales > 0:
+                # SPU有销量，保留该SPU下的所有SKU
+                for sku in spu_skus[spu]:
+                    filtered_shop_data[sku] = shop_data[sku]
             else:
-                filtered_skus += 1
+                # SPU总销量为0，过滤掉该SPU下的所有SKU
+                filtered_spus += 1
+                filtered_skus += len(spu_skus[spu])
         
         if filtered_shop_data:
             filtered_data[shop_name] = filtered_shop_data
     
-    logger.info(f"过滤完成：共 {total_skus} 个SKU，过滤掉 {filtered_skus} 个最近3个月无销量的SKU，保留 {total_skus - filtered_skus} 个SKU")
+    logger.info(f"过滤完成：共 {total_spus} 个SPU，{total_skus} 个SKU")
+    logger.info(f"过滤掉 {filtered_spus} 个总销量为0的SPU（包含 {filtered_skus} 个SKU）")
+    logger.info(f"保留 {total_spus - filtered_spus} 个有销量的SPU（包含 {total_skus - filtered_skus} 个SKU）")
     
     return filtered_data
 
@@ -1031,12 +1051,12 @@ async def main():
         logger.warning("没有需要处理的数据")
         return
     
-    # 过滤掉最近3个月（包括本月）都没有销量的SKU
-    logger.info(f"\n正在过滤数据（只保留最近3个月有销量的SKU）...")
-    filtered_by_sales = filter_skus_with_recent_sales(aggregated_data, current_date)
+    # 按SPU过滤：如果SPU在所有查询月份的总销量为0，则过滤掉该SPU
+    logger.info(f"\n正在过滤数据（按SPU过滤：如果SPU在所有查询月份总销量为0则过滤）...")
+    filtered_by_sales = filter_skus_by_spu_sales(aggregated_data, month_labels)
     
     if not filtered_by_sales:
-        logger.warning("过滤后没有需要处理的数据（所有SKU在最近3个月都没有销量）")
+        logger.warning("过滤后没有需要处理的数据（所有SPU在所有查询月份的总销量都为0）")
         return
     
     # 过滤掉需要排除的店铺

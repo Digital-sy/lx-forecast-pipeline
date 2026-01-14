@@ -175,6 +175,54 @@ class FeishuClient:
                         return field
             return {}
     
+    async def get_field_info_by_id(self, field_id: str) -> Dict[str, Any]:
+        """
+        根据字段ID获取字段的详细信息（包括精度）
+        
+        Args:
+            field_id: 字段ID
+            
+        Returns:
+            Dict[str, Any]: 字段信息，包含 field_id, type, property 等
+        """
+        if not self._access_token:
+            await self.get_access_token()
+        
+        # 使用获取所有字段列表的方式，然后查找匹配的字段ID（更可靠）
+        url = f"{self.api_base}/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/fields"
+        headers = {
+            "Authorization": f"Bearer {self._access_token}",
+            "Content-Type": "application/json; charset=utf-8"
+        }
+        
+        timeout = httpx.Timeout(60.0, connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            try:
+                response = await client.get(url, headers=headers)
+                # 检查响应状态
+                if response.status_code != 200:
+                    logger.warning(f"获取字段列表失败，状态码: {response.status_code}")
+                    return {}
+                
+                # 尝试解析JSON
+                try:
+                    result = response.json()
+                except Exception as json_error:
+                    logger.warning(f"解析JSON响应失败: {json_error}, 响应内容: {response.text[:200]}")
+                    return {}
+                
+                if result.get("code") == 0:
+                    fields = result.get("data", {}).get("items", [])
+                    for field in fields:
+                        if field.get("field_id") == field_id:
+                            return field
+                else:
+                    logger.warning(f"获取字段列表失败: {result.get('msg')}")
+            except Exception as e:
+                logger.warning(f"获取字段信息异常: {e}")
+        
+        return {}
+    
     async def read_records(self, page_size: int = 500) -> List[Dict[str, Any]]:
         """
         读取飞书多维表格数据
@@ -400,25 +448,85 @@ class FeishuClient:
         field_id_to_name = await self.get_table_fields()
         field_name_to_id = {name: fid for fid, name in field_id_to_name.items()}
         
+        # 获取字段类型信息（用于判断链接字段）
+        field_info_map = {}  # {field_name: field_info}
+        for field_id, field_name in field_id_to_name.items():
+            field_info = await self.get_field_info_by_id(field_id)
+            if field_info:
+                field_info_map[field_name] = field_info
+        
         # 转换数据格式：直接使用字段名（参考官方SDK示例）
         logger.info("正在转换数据格式...")
         
-        # 定义需要跳过的系统字段
-        system_fields = {'多行文本', '名称', '创建时间', '更新时间', '创建人', '更新人'}
+        # 定义需要跳过的系统字段（但"创建人"和"更新人"可以手动设置，所以不跳过）
+        system_fields = {'多行文本', '名称', '创建时间', '更新时间'}
         
         converted_records = []
         for record in records:
             fields = {}
             for field_name, field_value in record.items():
-                # 跳过系统字段
+                # 跳过系统字段（但允许"创建人"和"更新人"字段）
                 if field_name in system_fields:
                     continue
                     
                 # 检查字段是否存在
                 if field_name in field_name_to_id:
-                    # 直接使用字段名（参考官方SDK示例，使用字段名而不是字段ID）
-                    # 转换值为飞书API格式
-                    fields[field_name] = self._convert_value_to_feishu_format(field_value)
+                    # 检查字段类型，如果是链接字段且值是字符串，需要转换为对象格式
+                    field_info = field_info_map.get(field_name, {})
+                    field_type = field_info.get('type', 0)
+                    
+                    # 链接字段类型：9=链接，1008=链接
+                    # 如果字段名包含"图"或"链接"等关键词，也尝试作为链接字段处理
+                    is_link_field = (field_type in [9, 1008]) or ('图' in field_name or '链接' in field_name or 'link' in field_name.lower() or 'url' in field_name.lower())
+                    
+                    if is_link_field:
+                        if isinstance(field_value, str):
+                            if field_value:
+                                # 非空字符串，转换为链接对象格式
+                                fields[field_name] = {
+                                    'link': field_value,
+                                    'text': field_value
+                                }
+                            else:
+                                # 空字符串，设置为None或空对象
+                                fields[field_name] = None
+                        elif isinstance(field_value, dict):
+                            # 已经是对象格式，直接使用
+                            fields[field_name] = field_value
+                        elif field_value is None:
+                            # None值，直接使用
+                            fields[field_name] = None
+                        else:
+                            # 其他类型，转换为字符串再处理
+                            str_value = str(field_value) if field_value else ''
+                            if str_value:
+                                fields[field_name] = {
+                                    'link': str_value,
+                                    'text': str_value
+                                }
+                            else:
+                                fields[field_name] = None
+                    else:
+                        # 检查是否是人员字段（类型7或1006）
+                        is_person_field = (field_type in [7, 1006]) or ('人' in field_name or 'person' in field_name.lower() or 'user' in field_name.lower())
+                        
+                        if is_person_field:
+                            # 人员字段需要特殊处理
+                            if isinstance(field_value, list):
+                                # 已经是数组格式，直接使用
+                                fields[field_name] = field_value
+                            elif isinstance(field_value, dict):
+                                # 单个用户对象，转换为数组格式
+                                fields[field_name] = [field_value]
+                            elif field_value is None:
+                                fields[field_name] = None
+                            else:
+                                # 其他格式，尝试转换为数组
+                                logger.warning(f"人员字段 '{field_name}' 的值格式不正确: {type(field_value).__name__}")
+                                fields[field_name] = None
+                        else:
+                            # 其他字段类型，使用标准转换
+                            fields[field_name] = self._convert_value_to_feishu_format(field_value)
                 else:
                     logger.warning(f"字段 '{field_name}' 在表格中不存在，跳过")
             
@@ -638,12 +746,19 @@ class FeishuClient:
             logger.warning("没有需要更新的记录")
             return 0
         
-        # 获取字段映射
+        # 获取字段映射和字段类型信息
         logger.info("正在获取表格字段信息...")
         field_name_to_id = {}
         field_id_to_name = await self.get_table_fields()
         for field_id, field_name in field_id_to_name.items():
             field_name_to_id[field_name] = field_id
+        
+        # 获取字段类型信息（用于判断链接字段）
+        field_info_map = {}  # {field_name: field_info}
+        for field_id, field_name in field_id_to_name.items():
+            field_info = await self.get_field_info_by_id(field_id)
+            if field_info:
+                field_info_map[field_name] = field_info
         
         # 转换数据格式
         logger.info("正在转换数据格式...")
@@ -658,9 +773,51 @@ class FeishuClient:
             for field_name, field_value in record.items():
                 if field_name == 'record_id':
                     continue
+                # 直接使用字段名（与write_records方法保持一致）
+                # 检查字段是否存在
                 if field_name in field_name_to_id:
-                    field_id = field_name_to_id[field_name]
-                    fields[field_id] = self._convert_value_to_feishu_format(field_value)
+                    # 检查字段类型，如果是链接字段且值是字符串，需要转换为对象格式
+                    field_info = field_info_map.get(field_name, {})
+                    field_type = field_info.get('type', 0)
+                    
+                    # 调试：打印字段类型信息
+                    if '图' in field_name or 'link' in field_name.lower() or 'url' in field_name.lower():
+                        logger.debug(f"字段 '{field_name}' 类型: {field_type}, 值类型: {type(field_value).__name__}, 值: {repr(field_value)[:100]}")
+                    
+                    # 链接字段类型：9=链接，1008=链接
+                    # 如果字段名包含"图"或"链接"等关键词，也尝试作为链接字段处理
+                    is_link_field = (field_type in [9, 1008]) or ('图' in field_name or '链接' in field_name or 'link' in field_name.lower() or 'url' in field_name.lower())
+                    
+                    if is_link_field:
+                        if isinstance(field_value, str):
+                            if field_value:
+                                # 非空字符串，转换为链接对象格式
+                                fields[field_name] = {
+                                    'link': field_value,
+                                    'text': field_value
+                                }
+                            else:
+                                # 空字符串，设置为None或空对象
+                                fields[field_name] = None
+                        elif isinstance(field_value, dict):
+                            # 已经是对象格式，直接使用
+                            fields[field_name] = field_value
+                        elif field_value is None:
+                            # None值，直接使用
+                            fields[field_name] = None
+                        else:
+                            # 其他类型，转换为字符串再处理
+                            str_value = str(field_value) if field_value else ''
+                            if str_value:
+                                fields[field_name] = {
+                                    'link': str_value,
+                                    'text': str_value
+                                }
+                            else:
+                                fields[field_name] = None
+                    else:
+                        # 其他字段类型，使用标准转换
+                        fields[field_name] = self._convert_value_to_feishu_format(field_value)
                 else:
                     logger.warning(f"字段 '{field_name}' 在表格中不存在，跳过")
             
@@ -994,64 +1151,65 @@ class FeishuClient:
             data["field_name"] = field_name
         if field_type:
             data["type"] = int(field_type) if field_type.isdigit() else 1
-        # 如果指定了精度，且字段类型是数字类型，则更新精度
+        
+        # 如果指定了精度，需要先获取现有字段信息，确认字段类型
         if precision is not None:
-            data["property"] = {
-                "precision": precision,
-                "formatter": "0"
-            }
+            # 先获取现有字段信息
+            existing_field_info = await self.get_field_info_by_id(field_id)
+            
+            if existing_field_info:
+                existing_type = existing_field_info.get('type')
+                # 只有数字类型（2或1002）才能设置精度
+                if existing_type in [2, 1002]:
+                    existing_property = existing_field_info.get('property', {})
+                    # 构建property对象，确保格式正确
+                    data["property"] = {
+                        "precision": precision,
+                        "formatter": existing_property.get("formatter", "0")  # 保留现有格式或使用默认值
+                    }
+                    # 如果现有属性中有其他字段，也保留（但precision和formatter优先）
+                    for key, value in existing_property.items():
+                        if key not in ["precision", "formatter"]:
+                            data["property"][key] = value
+                else:
+                    logger.warning(f"字段类型 {existing_type} 不是数字类型，无法设置精度")
+                    # 如果字段类型不是数字，不设置property
+            else:
+                # 如果无法获取字段信息，假设是数字类型，使用默认属性
+                logger.warning(f"无法获取字段信息，假设是数字类型并设置精度为 {precision}")
+                data["property"] = {
+                    "precision": precision,
+                    "formatter": "0"
+                }
         
         if not data:
             return False
         
         timeout = httpx.Timeout(60.0, connect=10.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.put(url, headers=headers, json=data)
-            result = response.json()
-            
-            if result.get("code") == 0:
-                logger.info(f"更新字段成功 (ID: {field_id}, 新名称: {field_name})")
-                return True
-            else:
-                error_msg = f"更新字段失败: {result.get('msg')}"
-                logger.warning(error_msg)
-                return False
-    
-    async def update_field(self, field_id: str, field_name: str = None) -> bool:
-        """
-        更新字段（重命名）
-        
-        Args:
-            field_id: 字段ID
-            field_name: 新字段名
-            
-        Returns:
-            bool: 是否成功
-        """
-        if not self._access_token:
-            await self.get_access_token()
-        
-        url = f"{self.api_base}/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/fields/{field_id}"
-        headers = {
-            "Authorization": f"Bearer {self._access_token}",
-            "Content-Type": "application/json; charset=utf-8"
-        }
-        
-        data = {
-            "field_name": field_name
-        }
-        
-        timeout = httpx.Timeout(60.0, connect=10.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.put(url, headers=headers, json=data)
-            result = response.json()
-            
-            if result.get("code") == 0:
-                logger.info(f"重命名字段成功 (ID: {field_id}, 新名称: {field_name})")
-                return True
-            else:
-                error_msg = f"重命名字段失败: {result.get('msg')}"
-                logger.warning(error_msg)
+            try:
+                response = await client.put(url, headers=headers, json=data)
+                result = response.json()
+                
+                if result.get("code") == 0:
+                    update_info = []
+                    if field_name:
+                        update_info.append(f"名称: {field_name}")
+                    if precision is not None:
+                        update_info.append(f"精度: {precision}")
+                    logger.info(f"更新字段成功 (ID: {field_id}" + (f", {', '.join(update_info)}" if update_info else "") + ")")
+                    return True
+                else:
+                    error_code = result.get("code")
+                    error_msg = result.get("msg", "未知错误")
+                    error_detail = result.get("error", {})
+                    logger.warning(f"更新字段失败 [code: {error_code}]: {error_msg}")
+                    if error_detail:
+                        logger.debug(f"错误详情: {error_detail}")
+                    logger.debug(f"请求数据: {data}")
+                    return False
+            except Exception as e:
+                logger.warning(f"更新字段异常: {e}, 请求数据: {data}")
                 return False
     
     async def delete_field(self, field_id: str) -> bool:
