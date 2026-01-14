@@ -6,6 +6,7 @@
 多维表包含SKU字段和从本月往前推13个月的销量字段
 """
 import asyncio
+import json
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Tuple
 from collections import defaultdict
@@ -37,7 +38,10 @@ EXCLUDED_SHOPS = {
     'TEMU半托管-V店',
     'TEMU半托管-本土店-R店',
     'TK本土店-1店',
-    'TK跨境店-2店'
+    'TK跨境店-2店',
+    'CY-US',
+    'DX-US',
+    'MT-CA'
 }
 
 
@@ -307,7 +311,7 @@ def extract_spu_from_sku(sku: str) -> str:
 
 def get_responsible_from_sales_data() -> Dict[Tuple[str, str], str]:
     """
-    从销售数据表获取负责人信息（使用SPU+店铺匹配）
+    从listing表获取负责人信息（使用SPU+店铺匹配）
     
     Returns:
         Dict[Tuple[str, str], str]: {(SPU, 店铺): 负责人} 的映射字典
@@ -320,41 +324,30 @@ def get_responsible_from_sales_data() -> Dict[Tuple[str, str], str]:
             cursor.execute("""
                 SELECT COUNT(*) as cnt FROM information_schema.COLUMNS 
                 WHERE TABLE_SCHEMA = DATABASE() 
-                AND TABLE_NAME = '销售数据'
+                AND TABLE_NAME = 'listing'
                 AND COLUMN_NAME = '负责人'
             """)
             result = cursor.fetchone()
             has_responsible_field = (result.get('cnt', 0) if result else 0) > 0
             
             if not has_responsible_field:
-                logger.info("销售数据表中没有负责人字段")
+                logger.info("listing表中没有负责人字段")
                 return responsible_map
             
-            # 检查是否有spu字段
-            cursor.execute("""
-                SELECT COUNT(*) as cnt FROM information_schema.COLUMNS 
-                WHERE TABLE_SCHEMA = DATABASE() 
-                AND TABLE_NAME = '销售数据'
-                AND COLUMN_NAME = 'spu'
-            """)
-            result = cursor.fetchone()
-            has_spu_field = (result.get('cnt', 0) if result else 0) > 0
-            
-            # 查询销售数据表，获取SKU、店铺名和负责人的映射
-            # 注意：销售数据表中的店铺字段叫做"店铺名"
-            sql = f"""
+            # 查询listing表，获取SKU、店铺和负责人的映射
+            # 注意：listing表中的店铺字段叫做"店铺"
+            sql = """
             SELECT 
                 SKU,
-                店铺名,
+                店铺,
                 负责人
-                {', spu' if has_spu_field else ''}
-            FROM `销售数据`
+            FROM `listing`
             WHERE SKU IS NOT NULL 
               AND SKU != '' 
               AND SKU != '无'
-              AND 店铺名 IS NOT NULL
-              AND 店铺名 != ''
-              AND 店铺名 != '无'
+              AND 店铺 IS NOT NULL
+              AND 店铺 != ''
+              AND 店铺 != '无'
               AND 负责人 IS NOT NULL
               AND 负责人 != ''
               AND 负责人 != '无'
@@ -364,21 +357,21 @@ def get_responsible_from_sales_data() -> Dict[Tuple[str, str], str]:
             
             for row in results:
                 sku = row.get('SKU', '').strip()
-                shop = row.get('店铺名', '').strip()  # 注意：销售数据表中是"店铺名"
+                shop = row.get('店铺', '').strip()  # listing表中是"店铺"
                 responsible = row.get('负责人', '').strip()
                 
                 if sku and shop and responsible:
                     # 提取SPU（第一个"-"之前的部分）
-                    spu = row.get('spu', '').strip() if has_spu_field and row.get('spu') else extract_spu_from_sku(sku)
+                    spu = extract_spu_from_sku(sku)
                     if spu:
                         key = (spu, shop)
                         # 如果同一个SPU+店铺有多个负责人，保留第一个（或可以合并）
                         if key not in responsible_map:
                             responsible_map[key] = responsible
             
-            logger.info(f"从销售数据表读取到 {len(responsible_map)} 条负责人映射（SPU+店铺）")
+            logger.info(f"从listing表读取到 {len(responsible_map)} 条负责人映射（SPU+店铺）")
     except Exception as e:
-        logger.warning(f"从销售数据表读取负责人失败: {e}")
+        logger.warning(f"从listing表读取负责人失败: {e}")
     
     return responsible_map
 
@@ -585,17 +578,17 @@ def read_sales_data_from_db() -> List[Dict[str, Any]]:
                     sku = row.get('SKU', '').strip()
                     row['spu'] = extract_spu_from_sku(sku) if sku else None
         
-        # 从销售数据表获取负责人（使用SPU+店铺匹配）
+        # 从listing表获取负责人（使用SPU+店铺匹配）
         # 注意：销量统计_msku月度表没有负责人和运营字段，需要从其他表匹配
-        logger.info("正在从销售数据表获取负责人字段（SPU+店铺匹配）...")
-        responsible_map_from_sales_data = get_responsible_from_sales_data()
+        logger.info("正在从listing表获取负责人字段（SPU+店铺匹配）...")
+        responsible_map_from_listing = get_responsible_from_sales_data()
         
         # 从产品信息表获取运营字段（作为补充，使用SPU+店铺匹配）
         logger.info("正在从产品信息表获取运营字段（SPU+店铺匹配）...")
         operation_map_from_product = get_operation_from_product_info()
         
         # 为每条记录添加运营字段
-        matched_from_sales_data = 0
+        matched_from_listing = 0
         matched_from_product = 0
         for row in results:
             sku = row.get('SKU', '').strip()
@@ -605,12 +598,12 @@ def read_sales_data_from_db() -> List[Dict[str, Any]]:
             # 提取SPU（第一个"-"之前的部分）
             spu = row.get('spu', '').strip() if row.get('spu') else extract_spu_from_sku(sku)
             
-            # 第一优先级：从销售数据表获取负责人（使用SPU+店铺匹配）
+            # 第一优先级：从listing表获取负责人（使用SPU+店铺匹配）
             if spu and shop:
                 key = (spu, shop)
-                operation = responsible_map_from_sales_data.get(key, '')
+                operation = responsible_map_from_listing.get(key, '')
                 if operation:
-                    matched_from_sales_data += 1
+                    matched_from_listing += 1
             
             # 第二优先级：从产品信息表获取（使用SPU+店铺）
             if not operation and spu and shop:
@@ -621,7 +614,7 @@ def read_sales_data_from_db() -> List[Dict[str, Any]]:
             
             row['运营'] = operation if operation else None
         
-        logger.info(f"运营字段匹配完成：从销售数据表匹配 {matched_from_sales_data} 条，从产品信息表匹配 {matched_from_product} 条")
+        logger.info(f"运营字段匹配完成：从listing表匹配 {matched_from_listing} 条，从产品信息表匹配 {matched_from_product} 条")
         
         return results
 
@@ -1002,6 +995,82 @@ async def process_shop_data(shop_name: str,
         logger.info(f"正在写入数据到飞书多维表...")
         written_count = await feishu_client.write_records(records, batch_size=500)
         logger.info(f"✓ 成功写入 {written_count} 条记录到店铺 {shop_name} 的多维表")
+        
+        # 按负责人创建视图
+        logger.info(f"正在按负责人创建视图...")
+        try:
+            # 获取"运营"字段的ID
+            operation_field_info = await feishu_client.get_field_info("运营")
+            if not operation_field_info:
+                logger.warning("无法获取'运营'字段信息，跳过创建视图")
+            else:
+                operation_field_id = operation_field_info.get("field_id")
+                if not operation_field_id:
+                    logger.warning("'运营'字段ID为空，跳过创建视图")
+                else:
+                    # 收集所有负责人（去重）
+                    responsible_set = set()
+                    for record in records:
+                        responsible = record.get('运营', '').strip()
+                        if responsible:
+                            responsible_set.add(responsible)
+                    
+                    # 为每个负责人创建视图
+                    created_views = 0
+                    for responsible in sorted(responsible_set):
+                        view_name = responsible
+                        # 构建过滤条件：运营字段等于该负责人
+                        # 对于文本字段，使用 "is" 操作符
+                        # value 需要是字符串化的JSON数组，使用 ensure_ascii=False 保持中文字符
+                        filter_condition = {
+                            "conjunction": "and",
+                            "conditions": [
+                                {
+                                    "field_id": operation_field_id,
+                                    "operator": "is",  # 文本字段使用 is
+                                    "value": json.dumps([responsible], ensure_ascii=False)  # 字符串化的JSON数组，保持中文
+                                }
+                            ]
+                        }
+                        logger.debug(f"为负责人 {responsible} 创建视图，过滤条件: {filter_condition}")
+                        try:
+                            view_id = await feishu_client.ensure_view(view_name, filter_condition)
+                            logger.info(f"✓ 成功创建/更新视图: {view_name} (ID: {view_id})")
+                            created_views += 1
+                        except Exception as e:
+                            logger.warning(f"创建视图 {view_name} 失败: {e}")
+                    
+                    # 检查是否有无负责人的记录
+                    has_no_responsible = any(
+                        not record.get('运营', '').strip() 
+                        for record in records
+                    )
+                    
+                    if has_no_responsible:
+                        # 创建"无匹配负责人"视图：运营字段为空
+                        # 根据飞书API文档，当operator为isEmpty时，value字段应该不包含或为null
+                        view_name = "无匹配负责人"
+                        filter_condition = {
+                            "conjunction": "and",
+                            "conditions": [
+                                {
+                                    "field_id": operation_field_id,
+                                    "operator": "isEmpty"  # 空值使用 isEmpty，不包含value字段
+                                    # 注意：isEmpty操作符时，不包含value字段
+                                }
+                            ]
+                        }
+                        logger.debug(f"创建'无匹配负责人'视图，过滤条件: {filter_condition}")
+                        try:
+                            view_id = await feishu_client.ensure_view(view_name, filter_condition)
+                            logger.info(f"✓ 成功创建/更新视图: {view_name} (ID: {view_id})")
+                            created_views += 1
+                        except Exception as e:
+                            logger.warning(f"创建视图 {view_name} 失败: {e}")
+                    
+                    logger.info(f"✓ 共创建/更新 {created_views} 个负责人视图")
+        except Exception as e:
+            logger.warning(f"创建负责人视图时出错: {e}，但不影响主流程")
         
         return True
         

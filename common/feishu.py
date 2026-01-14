@@ -1379,6 +1379,213 @@ class FeishuClient:
                 logger.warning(f"创建字段 {field_name} 失败: {e}")
                 # 继续处理其他字段
         return table_id
+    
+    async def get_views(self) -> Dict[str, str]:
+        """
+        获取表的所有视图
+        
+        Returns:
+            Dict[str, str]: {视图名称: 视图ID} 的映射字典
+        """
+        if not self._access_token:
+            await self.get_access_token()
+        
+        url = f"{self.api_base}/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/views"
+        headers = {
+            "Authorization": f"Bearer {self._access_token}",
+            "Content-Type": "application/json; charset=utf-8"
+        }
+        
+        timeout = httpx.Timeout(60.0, connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(url, headers=headers)
+            result = response.json()
+            
+            if result.get("code") == 0:
+                views = {}
+                items = result.get("data", {}).get("items", [])
+                for item in items:
+                    view_name = item.get("view_name", "")
+                    view_id = item.get("view_id", "")
+                    if view_name and view_id:
+                        views[view_name] = view_id
+                return views
+            else:
+                error_msg = f"获取视图列表失败: {result.get('msg')}"
+                logger.error(error_msg)
+                raise Exception(error_msg)
+    
+    async def create_view(self, view_name: str, filter_condition: Dict[str, Any] = None) -> str:
+        """
+        创建视图（带过滤条件）
+        
+        Args:
+            view_name: 视图名称
+            filter_condition: 过滤条件字典，格式如：
+                {
+                    "conjunction": "and",  # "and" 或 "or"
+                    "conditions": [
+                        {
+                            "field_id": "字段ID",
+                            "operator": "is",  # "is", "isNot", "contains", "doesNotContain" 等
+                            "value": ["值"]  # 数组格式
+                        }
+                    ]
+                }
+                如果为None，则创建无过滤条件的视图
+        
+        Returns:
+            str: 视图ID
+        """
+        if not self._access_token:
+            await self.get_access_token()
+        
+        url = f"{self.api_base}/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/views"
+        headers = {
+            "Authorization": f"Bearer {self._access_token}",
+            "Content-Type": "application/json; charset=utf-8"
+        }
+        
+        # 构建视图数据
+        # 根据飞书API文档，请求体应该直接包含视图信息（不包装在view中）
+        # 注意：创建视图时不设置过滤条件，创建后再通过更新接口设置
+        data = {
+            "view_name": view_name,
+            "view_type": "grid"  # 网格视图
+        }
+        
+        if filter_condition:
+            logger.info(f"创建视图 '{view_name}'（筛选条件将在创建后设置）")
+        else:
+            logger.info(f"创建视图 '{view_name}' 无过滤条件")
+        
+        # 添加调试日志
+        logger.debug(f"创建视图请求数据: {data}")
+        
+        timeout = httpx.Timeout(60.0, connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(url, headers=headers, json=data)
+            result = response.json()
+            
+            if result.get("code") == 0:
+                view_id = result.get("data", {}).get("view", {}).get("view_id", "")
+                logger.info(f"创建视图成功: {view_name} (ID: {view_id})")
+                # 创建视图后，如果提供了过滤条件，需要再次调用更新接口来设置筛选条件
+                # 因为创建视图时设置的过滤条件可能不会生效
+                if filter_condition:
+                    logger.info(f"视图创建成功，正在设置筛选条件...")
+                    success = await self.update_view_filter(view_id, filter_condition)
+                    if success:
+                        logger.info(f"✓ 视图 '{view_name}' 的筛选条件已设置")
+                    else:
+                        logger.warning(f"⚠ 视图 '{view_name}' 的筛选条件设置失败")
+                return view_id
+            else:
+                error_msg = f"创建视图失败: {result.get('msg')}"
+                error_detail = result.get("error", {})
+                logger.error(f"{error_msg}, 详情: {error_detail}")
+                logger.debug(f"请求数据: {data}")
+                # 如果视图已存在，尝试获取现有视图ID
+                if "already exists" in error_msg.lower() or "已存在" in error_msg:
+                    logger.warning(f"视图 {view_name} 可能已存在，尝试获取现有视图ID")
+                    views = await self.get_views()
+                    if view_name in views:
+                        return views[view_name]
+                raise Exception(error_msg)
+    
+    async def update_view_filter(self, view_id: str, filter_condition: Dict[str, Any]) -> bool:
+        """
+        更新视图的过滤条件
+        
+        Args:
+            view_id: 视图ID
+            filter_condition: 过滤条件字典（包含 conjunction 和 conditions）
+        
+        Returns:
+            bool: 是否成功
+        """
+        if not self._access_token:
+            await self.get_access_token()
+        
+        url = f"{self.api_base}/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/views/{view_id}"
+        headers = {
+            "Authorization": f"Bearer {self._access_token}",
+            "Content-Type": "application/json; charset=utf-8"
+        }
+        
+        # 根据飞书API文档，使用PATCH方法更新视图
+        # 过滤条件应该包装在 property.filter_info 中
+        data = {
+            "property": {
+                "filter_info": filter_condition
+            }
+        }
+        
+        logger.info(f"正在更新视图过滤条件 (ID: {view_id})")
+        logger.info(f"过滤条件: {filter_condition}")
+        logger.debug(f"完整请求数据: {data}")
+        
+        timeout = httpx.Timeout(60.0, connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            # 使用PATCH方法更新视图
+            response = await client.patch(url, headers=headers, json=data)
+            result = response.json()
+            
+            if result.get("code") == 0:
+                logger.info(f"✓ 更新视图过滤条件成功 (ID: {view_id})")
+                # 验证更新后的视图信息
+                try:
+                    verify_response = await client.get(url, headers=headers)
+                    verify_result = verify_response.json()
+                    if verify_result.get("code") == 0:
+                        view_info = verify_result.get("data", {}).get("view", {})
+                        property_info = view_info.get("property", {})
+                        filter_info = property_info.get("filter_info", {})
+                        if filter_info:
+                            logger.info(f"✓ 验证成功：视图过滤条件已设置: {filter_info}")
+                        else:
+                            logger.warning(f"⚠ 警告：视图过滤条件可能未正确设置")
+                except Exception as e:
+                    logger.debug(f"验证视图信息时出错（不影响主流程）: {e}")
+                return True
+            else:
+                error_msg = f"更新视图过滤条件失败: {result.get('msg')}"
+                error_detail = result.get("error", {})
+                logger.error(f"✗ {error_msg}")
+                logger.error(f"错误详情: {error_detail}")
+                logger.error(f"请求数据: {data}")
+                logger.error(f"响应结果: {result}")
+                return False
+    
+    async def ensure_view(self, view_name: str, filter_condition: Dict[str, Any] = None) -> str:
+        """
+        确保视图存在，如果不存在则创建
+        
+        Args:
+            view_name: 视图名称
+            filter_condition: 过滤条件（可选）
+        
+        Returns:
+            str: 视图ID
+        """
+        views = await self.get_views()
+        if view_name in views:
+            view_id = views[view_name]
+            logger.info(f"视图 '{view_name}' 已存在 (ID: {view_id})")
+            # 如果视图已存在且有过滤条件，更新过滤条件
+            if filter_condition:
+                logger.info(f"视图已存在，正在更新视图 '{view_name}' 的过滤条件...")
+                success = await self.update_view_filter(view_id, filter_condition)
+                if success:
+                    logger.info(f"✓ 视图 '{view_name}' 的过滤条件已更新")
+                else:
+                    logger.error(f"✗ 视图 '{view_name}' 的过滤条件更新失败，请检查日志")
+            else:
+                logger.warning(f"视图 '{view_name}' 已存在，但未提供过滤条件")
+            return view_id
+        else:
+            logger.info(f"视图 '{view_name}' 不存在，正在创建...")
+            return await self.create_view(view_name, filter_condition)
 
 
 # 便捷函数

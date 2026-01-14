@@ -359,12 +359,12 @@ def convert_to_msku_dimension(stats: List[Dict[str, Any]], month_start: str) -> 
             stat_date = None  # 如果格式不对，设为None（MySQL会处理为NULL）
         
         # 构建MSKU维度数据（每条API数据对应一条记录）
-        # 字段：SKU, MSKU, spu, spu颜色, 店铺, 品名, 销量, 统计日期
+        # 字段：SKU, MSKU, SPU, spu颜色, 店铺, 品名, 销量, 统计日期
         # 所有字段如果为空，都默认为"无"（销量默认为0，统计日期为None）
         msku_record = {
             'SKU': sku if sku else '无',              # 如果为空，默认为"无"
             'MSKU': msku if msku else '无',            # 如果为空，默认为"无"
-            'spu': spu,                               # SPU（第一个"-"之前的字符）
+            'SPU': spu,                               # SPU（第一个"-"之前的字符）
             'spu颜色': spu_color,                      # SPU颜色（第二个"-"之前的字符）
             '店铺': store_name if store_name else '无',      # 如果为空，默认为"无"
             '品名': product_name if product_name else '无',    # 如果为空，默认为"无"

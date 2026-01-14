@@ -258,8 +258,8 @@ def generate_inventory_estimate() -> List[Dict[str, Any]]:
             spu, spu_color = extract_spu_and_color(sku)
             
             result_dict[(sku, shop)] = {
-                'sku': sku,
-                'spu': spu,
+                'SKU': sku,
+                'SPU': spu,
                 'spu颜色': spu_color,
                 '店铺': shop,
                 'fba可售': fba_sellable,
@@ -298,8 +298,8 @@ def generate_inventory_estimate() -> List[Dict[str, Any]]:
                 
                 if key not in result_dict:
                     result_dict[key] = {
-                        'sku': sku,
-                        'spu': spu,
+                        'SKU': sku,
+                        'SPU': spu,
                         'spu颜色': spu_color,
                         '店铺': target_shop,
                         'fba可售': fba_sellable,
@@ -334,8 +334,8 @@ def generate_inventory_estimate() -> List[Dict[str, Any]]:
                 if key not in result_dict:
                     # 如果该店铺还没有在结果中，先添加它（包含原有的本地库存）
                     result_dict[key] = {
-                        'sku': sku,
-                        'spu': spu,
+                        'SKU': sku,
+                        'SPU': spu,
                         'spu颜色': spu_color,
                         '店铺': target_shop,
                         'fba可售': 0,
@@ -365,8 +365,8 @@ def generate_inventory_estimate() -> List[Dict[str, Any]]:
                 
                 if key not in result_dict:
                     result_dict[key] = {
-                        'sku': sku,
-                        'spu': spu,
+                        'SKU': sku,
+                        'SPU': spu,
                         'spu颜色': spu_color,
                         '店铺': local_shop,
                         'fba可售': fba_sellable,
@@ -390,8 +390,8 @@ def generate_inventory_estimate() -> List[Dict[str, Any]]:
             spu, spu_color = extract_spu_and_color(sku)
             
             result_dict[key] = {
-                'sku': sku,
-                'spu': spu,
+                'SKU': sku,
+                'SPU': spu,
                 'spu颜色': spu_color,
                 '店铺': '无',
                 'fba可售': fba_sellable,
@@ -417,8 +417,8 @@ def generate_inventory_estimate() -> List[Dict[str, Any]]:
                 spu, spu_color = extract_spu_and_color(sku)
                 
                 result_dict[key] = {
-                    'sku': sku,
-                    'spu': spu,
+                    'SKU': sku,
+                    'SPU': spu,
                     'spu颜色': spu_color,
                     '店铺': '无',
                     'fba可售': 0,
@@ -439,8 +439,8 @@ def generate_inventory_estimate() -> List[Dict[str, Any]]:
                 spu, spu_color = extract_spu_and_color(sku)
                 
                 result_dict[(sku, shop)] = {
-                    'sku': sku,
-                    'spu': spu,
+                    'SKU': sku,
+                    'SPU': spu,
                     'spu颜色': spu_color,
                     '店铺': shop,
                     'fba可售': fba_sellable,
@@ -458,8 +458,8 @@ def generate_inventory_estimate() -> List[Dict[str, Any]]:
                 spu, spu_color = extract_spu_and_color(sku)
                 
                 result_dict[(sku, shop)] = {
-                    'sku': sku,
-                    'spu': spu,
+                    'SKU': sku,
+                    'SPU': spu,
                     'spu颜色': spu_color,
                     '店铺': shop,
                     'fba可售': 0,
@@ -499,8 +499,8 @@ def generate_inventory_estimate() -> List[Dict[str, Any]]:
             # 只添加数量不为0的记录
             if quantity > 0:
                 new_record = {
-                    'sku': record['sku'],
-                    'spu': record['spu'],
+                    'SKU': record['SKU'],
+                    'SPU': record['SPU'],
                     'spu颜色': record['spu颜色'],
                     '店铺': record['店铺'],
                     '库存状态': status_name,

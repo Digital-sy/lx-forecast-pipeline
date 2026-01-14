@@ -121,7 +121,7 @@ def convert_to_sku_dimension(orders: List[Dict[str, Any]],
                 'SKU': item.get('sku', ''),
                 'FNSKU': item.get('fnsku', ''),
                 '实际数量': item.get('quantity_real', 0),
-                '店铺名': shop_name,
+                '店铺': shop_name,
                 '仓库': warehouse_name,
                 '供应商': supplier_name,
                 '创建时间': create_time,
@@ -347,7 +347,7 @@ async def main():
             # 统计各店铺的记录数
             shop_counts = {}
             for record in sku_data_list:
-                shop_name = record.get('店铺名', '未知')
+                shop_name = record.get('店铺', '未知')
                 shop_counts[shop_name] = shop_counts.get(shop_name, 0) + 1
             
             logger.info("  各店铺SKU记录数：")
