@@ -325,7 +325,7 @@ def merge_data(purchase_dict: Dict, operation_dict: Dict, fabric_dict: Dict) -> 
         # 组装数据
         record = {
             'SKU': sku,
-            'spu': spu,
+            'SPU': spu,
             'spu颜色': spu_color,
             '店铺': shop,
             '面料': fabric,
@@ -341,8 +341,8 @@ def merge_data(purchase_dict: Dict, operation_dict: Dict, fabric_dict: Dict) -> 
         
         merged_data.append(record)
     
-    # 统计spu和spu颜色的提取情况
-    spu_empty_count = sum(1 for r in merged_data if r.get('spu') == '无' or not r.get('spu'))
+    # 统计SPU和spu颜色的提取情况
+    spu_empty_count = sum(1 for r in merged_data if r.get('SPU') == '无' or not r.get('SPU'))
     spu_color_empty_count = sum(1 for r in merged_data if r.get('spu颜色') == '无' or not r.get('spu颜色'))
     spu_valid_count = len(merged_data) - spu_empty_count
     spu_color_valid_count = len(merged_data) - spu_color_empty_count
@@ -353,8 +353,8 @@ def merge_data(purchase_dict: Dict, operation_dict: Dict, fabric_dict: Dict) -> 
     
     # 如果有很多空的spu，输出一些示例SKU用于调试
     if spu_empty_count > 0 and spu_empty_count <= 10:
-        empty_spu_examples = [r['SKU'] for r in merged_data if r.get('spu') == '无' or not r.get('spu')]
-        logger.info(f"   spu为空的SKU示例: {empty_spu_examples[:5]}")
+        empty_spu_examples = [r['SKU'] for r in merged_data if r.get('SPU') == '无' or not r.get('SPU')]
+        logger.info(f"   SPU为空的SKU示例: {empty_spu_examples[:5]}")
     
     return merged_data
 
@@ -367,7 +367,7 @@ def create_analysis_table_if_not_exists() -> None:
         CREATE TABLE IF NOT EXISTS `下单分析表` (
             `id` INT AUTO_INCREMENT PRIMARY KEY,
             `SKU` VARCHAR(255),
-            `spu` VARCHAR(255) COMMENT '从SKU第一个-之前提取',
+            `SPU` VARCHAR(255) COMMENT '从SKU第一个-之前提取',
             `spu颜色` VARCHAR(255) COMMENT '从SKU第二个-之前提取',
             `店铺` VARCHAR(255),
             `面料` VARCHAR(255),
@@ -388,27 +388,27 @@ def create_analysis_table_if_not_exists() -> None:
         cursor.execute(sql)
         
         # 为已存在的表添加新字段（如果字段不存在）
-        # 先检查spu字段
+            # 先检查SPU字段
         try:
             cursor.execute("""
                 SELECT COUNT(*) FROM information_schema.COLUMNS 
                 WHERE TABLE_SCHEMA = DATABASE() 
                 AND TABLE_NAME = '下单分析表' 
-                AND COLUMN_NAME = 'spu'
+                AND COLUMN_NAME = 'SPU'
             """)
             spu_exists = cursor.fetchone()[0] > 0
             
             if not spu_exists:
                 cursor.execute("""
                     ALTER TABLE `下单分析表` 
-                    ADD COLUMN `spu` VARCHAR(255) COMMENT '从SKU第一个-之前提取' 
+                    ADD COLUMN `SPU` VARCHAR(255) COMMENT '从SKU第一个-之前提取' 
                     AFTER `SKU`
                 """)
-                logger.info("   已添加字段: spu")
+                logger.info("   已添加字段: SPU")
         except Exception as e:
             logger.warning(f"   检查/添加spu字段时出错: {e}")
         
-        # 再检查spu颜色字段（如果spu不存在，则放在SKU之后；如果spu存在，则放在spu之后）
+        # 再检查spu颜色字段（如果SPU不存在，则放在SKU之后；如果SPU存在，则放在SPU之后）
         try:
             cursor.execute("""
                 SELECT COUNT(*) FROM information_schema.COLUMNS 
@@ -419,24 +419,24 @@ def create_analysis_table_if_not_exists() -> None:
             spu_color_exists = cursor.fetchone()[0] > 0
             
             if not spu_color_exists:
-                # 检查spu字段是否存在，决定放在哪里
+                # 检查SPU字段是否存在，决定放在哪里
                 cursor.execute("""
                     SELECT COUNT(*) FROM information_schema.COLUMNS 
                     WHERE TABLE_SCHEMA = DATABASE() 
                     AND TABLE_NAME = '下单分析表' 
-                    AND COLUMN_NAME = 'spu'
+                    AND COLUMN_NAME = 'SPU'
                 """)
                 spu_exists = cursor.fetchone()[0] > 0
                 
                 if spu_exists:
-                    # spu存在，放在spu之后
+                    # SPU存在，放在SPU之后
                     cursor.execute("""
                         ALTER TABLE `下单分析表` 
                         ADD COLUMN `spu颜色` VARCHAR(255) COMMENT '从SKU第二个-之前提取' 
-                        AFTER `spu`
+                        AFTER `SPU`
                     """)
                 else:
-                    # spu不存在，放在SKU之后
+                    # SPU不存在，放在SKU之后
                     cursor.execute("""
                         ALTER TABLE `下单分析表` 
                         ADD COLUMN `spu颜色` VARCHAR(255) COMMENT '从SKU第二个-之前提取' 
@@ -497,18 +497,18 @@ def update_spu_fields_from_sku(start_date: str) -> None:
     
     try:
         with db_cursor(dictionary=False) as cursor:
-            # 更新spu字段：从SKU的第一个'-'之前提取
+            # 更新SPU字段：从SKU的第一个'-'之前提取
             # 使用SUBSTRING_INDEX函数：SUBSTRING_INDEX(SKU, '-', 1) 获取第一个'-'之前的部分
             update_spu_sql = """
                 UPDATE `下单分析表`
-                SET `spu` = SUBSTRING_INDEX(`SKU`, '-', 1)
+                SET `SPU` = SUBSTRING_INDEX(`SKU`, '-', 1)
                 WHERE `日期` >= %s
                   AND (`SKU` IS NOT NULL AND `SKU` != '')
-                  AND (`spu` IS NULL OR `spu` = '' OR `spu` = '无')
+                  AND (`SPU` IS NULL OR `SPU` = '' OR `SPU` = '无')
             """
             cursor.execute(update_spu_sql, (start_date,))
             spu_updated = cursor.rowcount
-            logger.info(f"   已更新 {spu_updated} 条记录的spu字段")
+            logger.info(f"   已更新 {spu_updated} 条记录的SPU字段")
             
             # 更新spu颜色字段：从SKU的第二个'-'之前提取
             # 使用SUBSTRING_INDEX函数：SUBSTRING_INDEX(SKU, '-', 2) 获取第二个'-'之前的部分
@@ -521,7 +521,7 @@ def update_spu_fields_from_sku(start_date: str) -> None:
                     THEN SUBSTRING_INDEX(`SKU`, '-', 2)
                     WHEN LOCATE('-', `SKU`) > 0 
                     THEN `SKU`
-                    ELSE `spu`
+                    ELSE `SPU`
                 END
                 WHERE `日期` >= %s
                   AND (`SKU` IS NOT NULL AND `SKU` != '')
@@ -535,7 +535,7 @@ def update_spu_fields_from_sku(start_date: str) -> None:
             cursor.execute("""
                 SELECT 
                     COUNT(*) as total,
-                    SUM(CASE WHEN `spu` IS NULL OR `spu` = '' OR `spu` = '无' THEN 1 ELSE 0 END) as empty_spu,
+                    SUM(CASE WHEN `SPU` IS NULL OR `SPU` = '' OR `SPU` = '无' THEN 1 ELSE 0 END) as empty_spu,
                     SUM(CASE WHEN `spu颜色` IS NULL OR `spu颜色` = '' OR `spu颜色` = '无' THEN 1 ELSE 0 END) as empty_spu_color
                 FROM `下单分析表`
                 WHERE `日期` >= %s
@@ -545,7 +545,7 @@ def update_spu_fields_from_sku(start_date: str) -> None:
             empty_spu = stats[1]
             empty_spu_color = stats[2]
             
-            logger.info(f"   更新后统计: 总记录 {total} 条, spu为空 {empty_spu} 条, spu颜色为空 {empty_spu_color} 条")
+            logger.info(f"   更新后统计: 总记录 {total} 条, SPU为空 {empty_spu} 条, spu颜色为空 {empty_spu_color} 条")
             
     except Exception as e:
         logger.error(f"   更新spu和spu颜色字段时出错: {e}", exc_info=True)

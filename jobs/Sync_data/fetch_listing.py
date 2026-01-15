@@ -542,11 +542,14 @@ def convert_listing_data(items: List[Dict[str, Any]],
 
 def create_table_if_needed(table_name: str, sample_row: Dict[str, Any]) -> None:
     """
-    创建或重建数据表
+    创建数据表（如果不存在），如果表存在但结构不匹配则报错
     
     Args:
         table_name: 表名
         sample_row: 样本数据行
+        
+    Raises:
+        ValueError: 如果表存在但结构不匹配
     """
     with db_cursor(dictionary=False) as cursor:
         # 检查表是否存在
@@ -563,10 +566,17 @@ def create_table_if_needed(table_name: str, sample_row: Dict[str, Any]) -> None:
                 logger.info(f"表 {table_name} 结构正确")
                 return
             else:
-                logger.warning(f"表 {table_name} 结构不符，正在重建...")
-                cursor.execute(f"DROP TABLE IF EXISTS `{table_name}`")
+                # 表存在但结构不匹配，报错而不是重建
+                error_msg = (
+                    f"表 {table_name} 已存在但结构不匹配！\n"
+                    f"  期望字段: {expected}\n"
+                    f"  实际字段: {columns}\n"
+                    f"  请手动处理表结构问题，不要自动重建表"
+                )
+                logger.error(error_msg)
+                raise ValueError(error_msg)
         
-        # 创建表
+        # 表不存在，创建表
         fields = []
         for k, v in sample_row.items():
             # 特殊处理：小类排名字段，使用可空的INT类型

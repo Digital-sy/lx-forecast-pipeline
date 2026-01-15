@@ -251,7 +251,7 @@ def filter_skus_by_spu_sales(aggregated_data: Dict[str, Dict[str, Dict[str, Any]
         
         for sku, sku_data in shop_data.items():
             total_skus += 1
-            spu = sku_data.get('spu', '').strip() if sku_data.get('spu') else extract_spu_from_sku(sku)
+            spu = sku_data.get('SPU', '').strip() if sku_data.get('SPU') else extract_spu_from_sku(sku)
             if not spu:
                 # 如果没有SPU，使用SKU本身作为SPU
                 spu = sku
@@ -503,13 +503,13 @@ def read_sales_data_from_db() -> List[Dict[str, Any]]:
     table_name = '销量统计_msku月度'  # 注意：表名使用小写msku
     
     with db_cursor() as cursor:
-        # 先检查表是否有spu字段
+        # 先检查表是否有SPU字段
         # 注意：销量统计_msku月度表没有负责人和运营字段，需要从其他表匹配
         cursor.execute(f"""
             SELECT COUNT(*) as cnt FROM information_schema.COLUMNS 
             WHERE TABLE_SCHEMA = DATABASE() 
             AND TABLE_NAME = '{table_name}' 
-            AND COLUMN_NAME = 'spu'
+            AND COLUMN_NAME = 'SPU'
         """)
         result = cursor.fetchone()
         has_spu_field = (result.get('cnt', 0) if result else 0) > 0
@@ -521,7 +521,7 @@ def read_sales_data_from_db() -> List[Dict[str, Any]]:
             店铺,
             统计日期,
             销量
-            {', spu' if has_spu_field else ''}
+            {', SPU' if has_spu_field else ''}
         FROM `{table_name}`
         WHERE 店铺 IS NOT NULL 
           AND 店铺 != '' 
@@ -549,7 +549,7 @@ def read_sales_data_from_db() -> List[Dict[str, Any]]:
             店铺,
             统计日期,
             销量
-            {', spu' if has_spu_field else ''}
+            {', SPU' if has_spu_field else ''}
         FROM `{table_name}`
         WHERE 店铺 IS NOT NULL 
           AND 店铺 != '' 
@@ -564,19 +564,19 @@ def read_sales_data_from_db() -> List[Dict[str, Any]]:
         results = cursor.fetchall()
         logger.info(f"从数据库读取到 {len(results)} 条销量统计数据")
         
-        # SPU从销量统计表获取（如果表中有spu字段）
-        # 如果表中没有spu字段，则从SKU提取SPU（第一个"-"之前）
+        # SPU从销量统计表获取（如果表中有SPU字段）
+        # 如果表中没有SPU字段，则从SKU提取SPU（第一个"-"之前）
         if not has_spu_field:
-            logger.info("销量统计表中没有spu字段，从SKU提取SPU")
+            logger.info("销量统计表中没有SPU字段，从SKU提取SPU")
             for row in results:
                 sku = row.get('SKU', '').strip()
-                row['spu'] = extract_spu_from_sku(sku) if sku else None
+                row['SPU'] = extract_spu_from_sku(sku) if sku else None
         else:
-            # 如果表中有spu字段，但某些记录的spu为空，则从SKU提取
+            # 如果表中有SPU字段，但某些记录的SPU为空，则从SKU提取
             for row in results:
-                if not row.get('spu'):
+                if not row.get('SPU'):
                     sku = row.get('SKU', '').strip()
-                    row['spu'] = extract_spu_from_sku(sku) if sku else None
+                    row['SPU'] = extract_spu_from_sku(sku) if sku else None
         
         # 从listing表获取负责人（使用SPU+店铺匹配）
         # 注意：销量统计_msku月度表没有负责人和运营字段，需要从其他表匹配
@@ -596,7 +596,7 @@ def read_sales_data_from_db() -> List[Dict[str, Any]]:
             operation = None
             
             # 提取SPU（第一个"-"之前的部分）
-            spu = row.get('spu', '').strip() if row.get('spu') else extract_spu_from_sku(sku)
+            spu = row.get('SPU', '').strip() if row.get('SPU') else extract_spu_from_sku(sku)
             
             # 第一优先级：从listing表获取负责人（使用SPU+店铺匹配）
             if spu and shop:
@@ -717,9 +717,9 @@ def aggregate_sales_by_shop_and_sku(data: List[Dict[str, Any]],
         month_key = get_month_key(year, month)
         
         # 保存SPU信息（从销量统计表获取，如果存在）
-        spu = row.get('spu', '').strip() if row.get('spu') else ''
-        if spu and not result[shop][sku].get('spu'):
-            result[shop][sku]['spu'] = spu
+        spu = row.get('SPU', '').strip() if row.get('SPU') else ''
+        if spu and not result[shop][sku].get('SPU'):
+            result[shop][sku]['SPU'] = spu
         
         # 保存运营信息（从产品信息表获取，如果存在）
         operation = row.get('运营', '').strip() if row.get('运营') else ''
@@ -778,7 +778,7 @@ def prepare_feishu_records(shop_data: Dict[str, Dict[str, Any]],
     准备飞书多维表的记录数据
     
     Args:
-        shop_data: 店铺的SKU数据，格式为 {SKU: {月份标签: 销量, 'spu': SPU, '运营': 运营}}
+        shop_data: 店铺的SKU数据，格式为 {SKU: {月份标签: 销量, 'SPU': SPU, '运营': 运营}}
         month_labels: 月份标签列表
         forecast_sales_labels: 预计销量字段标签列表（可选）
         forecast_order_labels: 预计下单量字段标签列表（可选）
@@ -815,7 +815,7 @@ def prepare_feishu_records(shop_data: Dict[str, Dict[str, Any]],
         }
         
         # 添加SPU字段（从销量统计表获取，如果没有则默认为空字符串）
-        spu = sku_data.get('spu', '')
+        spu = sku_data.get('SPU', '')
         record['SPU'] = spu if spu else ''
         
         # 添加运营字段（从产品信息表获取，如果没有则默认为空字符串）
@@ -1048,15 +1048,16 @@ async def process_shop_data(shop_name: str,
                     
                     if has_no_responsible:
                         # 创建"无匹配负责人"视图：运营字段为空
-                        # 根据飞书API文档，当operator为isEmpty时，value字段应该不包含或为null
+                        # 根据飞书API文档，当operator为isEmpty时，value字段必须留空（不包含在条件中）
+                        # 格式参考：https://open.feishu.cn/document/server-docs/docs/bitable-v1/app-table-view/update-view
                         view_name = "无匹配负责人"
                         filter_condition = {
                             "conjunction": "and",
                             "conditions": [
                                 {
                                     "field_id": operation_field_id,
-                                    "operator": "isEmpty"  # 空值使用 isEmpty，不包含value字段
-                                    # 注意：isEmpty操作符时，不包含value字段
+                                    "operator": "isEmpty"
+                                    # 注意：isEmpty操作符时，不包含value字段（留空）
                                 }
                             ]
                         }

@@ -379,11 +379,14 @@ def convert_to_msku_dimension(stats: List[Dict[str, Any]], month_start: str) -> 
 
 def create_table_if_needed(table_name: str, sample_row: Dict[str, Any]) -> None:
     """
-    创建或重建数据表
+    创建数据表（如果不存在），如果表存在但结构不匹配则报错
     
     Args:
         table_name: 表名
         sample_row: 样本数据行
+        
+    Raises:
+        ValueError: 如果表存在但结构不匹配
     """
     with db_cursor(dictionary=False) as cursor:
         # 检查表是否存在
@@ -400,10 +403,17 @@ def create_table_if_needed(table_name: str, sample_row: Dict[str, Any]) -> None:
                 logger.info(f"表 {table_name} 结构正确")
                 return
             else:
-                logger.warning(f"表 {table_name} 结构不符，正在重建...")
-                cursor.execute(f"DROP TABLE IF EXISTS `{table_name}`")
+                # 表存在但结构不匹配，报错而不是重建
+                error_msg = (
+                    f"表 {table_name} 已存在但结构不匹配！\n"
+                    f"  期望字段: {expected}\n"
+                    f"  实际字段: {columns}\n"
+                    f"  请手动处理表结构问题，不要自动重建表"
+                )
+                logger.error(error_msg)
+                raise ValueError(error_msg)
         
-        # 创建表
+        # 表不存在，创建表
         fields = []
         for k, v in sample_row.items():
             if isinstance(v, int):
@@ -556,13 +566,13 @@ def get_2024_month_ranges() -> List[Tuple[str, str]]:
     return month_ranges
 
 
-def get_current_and_last_month_ranges() -> List[Tuple[str, str]]:
+def get_last_three_months_ranges() -> List[Tuple[str, str]]:
     """
-    获取当前月份和上个月的月份范围列表（增量更新当月和上个月）
+    获取前三个月（包括本月）的月份范围列表（增量更新前三个月）
     
     Returns:
         List[Tuple[str, str]]: 月份范围列表，每个元素为(开始日期, 结束日期)
-        第一个是上个月，第二个是当前月
+        按时间顺序：前两个月、上个月、当前月
     """
     now = datetime.now()
     current_year = now.year
@@ -570,44 +580,35 @@ def get_current_and_last_month_ranges() -> List[Tuple[str, str]]:
     
     month_ranges = []
     
-    # 1. 上个月
-    if current_month == 1:
-        last_month_year = current_year - 1
-        last_month = 12
-    else:
-        last_month_year = current_year
-        last_month = current_month - 1
-    
-    # 上个月的第一天
-    last_month_first = datetime(last_month_year, last_month, 1)
-    # 上个月的最后一天
-    if last_month == 12:
-        last_month_last = datetime(last_month_year, 12, 31)
-    else:
-        next_month_first = datetime(last_month_year, last_month + 1, 1)
-        last_month_last = next_month_first - timedelta(days=1)
-    
-    month_ranges.append((
-        last_month_first.strftime("%Y-%m-%d"),
-        last_month_last.strftime("%Y-%m-%d")
-    ))
-    
-    # 2. 当前月
-    current_month_first = datetime(current_year, current_month, 1)
-    if current_month == 12:
-        current_month_last = datetime(current_year, 12, 31)
-    else:
-        next_month_first = datetime(current_year, current_month + 1, 1)
-        current_month_last = next_month_first - timedelta(days=1)
-    
-    # 如果是当前月，结束日期为今天
-    if now.day < current_month_last.day:
-        current_month_last = now
-    
-    month_ranges.append((
-        current_month_first.strftime("%Y-%m-%d"),
-        current_month_last.strftime("%Y-%m-%d")
-    ))
+    # 生成前三个月（包括本月）
+    for i in range(2, -1, -1):  # i = 2, 1, 0 对应前两个月、上个月、当前月
+        if current_month - i <= 0:
+            # 跨年处理
+            month = current_month - i + 12
+            year = current_year - 1
+        else:
+            month = current_month - i
+            year = current_year
+        
+        # 该月的第一天
+        month_first = datetime(year, month, 1)
+        
+        # 该月的最后一天
+        if month == 12:
+            month_last = datetime(year, 12, 31)
+        else:
+            next_month_first = datetime(year, month + 1, 1)
+            month_last = next_month_first - timedelta(days=1)
+        
+        # 如果是当前月，结束日期为今天
+        if i == 0:  # 当前月
+            if now.day < month_last.day:
+                month_last = now
+        
+        month_ranges.append((
+            month_first.strftime("%Y-%m-%d"),
+            month_last.strftime("%Y-%m-%d")
+        ))
     
     return month_ranges
 
@@ -665,15 +666,15 @@ def get_month_ranges(start_year: int = 2025, start_month: int = 1) -> List[Tuple
 
 async def main(start_date: str = None, end_date: str = None):
     """
-    主函数（默认增量更新当月和上个月）
+    主函数（默认增量更新前三个月，包括本月）
     
     Args:
         start_date: 开始日期（格式：YYYY-MM-DD），如果指定则查询指定日期范围
         end_date: 结束日期（格式：YYYY-MM-DD），如果指定则查询指定日期范围
-        如果不指定，默认增量更新当月和上个月
+        如果不指定，默认增量更新前三个月（包括本月）
     """
     logger.info("="*80)
-    logger.info("销量统计数据采集（MSKU维度-月度统计，默认增量更新当月和上个月）")
+    logger.info("销量统计数据采集（MSKU维度-月度统计，默认增量更新前三个月，包括本月）")
     logger.info("="*80)
     
     # 验证配置
@@ -743,14 +744,14 @@ async def main(start_date: str = None, end_date: str = None):
             logger.info(f"   已拆分为 {len(month_ranges)} 个月份进行查询")
         except Exception as e:
             logger.error(f"解析日期范围失败: {e}")
-            logger.info("将使用默认的增量更新策略")
-            month_ranges = get_current_and_last_month_ranges()
+            logger.info("将使用默认策略：增量更新前三个月（包括本月）")
+            month_ranges = get_last_three_months_ranges()
     else:
-        # 默认增量更新当月和上个月
-        month_ranges = get_current_and_last_month_ranges()
-        logger.info(f"📅 增量更新当月和上个月:")
+        # 默认增量更新前三个月（包括本月）
+        month_ranges = get_last_three_months_ranges()
+        logger.info(f"📅 增量更新前三个月（包括本月）:")
         for i, (m_start, m_end) in enumerate(month_ranges, 1):
-            month_name = "上个月" if i == 1 else "当前月"
+            month_name = ["前两个月", "上个月", "当前月"][i-1] if i <= 3 else f"第{i}个月"
             logger.info(f"   {month_name}: {m_start} 至 {m_end}")
     
     logger.info(f"📊 共需要处理 {len(month_ranges)} 个月份")
@@ -842,7 +843,7 @@ async def main(start_date: str = None, end_date: str = None):
     if start_date and end_date:
         logger.info(f"  更新策略: 指定日期范围更新")
     else:
-        logger.info(f"  更新策略: 增量更新（当月和上个月）")
+        logger.info(f"  更新策略: 增量更新前三个月（包括本月）")
     logger.info(f"  处理月份数: {len(month_ranges)} 个月")
     logger.info(f"  时间范围: {month_ranges[0][0]} 至 {month_ranges[-1][1]}")
     logger.info(f"  删除旧记录: {total_deleted} 条")
@@ -887,7 +888,7 @@ if __name__ == '__main__':
     
     # 支持命令行参数
     # 用法: python -m jobs.purchase_analysis.fetch_sale_stat_v2_msku_monthly
-    #       默认增量更新当月和上个月
+    #       默认增量更新前三个月（包括本月）
     # 或: python -m jobs.purchase_analysis.fetch_sale_stat_v2_msku_monthly [start_date] [end_date]
     #       指定日期范围进行更新
     if len(sys.argv) == 3:

@@ -3,6 +3,7 @@
 """
 产品管理数据采集任务
 从领星API获取产品管理数据并存入数据库
+增量更新模式：获取最近7天的产品数据，删除对应SKU的旧数据后重新写入
 """
 import asyncio
 from datetime import datetime, timedelta
@@ -457,10 +458,14 @@ def convert_product_data(products: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 def create_table_if_needed(table_name: str, sample_row: Dict[str, Any]) -> None:
     """
     创建或更新数据表结构（支持添加新字段）
+    如果表已存在但格式不符合，直接报错而不是重建表
     
     Args:
         table_name: 表名
         sample_row: 样本数据行
+        
+    Raises:
+        ValueError: 如果表已存在但格式不符合要求
     """
     with db_cursor(dictionary=False) as cursor:
         # 检查表是否存在
@@ -487,13 +492,19 @@ def create_table_if_needed(table_name: str, sample_row: Dict[str, Any]) -> None:
             cursor.execute(sql)
             logger.info(f"表 {table_name} 创建成功")
         else:
-            # 检查并添加缺失的字段
+            # 检查表结构是否匹配
             cursor.execute(f"SHOW COLUMNS FROM `{table_name}`")
             existing_columns = {row[0] for row in cursor.fetchall()}
             expected_columns = set(sample_row.keys())
             
+            # 检查是否有预期字段缺失
             missing_columns = expected_columns - existing_columns
+            
+            # 检查是否有额外字段（不在预期中的字段，排除id字段）
+            extra_columns = existing_columns - expected_columns - {'id'}
+            
             if missing_columns:
+                # 如果缺少必需字段，尝试添加
                 logger.info(f"表 {table_name} 需要添加 {len(missing_columns)} 个新字段")
                 for col_name in missing_columns:
                     col_value = sample_row[col_name]
@@ -512,9 +523,17 @@ def create_table_if_needed(table_name: str, sample_row: Dict[str, Any]) -> None:
                         cursor.execute(f"ALTER TABLE `{table_name}` ADD COLUMN `{col_name}` {col_type}")
                         logger.info(f"  已添加字段: {col_name} ({col_type})")
                     except Exception as e:
-                        logger.warning(f"  添加字段 {col_name} 失败: {e}")
-            else:
-                logger.info(f"表 {table_name} 结构完整，无需更新")
+                        error_msg = f"表 {table_name} 格式不符合要求：缺少字段 {col_name}，且无法自动添加（错误: {e}）"
+                        logger.error(error_msg)
+                        raise ValueError(error_msg)
+            
+            # 检查是否有额外字段（如果表中有预期外的字段，报错）
+            if extra_columns:
+                error_msg = f"表 {table_name} 格式不符合要求：存在预期外的字段 {sorted(extra_columns)}，请手动处理表结构"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            
+            logger.info(f"表 {table_name} 结构完整，无需更新")
 
 
 def delete_by_sku_list(table_name: str, sku_list: List[str]) -> int:
@@ -594,13 +613,13 @@ async def main():
     # 测试模式：只获取一页数据
     TEST_MODE = False
     # 全量获取模式：获取所有产品数据（不限制时间范围）
-    FULL_SYNC = False  # 设置为True进行全量获取
+    FULL_SYNC = False  # 增量更新模式：获取最近7天的产品数据
     
     logger.info("="*80)
     if TEST_MODE:
         logger.info("【测试模式】产品管理数据 - 仅获取一页数据")
     elif FULL_SYNC:
-        logger.info("【全量获取模式】产品管理数据 - 获取所有产品数据")
+        logger.info("【全量更新模式】产品管理数据 - 获取所有产品数据")
     else:
         logger.info("产品管理数据增量更新（最近7天）")
     logger.info("="*80)

@@ -145,21 +145,21 @@ def load_current_inventory() -> Dict[Tuple[str, str], Dict[str, int]]:
     with db_cursor(dictionary=True) as cursor:
         sql = """
         SELECT 
-            sku,
+            SKU,
             店铺,
             库存状态,
             SUM(数量) as 总数量
         FROM `库存预估表`
-        WHERE sku IS NOT NULL AND sku != '' AND sku != '无'
+        WHERE SKU IS NOT NULL AND SKU != '' AND SKU != '无'
           AND 店铺 IS NOT NULL AND 店铺 != '' AND 店铺 != '无'
-        GROUP BY sku, 店铺, 库存状态
+        GROUP BY SKU, 店铺, 库存状态
         """
         
         cursor.execute(sql)
         results = cursor.fetchall()
     
     for row in results:
-        sku = row['sku']
+        sku = row['SKU']
         shop = normalize_shop_name(row['店铺'] or '')
         status = row['库存状态']
         quantity = int(row['总数量'] or 0)
@@ -1039,7 +1039,7 @@ def generate_sales_forecast_table() -> List[Dict[str, Any]]:
                 '店铺': shop if shop and shop.strip() else '无',
                 '月份': month,
                 '日期': date_value,
-                'spu': spu if spu and spu.strip() else '无',
+                'SPU': spu if spu and spu.strip() else '无',
                 'spu颜色': spu_color if spu_color and spu_color.strip() else '无',
                 '面料': fabric if fabric and fabric.strip() else '无',
                 '实际销量': actual_sales,
@@ -1070,7 +1070,7 @@ def create_forecast_table_if_not_exists() -> None:
             `店铺` VARCHAR(255),
             `月份` VARCHAR(50) COMMENT '月份，格式：YYYY-MM',
             `日期` DATE COMMENT '日期，每月1号',
-            `spu` VARCHAR(255) COMMENT '从SKU第一个-之前提取',
+            `SPU` VARCHAR(255) COMMENT '从SKU第一个-之前提取',
             `spu颜色` VARCHAR(255) COMMENT '从SKU第二个-之前提取',
             `面料` VARCHAR(255),
             `实际销量` INT DEFAULT 0 COMMENT '实际销量（历史月份有值，未来月份为0）',
