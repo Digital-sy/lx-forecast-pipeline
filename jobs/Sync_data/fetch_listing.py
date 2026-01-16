@@ -25,7 +25,7 @@ logger = get_logger('listing')
 # 重试配置（令牌桶容量为1，需要更谨慎）
 MAX_RETRIES = 5  # 最大重试次数
 RETRY_DELAY = 10  # 重试延迟（秒）
-REQUEST_DELAY = 3  # 请求间隔（秒）- 令牌桶容量为1，需要更长的间隔
+REQUEST_DELAY = 5  # 请求间隔（秒）- 令牌桶容量为1，需要更长的间隔（从3秒增加到5秒）
 TOKEN_BUCKET_CAPACITY = 1  # 令牌桶容量
 
 
@@ -163,7 +163,7 @@ async def fetch_page_with_retry(op_api: OpenApiBase, token: str,
                 continue
             
             # 检查是否token过期
-            if code in [401, 403, 2001003, 3001001, 3001002]:  # token相关错误
+            if code in [401, 403, 2001003, 2001005, 3001001, 3001002]:  # token相关错误（2001005: access token not match）
                 logger.error(f"🔑 Token错误 (code={code}): {message}，需要刷新token")
                 return [], 0, "TOKEN_EXPIRED", False
             
@@ -193,21 +193,25 @@ async def fetch_page_with_retry(op_api: OpenApiBase, token: str,
             return items, total, "", was_rate_limited
             
         except Exception as e:
-            logger.error(f"❌ 请求异常（第 {retry + 1}/{MAX_RETRIES} 次尝试）: {e}")
+            # 记录详细的异常信息（包括异常类型和堆栈）
+            error_msg = str(e) if str(e) else repr(e)
+            error_type = type(e).__name__
+            logger.error(f"❌ 请求异常（第 {retry + 1}/{MAX_RETRIES} 次尝试）: {error_type}: {error_msg}", exc_info=True)
             if retry < MAX_RETRIES - 1:
                 wait_time = RETRY_DELAY * (retry + 1)
                 logger.info(f"⏳ 等待 {wait_time} 秒后重试...")
                 await asyncio.sleep(wait_time)
             else:
                 logger.error(f"❌ 达到最大重试次数，请求失败")
-                return [], 0, f"EXCEPTION: {str(e)}", was_rate_limited
+                return [], 0, f"EXCEPTION: {error_type}: {error_msg}", was_rate_limited
     
     return [], 0, "MAX_RETRIES_EXCEEDED", was_rate_limited
 
 
 async def fetch_all_listings(op_api: OpenApiBase, token_resp, 
                              sid_list: List[str] = None,
-                             max_records: int = None) -> List[Dict[str, Any]]:
+                             max_records: int = None,
+                             is_delete: int = 0) -> List[Dict[str, Any]]:
     """
     获取所有Listing数据（分页处理，支持重试和token刷新）
     
@@ -216,13 +220,14 @@ async def fetch_all_listings(op_api: OpenApiBase, token_resp,
         token_resp: 访问令牌响应对象（包含access_token和refresh_token）
         sid_list: 店铺ID列表（可选，如果为None则查询所有店铺）
         max_records: 最大抓取记录数（可选，用于测试，如果为None则抓取全部）
+        is_delete: 是否删除：0 未删除，1 已删除（默认0）
         
     Returns:
         List[Dict[str, Any]]: Listing列表
     """
     all_items = []
     offset = 0
-    length = 1000  # 每页最多1000条（API上限）
+    length = 800  # 每页800条（减少数据量以降低限流风险，API上限为1000）
     token = token_resp.access_token
     total_records = None
     
@@ -235,7 +240,7 @@ async def fetch_all_listings(op_api: OpenApiBase, token_resp,
     req_body = {
         "offset": offset,
         "length": length,
-        "is_delete": 0  # 只查询未删除的
+        "is_delete": is_delete  # 0 未删除，1 已删除
     }
     
     # 如果指定了店铺ID列表，添加到请求参数
@@ -309,8 +314,8 @@ async def fetch_all_listings(op_api: OpenApiBase, token_resp,
             # 遇到限流，增加间隔（给令牌更多时间回收）
             consecutive_rate_limited += 1
             consecutive_success = 0
-            # 间隔递增：3秒 → 4秒 → 5秒 → 6秒（最大6秒）
-            current_delay = min(REQUEST_DELAY + consecutive_rate_limited, 6)
+            # 间隔递增：5秒 → 6秒 → 7秒 → 8秒（最大8秒）
+            current_delay = min(REQUEST_DELAY + consecutive_rate_limited, 8)
             logger.info(f"🪣 检测到限流，调整请求间隔为 {current_delay} 秒")
         else:
             # 成功获取，重置限流计数
@@ -433,6 +438,14 @@ def convert_listing_data(items: List[Dict[str, Any]],
                 first_principal = principal_info[0]
                 if isinstance(first_principal, dict):
                     principal_name = first_principal.get('principal_name', '') or ''
+        
+        # 如果负责人名称包含多个（用逗号、分号等分隔），只保留第一个
+        if principal_name:
+            # 按常见分隔符分割，取第一个
+            for separator in [',', ';', '，', '；', '|', '/']:
+                if separator in principal_name:
+                    principal_name = principal_name.split(separator)[0].strip()
+                    break
         
         # 销量字段
         yesterday_volume = item.get('yesterday_volume', '0') or '0'  # 销量-昨天
@@ -642,7 +655,9 @@ def insert_data_batch(table_name: str, data_list: List[Dict[str, Any]]) -> None:
         fields = ','.join(f"`{k}`" for k in keys)
         values_placeholder = ','.join(['%s'] * len(keys))
         
-        sql = f"INSERT INTO `{table_name}` ({fields}) VALUES ({values_placeholder})"
+        # 使用 ON DUPLICATE KEY UPDATE 处理重复键（如果数据去重后仍有重复，则更新）
+        update_fields = ','.join([f"`{k}`=VALUES(`{k}`)" for k in keys if k not in ['店铺id', 'MSKU']])
+        sql = f"INSERT INTO `{table_name}` ({fields}) VALUES ({values_placeholder}) ON DUPLICATE KEY UPDATE {update_fields}"
         
         batch_size = 200
         
@@ -715,7 +730,7 @@ async def main():
     if TEST_MODE:
         logger.info("🧪 测试模式：只抓取前1000条数据")
     else:
-        logger.info("📊 正式模式：抓取全部数据")
+        logger.info("📊 正式模式：抓取全部数据（包括未删除和已删除）")
     logger.info(f"⏱️  配置参数（令牌桶容量为1，请求更谨慎）:")
     logger.info(f"   - 请求间隔: {REQUEST_DELAY}秒")
     logger.info(f"   - 最大重试: {MAX_RETRIES}次")
@@ -726,17 +741,126 @@ async def main():
         logger.info(f"   - 查询店铺: 全部")
     logger.info("="*80)
     
-    items = await fetch_all_listings(op_api, token_resp, sid_list, max_records=MAX_TEST_RECORDS)
-    logger.info(f"✅ 共获取 {len(items)} 条Listing数据")
+    # 分别获取未删除和已删除的数据
+    all_items = []
     
-    if not items:
+    # 第一遍：获取未删除的数据（is_delete=0）
+    logger.info("="*80)
+    logger.info("📥 第一遍：获取未删除的数据（is_delete=0）")
+    logger.info("="*80)
+    items_not_deleted = await fetch_all_listings(
+        op_api, token_resp, sid_list, 
+        max_records=MAX_TEST_RECORDS, 
+        is_delete=0
+    )
+    logger.info(f"✅ 未删除数据：共获取 {len(items_not_deleted)} 条")
+    all_items.extend(items_not_deleted)
+    
+    # 第二遍：获取已删除的数据（is_delete=1）
+    # 在开始第二遍之前刷新token，因为第一遍可能用了很长时间
+    logger.info("="*80)
+    logger.info("🔄 刷新Token（准备获取已删除数据）...")
+    try:
+        token_resp = await op_api.generate_access_token()
+        logger.info(f"✅ Token刷新成功，有效期: {token_resp.expires_in}秒")
+    except Exception as e:
+        logger.error(f"❌ Token刷新失败: {e}")
+        logger.warning("⚠️  将使用原有Token继续尝试...")
+    
+    logger.info("="*80)
+    logger.info("📥 第二遍：获取已删除的数据（is_delete=1）")
+    logger.info("="*80)
+    items_deleted = await fetch_all_listings(
+        op_api, token_resp, sid_list, 
+        max_records=MAX_TEST_RECORDS, 
+        is_delete=1
+    )
+    logger.info(f"✅ 已删除数据：共获取 {len(items_deleted)} 条")
+    
+    logger.info("="*80)
+    logger.info(f"✅ 总计获取 {len(items_not_deleted) + len(items_deleted)} 条Listing数据（未删除: {len(items_not_deleted)} 条，已删除: {len(items_deleted)} 条）")
+    
+    if not items_not_deleted and not items_deleted:
         logger.warning("没有数据需要保存")
         return
     
-    # 转换为标准格式
+    # 分别转换为标准格式
     logger.info("正在转换数据格式...")
-    listing_data_list = convert_listing_data(items, sid_to_name_map)
-    logger.info(f"共生成 {len(listing_data_list)} 条Listing记录")
+    listing_data_not_deleted = convert_listing_data(items_not_deleted, sid_to_name_map)
+    logger.info(f"未删除数据转换完成: {len(listing_data_not_deleted)} 条")
+    
+    listing_data_deleted = convert_listing_data(items_deleted, sid_to_name_map)
+    logger.info(f"已删除数据转换完成: {len(listing_data_deleted)} 条")
+    
+    # 对转换后的数据进行去重（基于 店铺id + MSKU），优先保留未删除的数据，如果有重复则优先保留有负责人的
+    logger.info("正在对数据进行去重处理（优先保留未删除的数据，重复时优先保留有负责人的）...")
+    seen = {}  # 存储 {unique_key: item} 的映射
+    deduplicated_list = []
+    duplicate_count = 0
+    deleted_overridden_count = 0  # 已删除数据被未删除数据覆盖的数量
+    principal_overridden_count = 0  # 因负责人字段被替换的数量
+    
+    # 先处理未删除的数据（优先保留）
+    for item in listing_data_not_deleted:
+        sid = item.get('店铺id', '') or ''
+        seller_sku = item.get('MSKU', '') or ''
+        unique_key = f"{sid}-{seller_sku}"
+        
+        if unique_key not in seen:
+            seen[unique_key] = item
+        else:
+            # 遇到重复，检查负责人字段
+            duplicate_count += 1
+            existing_item = seen[unique_key]
+            existing_principal = existing_item.get('负责人', '') or ''
+            new_principal = item.get('负责人', '') or ''
+            
+            # 如果新记录有负责人而旧记录没有，则替换
+            if new_principal and not existing_principal:
+                seen[unique_key] = item
+                principal_overridden_count += 1
+                logger.debug(f"发现重复记录（未删除数据内部）: {unique_key}，新记录有负责人，已替换")
+            else:
+                # 如果两个都有负责人或都没有，保留第一个（不替换）
+                logger.debug(f"发现重复记录（未删除数据内部）: {unique_key}，保留第一个")
+    
+    # 再处理已删除的数据（如果已存在则检查负责人字段）
+    for item in listing_data_deleted:
+        sid = item.get('店铺id', '') or ''
+        seller_sku = item.get('MSKU', '') or ''
+        unique_key = f"{sid}-{seller_sku}"
+        
+        if unique_key not in seen:
+            seen[unique_key] = item
+        else:
+            # 遇到重复，检查负责人字段
+            duplicate_count += 1
+            deleted_overridden_count += 1
+            existing_item = seen[unique_key]
+            existing_principal = existing_item.get('负责人', '') or ''
+            new_principal = item.get('负责人', '') or ''
+            
+            # 如果新记录（已删除）有负责人而旧记录（未删除）没有，则替换
+            if new_principal and not existing_principal:
+                seen[unique_key] = item
+                principal_overridden_count += 1
+                logger.debug(f"发现重复记录（已删除数据，但未删除数据已存在）: {unique_key}，已删除数据有负责人，已替换")
+            else:
+                # 保留未删除的数据（不替换）
+                logger.debug(f"发现重复记录（已删除数据，但未删除数据已存在）: {unique_key}，保留未删除的数据")
+    
+    # 将字典转换为列表
+    deduplicated_list = list(seen.values())
+    
+    if duplicate_count > 0:
+        logger.warning(f"⚠️  发现 {duplicate_count} 条重复记录（已去重）")
+        if deleted_overridden_count > 0:
+            logger.info(f"   其中 {deleted_overridden_count} 条已删除数据被未删除数据覆盖（保留未删除）")
+        if principal_overridden_count > 0:
+            logger.info(f"   其中 {principal_overridden_count} 条记录因有负责人而被优先保留")
+    
+    logger.info(f"✅ 去重后剩余 {len(deduplicated_list)} 条数据")
+    listing_data_list = deduplicated_list
     
     if not listing_data_list:
         logger.warning("没有数据需要保存")
@@ -763,7 +887,7 @@ async def main():
         logger.info("📊 统计信息：")
         logger.info(f"  更新策略: 全量更新")
         logger.info(f"  删除旧记录: {deleted_count} 条")
-        logger.info(f"  原始数据: {len(items)} 条")
+        logger.info(f"  原始数据: {len(items_not_deleted) + len(items_deleted)} 条（未删除: {len(items_not_deleted)} 条，已删除: {len(items_deleted)} 条）")
         logger.info(f"  转换后数据: {len(listing_data_list)} 条")
         logger.info(f"  新增记录: {len(listing_data_list)} 条")
         

@@ -7,6 +7,7 @@
 """
 import asyncio
 import json
+import re
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Tuple
 from collections import defaultdict
@@ -430,6 +431,69 @@ def get_operation_from_product_info() -> Dict[Tuple[str, str], str]:
     return operation_map
 
 
+def get_order_forecast_from_db(shop_name: str) -> Dict[Tuple[str, str], int]:
+    """
+    从运营预计下单表获取预计下单量数据（按SKU+统计日期匹配）
+    
+    Args:
+        shop_name: 店铺名称
+        
+    Returns:
+        Dict[Tuple[str, str], int]: {(SKU, 统计日期): 预计下单量} 的字典
+    """
+    order_forecast_data = {}
+    
+    try:
+        with db_cursor() as cursor:
+            # 先检查表是否存在
+            cursor.execute("""
+                SELECT COUNT(*) as cnt FROM information_schema.TABLES 
+                WHERE TABLE_SCHEMA = DATABASE() 
+                AND TABLE_NAME = '运营预计下单表'
+            """)
+            result = cursor.fetchone()
+            if not result or result.get('cnt', 0) == 0:
+                logger.debug(f"表 '运营预计下单表' 不存在，返回空数据")
+                return order_forecast_data
+            
+            sql = """
+            SELECT 
+                SKU,
+                统计日期,
+                预计下单量
+            FROM `运营预计下单表`
+            WHERE 店铺 = %s
+              AND SKU IS NOT NULL 
+              AND SKU != '' 
+              AND 统计日期 IS NOT NULL
+            """
+            cursor.execute(sql, (shop_name,))
+            results = cursor.fetchall()
+            
+            for row in results:
+                sku = row.get('SKU', '').strip()
+                stat_date = row.get('统计日期')
+                quantity = int(row.get('预计下单量', 0) or 0)
+                
+                if sku and stat_date:
+                    # 处理日期格式，转换为 YYYY-MM-DD 格式
+                    if isinstance(stat_date, str):
+                        stat_date_str = stat_date[:10] if len(stat_date) >= 10 else stat_date
+                    elif hasattr(stat_date, 'strftime'):
+                        stat_date_str = stat_date.strftime('%Y-%m-%d')
+                    else:
+                        stat_date_str = str(stat_date)[:10]
+                    
+                    key = (sku, stat_date_str)
+                    order_forecast_data[key] = quantity
+            
+            logger.debug(f"从运营预计下单表读取到 {len(order_forecast_data)} 条预计下单量数据（店铺: {shop_name}）")
+    except Exception as e:
+        logger.warning(f"从运营预计下单表读取预计下单量失败: {e}")
+    
+    return order_forecast_data
+
+
 def get_inventory_from_estimate_table() -> Tuple[Dict[Tuple[str, str], int], Dict[str, int]]:
     """
     从库存预估表获取库存数据
@@ -773,7 +837,9 @@ def prepare_feishu_records(shop_data: Dict[str, Dict[str, Any]],
                            month_labels: List[str],
                            forecast_sales_labels: List[str] = None,
                            forecast_order_labels: List[str] = None,
-                           current_date: datetime = None) -> List[Dict[str, Any]]:
+                           current_date: datetime = None,
+                           shop_name: str = None,
+                           order_forecast_data: Dict[Tuple[str, str], int] = None) -> List[Dict[str, Any]]:
     """
     准备飞书多维表的记录数据
     
@@ -866,10 +932,34 @@ def prepare_feishu_records(shop_data: Dict[str, Dict[str, Any]],
                 
                 record[label] = forecast_sales
         
-        # 添加预计下单量字段（不填充数据，默认为0）
+        # 添加预计下单量字段（从运营预计下单表获取默认值）
         if forecast_order_labels:
             for label in forecast_order_labels:
-                record[label] = 0
+                # 解析月份标签，生成统计日期
+                # 格式：XX年X月预计下单量 -> 2026-01-01
+                default_value = 0
+                if order_forecast_data:
+                    # 解析月份标签
+                    pattern = r'(\d{2})年(\d{1,2})月预计下单量'
+                    match = re.match(pattern, label)
+                    if match:
+                        year_short = int(match.group(1))
+                        month = int(match.group(2))
+                        
+                        # 将两位年份转换为四位年份
+                        if year_short < 50:
+                            year = 2000 + year_short
+                        else:
+                            year = 1900 + year_short
+                        
+                        # 生成统计日期（月份的第一天）
+                        stat_date_str = f"{year}-{month:02d}-01"
+                        
+                        # 从运营预计下单表获取预计下单量
+                        key = (sku, stat_date_str)
+                        default_value = order_forecast_data.get(key, 0)
+                
+                record[label] = default_value
         
         records.append(record)
     
@@ -938,6 +1028,12 @@ async def process_shop_data(shop_name: str,
         # 更新client的table_id
         feishu_client.table_id = table_id
         
+        # 从运营预计下单表获取预计下单量默认值
+        logger.info(f"正在从运营预计下单表获取预计下单量默认值...")
+        order_forecast_data = get_order_forecast_from_db(shop_name)
+        if order_forecast_data:
+            logger.info(f"获取到 {len(order_forecast_data)} 条预计下单量默认值")
+        
         # 准备记录数据
         logger.info(f"正在准备记录数据...")
         records = prepare_feishu_records(
@@ -945,7 +1041,9 @@ async def process_shop_data(shop_name: str,
             month_labels,
             forecast_sales_labels=forecast_sales_labels,
             forecast_order_labels=forecast_order_labels,
-            current_date=current_date
+            current_date=current_date,
+            shop_name=shop_name,
+            order_forecast_data=order_forecast_data
         )
         logger.info(f"共准备 {len(records)} 条记录")
         
