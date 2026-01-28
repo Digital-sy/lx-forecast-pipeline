@@ -391,15 +391,16 @@ async def main():
     # ========== 第三步：设置查询参数 ==========
     print(f"\n📋 第三步：设置查询参数")
     
-    # 设置日期范围为前3天
-    end_date = datetime.now()
+    # 设置日期范围为前3天（包含当天）
+    # 注意：API接口的日期范围是左闭右开，所以end_date需要加1天才能包含当天
+    end_date = datetime.now() + timedelta(days=1)  # 加1天以包含当天
     start_date = end_date - timedelta(days=3)
     
     # 格式化日期为 Y-m-d 格式
     start_date_str = start_date.strftime('%Y-%m-%d')
     end_date_str = end_date.strftime('%Y-%m-%d')
     
-    print(f"📅 查询时间范围: {start_date_str} 到 {end_date_str}")
+    print(f"📅 查询时间范围: {start_date_str} 到 {end_date_str} (左闭右开，包含当天)")
     print(f"🏪 将查询 {len(sid_list)} 个店铺")
     
     # ========== 第四步：获取货件单号列表 ==========
