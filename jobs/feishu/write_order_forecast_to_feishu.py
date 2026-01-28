@@ -91,9 +91,33 @@ def get_stat_date_from_month_label(month_label: str) -> str:
     return None
 
 
+def remove_psc_pattern(sku: str) -> str:
+    """
+    去除SKU中的"数字+PSC/PCS"模式（例如：4PSC, 1PCS, 10PSC等）
+    去除后会清理多余的分隔符（将连续的分隔符合并为一个）
+    
+    Args:
+        sku: SKU字符串
+        
+    Returns:
+        str: 去除"数字+PSC/PCS"后的SKU，并清理多余分隔符
+    """
+    if not sku:
+        return sku
+    # 匹配任意数字+PSC或PCS的模式，例如：4PSC, 1PCS, 10PSC等
+    # 使用正则表达式 \d+(?:PSC|PCS) 匹配，并去除
+    sku = re.sub(r'\d+(?:PSC|PCS)', '', sku, flags=re.IGNORECASE)
+    # 清理多余的分隔符：将连续的分隔符合并为一个
+    sku = re.sub(r'-+', '-', sku)
+    # 去除首尾的分隔符
+    sku = sku.strip('-')
+    return sku
+
+
 def extract_spu_from_sku(sku: str) -> str:
     """
     从SKU中提取SPU（第一个"-"之前的部分）
+    会先去除"数字+PSC"模式（例如：4PSC）
     
     Args:
         sku: SKU字符串
@@ -103,6 +127,8 @@ def extract_spu_from_sku(sku: str) -> str:
     """
     if not sku:
         return ''
+    # 先去除"数字+PSC"模式
+    sku = remove_psc_pattern(sku)
     idx = sku.find('-')
     if idx > 0:
         return sku[:idx]
@@ -467,11 +493,20 @@ async def main():
         logger.warning("没有需要处理的店铺表")
         return
     
+    # 创建表（如果不存在）
+    table_name = '运营预计下单表'
+    try:
+        create_table_if_needed(table_name)
+    except Exception as e:
+        logger.error(f"创建表失败: {e}", exc_info=True)
+        return
+    
     # 获取上次预估数据
     logger.info(f"\n正在获取上次预估数据...")
     previous_data = get_previous_forecast_data()
     
-    # 处理每个店铺的表
+    # 处理每个店铺的表（包含上次预估和变化）
+    logger.info(f"\n正在从飞书提取数据（包含上次预估和变化）...")
     all_data = []
     success_count = 0
     fail_count = 0
@@ -501,32 +536,9 @@ async def main():
         logger.info(f"正在写入数据库...")
         logger.info(f"{'='*80}")
         
-        # 创建表（如果不存在）
-        table_name = '运营预计下单表'
-        try:
-            create_table_if_needed(table_name)
-        except Exception as e:
-            logger.error(f"创建表失败: {e}", exc_info=True)
-            return
-        
-        # 获取上次预估数据
-        logger.info(f"\n正在获取上次预估数据...")
-        previous_data = get_previous_forecast_data()
-        
-        # 重新提取数据（包含上次预估和变化）
-        logger.info(f"\n正在重新提取数据（包含上次预估和变化）...")
-        all_data_with_change = []
-        for shop_name in sorted(shop_tables.keys()):
-            try:
-                shop_data = await process_shop_table(shop_name, FEISHU_APP_TOKEN, previous_data)
-                if shop_data:
-                    all_data_with_change.extend(shop_data)
-            except Exception as e:
-                logger.error(f"处理店铺 {shop_name} 失败: {e}", exc_info=True)
-        
         # 插入数据
         try:
-            insert_data_batch(table_name, all_data_with_change)
+            insert_data_batch(table_name, all_data)
             logger.info(f"\n✓ 成功写入 {len(all_data)} 条数据到数据库表 {table_name}")
         except Exception as e:
             logger.error(f"写入数据库失败: {e}", exc_info=True)

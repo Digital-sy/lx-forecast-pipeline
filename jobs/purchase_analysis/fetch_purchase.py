@@ -6,7 +6,7 @@
 """
 import asyncio
 from datetime import datetime, timedelta
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 
 # 导入公共模块
 from common import settings, get_logger
@@ -81,7 +81,7 @@ async def fetch_all_purchase_orders(op_api: OpenApiBase, token: str,
 
 
 def convert_to_sku_dimension(orders: List[Dict[str, Any]], 
-                            sid_to_name_map: Dict[str, str]) -> List[Dict[str, Any]]:
+                            sid_to_name_map: Dict[str, str]) -> Tuple[List[Dict[str, Any]], int]:
     """
     将采购单数据转换为以SKU为维度的数据
     
@@ -90,15 +90,23 @@ def convert_to_sku_dimension(orders: List[Dict[str, Any]],
         sid_to_name_map: 店铺ID到店铺名称的映射
         
     Returns:
-        List[Dict[str, Any]]: SKU维度数据列表
+        Tuple[List[Dict[str, Any]], int]: (SKU维度数据列表, 跳过的已作废订单数)
     """
     sku_data_list = []
+    skipped_count = 0  # 统计跳过的已作废订单数
     
     for order in orders:
         # 采购单主表信息
         order_sn = order.get('order_sn', '')
         create_time = order.get('create_time', '')
         status = order.get('status_text', '')
+        
+        # 如果状态是"已作废"，跳过该订单
+        if status == '已作废':
+            skipped_count += 1
+            logger.debug(f"跳过已作废的采购单: {order_sn}")
+            continue
+        
         status_shipped = order.get('status_shipped_text', '')
         warehouse_name = order.get('ware_house_name', '')
         supplier_name = order.get('supplier_name', '')
@@ -133,7 +141,10 @@ def convert_to_sku_dimension(orders: List[Dict[str, Any]],
             
             sku_data_list.append(sku_record)
     
-    return sku_data_list
+    if skipped_count > 0:
+        logger.info(f"已跳过 {skipped_count} 个已作废的采购单")
+    
+    return sku_data_list, skipped_count
 
 
 def create_table_if_needed(table_name: str, sample_row: Dict[str, Any]) -> None:
@@ -319,7 +330,7 @@ async def main():
     
     # 转换为SKU维度数据
     logger.info("正在转换为SKU维度数据...")
-    sku_data_list = convert_to_sku_dimension(orders, sid_to_name_map)
+    sku_data_list, skipped_orders = convert_to_sku_dimension(orders, sid_to_name_map)
     logger.info(f"共生成 {len(sku_data_list)} 条SKU维度数据")
     
     if not sku_data_list:
@@ -349,10 +360,14 @@ async def main():
         logger.info(f"  数据范围: {start_date_str} 至 {end_date_str}")
         logger.info(f"  删除旧记录: {deleted_count} 条")
         logger.info(f"  采购单数量: {len(orders)}")
+        if skipped_orders > 0:
+            logger.info(f"  已作废订单: {skipped_orders} 个（已跳过，不写入数据库）")
         logger.info(f"  新增SKU记录: {len(sku_data_list)} 条")
         
         if sku_data_list:
-            logger.info(f"  平均每个采购单包含: {len(sku_data_list) / len(orders):.2f} 个SKU")
+            valid_orders = len(orders) - skipped_orders
+            if valid_orders > 0:
+                logger.info(f"  平均每个有效采购单包含: {len(sku_data_list) / valid_orders:.2f} 个SKU")
             
             # 统计各店铺的记录数
             shop_counts = {}

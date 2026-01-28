@@ -8,6 +8,7 @@
 字段：sku, spu, spu颜色, 店铺, 库存状态, 数量
 库存状态：FBA可售, FBA在途, 本地可用量, 本地待到货
 """
+import re
 from typing import List, Dict, Any, Tuple
 from collections import defaultdict
 
@@ -15,6 +16,29 @@ from common import settings, get_logger
 from common.database import db_cursor
 
 logger = get_logger('inventory_estimate')
+
+
+def remove_psc_pattern(sku: str) -> str:
+    """
+    去除SKU中的"数字+PSC/PCS"模式（例如：4PSC, 1PCS, 10PSC等）
+    去除后会清理多余的分隔符（将连续的分隔符合并为一个）
+    
+    Args:
+        sku: SKU字符串
+        
+    Returns:
+        str: 去除"数字+PSC/PCS"后的SKU，并清理多余分隔符
+    """
+    if not sku:
+        return sku
+    # 匹配任意数字+PSC或PCS的模式，例如：4PSC, 1PCS, 10PSC等
+    # 使用正则表达式 \d+(?:PSC|PCS) 匹配，并去除
+    sku = re.sub(r'\d+(?:PSC|PCS)', '', sku, flags=re.IGNORECASE)
+    # 清理多余的分隔符：将连续的分隔符合并为一个
+    sku = re.sub(r'-+', '-', sku)
+    # 去除首尾的分隔符
+    sku = sku.strip('-')
+    return sku
 
 
 def create_table_if_needed(table_name: str, sample_row: Dict[str, Any]) -> None:
@@ -202,6 +226,7 @@ def load_local_inventory() -> Dict[tuple, Tuple[int, int]]:
 def extract_spu_and_color(sku: str) -> Tuple[str, str]:
     """
     从SKU中提取SPU和SPU颜色
+    会先去除"数字+PSC"模式（例如：4PSC）
     
     Args:
         sku: SKU字符串，格式如 "SPU-颜色-其他"
@@ -213,6 +238,9 @@ def extract_spu_and_color(sku: str) -> Tuple[str, str]:
     """
     if not sku or sku == '无':
         return ('无', '无')
+    
+    # 先去除"数字+PSC"模式
+    sku = remove_psc_pattern(sku)
     
     # 找到第一个"-"的位置
     first_dash = sku.find('-')

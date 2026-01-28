@@ -5,7 +5,10 @@
 从数据库读取仓库库存明细数据，用SKU匹配销量统计_msku月度表的品名字段，然后写入飞书多维表
 """
 import asyncio
+import traceback
+import httpx
 from typing import List, Dict, Any
+from datetime import datetime
 
 import sys
 from pathlib import Path
@@ -20,6 +23,43 @@ from common.database import db_cursor
 from common.feishu import FeishuClient
 
 logger = get_logger('feishu_write_inventory')
+
+# 飞书webhook地址（与 main.py 保持一致）
+FEISHU_WEBHOOK_URL = "https://open.feishu.cn/open-apis/bot/v2/hook/00640680-6577-4a95-b25a-35c34864ff45"
+
+
+async def send_feishu_message(message: str) -> bool:
+    """
+    发送消息到飞书群
+    
+    Args:
+        message: 要发送的消息内容
+        
+    Returns:
+        bool: 是否发送成功
+    """
+    try:
+        data = {
+            "msg_type": "text",
+            "content": {
+                "text": message
+            }
+        }
+        
+        timeout = httpx.Timeout(10.0, connect=5.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(FEISHU_WEBHOOK_URL, json=data)
+            result = response.json()
+            
+            if result.get("code") == 0:
+                logger.info("飞书消息发送成功")
+                return True
+            else:
+                logger.error(f"飞书消息发送失败: {result.get('msg')}")
+                return False
+    except Exception as e:
+        logger.error(f"发送飞书消息异常: {e}")
+        return False
 
 # 飞书多维表格配置
 FEISHU_APP_TOKEN = "Ir66bUSjdamVttsGiSRcnK1ln2e"  # 飞书多维表格的app_token
@@ -395,7 +435,28 @@ async def main():
             logger.error("="*80)
         
     except Exception as e:
+        error_traceback = traceback.format_exc()
         logger.error(f"❌ 处理失败: {e}", exc_info=True)
+        
+        # 发送错误消息到飞书
+        feishu_message = f"""❌ 库存明细写入飞书任务执行失败
+
+📋 错误类型: {type(e).__name__}
+📝 错误原因: {str(e)}
+⏰ 执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+📄 完整错误堆栈:
+```
+{error_traceback}
+```
+
+请及时检查并处理！"""
+        
+        try:
+            await send_feishu_message(feishu_message)
+        except Exception as feishu_error:
+            logger.error(f"发送飞书消息失败: {feishu_error}")
+        
         raise
 
 

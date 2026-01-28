@@ -6,6 +6,7 @@
 增量更新模式：获取最近7天的产品数据，删除对应SKU的旧数据后重新写入
 """
 import asyncio
+import re
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
 
@@ -19,9 +20,33 @@ from utils.date_utils import convert_timestamp_to_datetime
 logger = get_logger('product_management')
 
 
+def remove_psc_pattern(sku: str) -> str:
+    """
+    去除SKU中的"数字+PSC/PCS"模式（例如：4PSC, 1PCS, 10PSC等）
+    去除后会清理多余的分隔符（将连续的分隔符合并为一个）
+    
+    Args:
+        sku: SKU字符串
+        
+    Returns:
+        str: 去除"数字+PSC/PCS"后的SKU，并清理多余分隔符
+    """
+    if not sku:
+        return sku
+    # 匹配任意数字+PSC或PCS的模式，例如：4PSC, 1PCS, 10PSC等
+    # 使用正则表达式 \d+(?:PSC|PCS) 匹配，并去除
+    sku = re.sub(r'\d+(?:PSC|PCS)', '', sku, flags=re.IGNORECASE)
+    # 清理多余的分隔符：将连续的分隔符合并为一个
+    sku = re.sub(r'-+', '-', sku)
+    # 去除首尾的分隔符
+    sku = sku.strip('-')
+    return sku
+
+
 def extract_spu_from_sku(sku: str) -> str:
     """
     从SKU中提取SPU（第一个"-"之前的字符）
+    会先去除"数字+PSC"模式（例如：4PSC）
     
     Args:
         sku: SKU字符串
@@ -33,6 +58,8 @@ def extract_spu_from_sku(sku: str) -> str:
         return ''
     
     sku_str = str(sku).strip()
+    # 先去除"数字+PSC"模式
+    sku_str = remove_psc_pattern(sku_str)
     if '-' in sku_str:
         return sku_str.split('-')[0]
     return sku_str

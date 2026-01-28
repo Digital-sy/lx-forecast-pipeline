@@ -9,7 +9,7 @@ from .resp_schema import ResponseResult
 
 class HttpBase(object):
 
-    def __init__(self, default_timeout=30, proxy_url: Optional[str] = None):
+    def __init__(self, default_timeout=120, proxy_url: Optional[str] = None):
         self.default_timeout = default_timeout
         self.proxy_url = proxy_url
 
