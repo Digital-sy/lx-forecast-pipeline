@@ -50,7 +50,7 @@ echo "==================================="
 echo "库存同步任务开始: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "==================================="
 
-echo "[1/2] 采集库存明细数据..."
+echo "[1/3] 采集库存明细数据..."
 $PYTHON -m jobs.purchase_analysis.fetch_inventory_details
 EXIT_CODE_1=$?
 
@@ -60,7 +60,7 @@ else
   echo "✓ 采集完成"
 fi
 
-echo "[2/2] 写入飞书多维表..."
+echo "[2/3] 写入飞书多维表..."
 $PYTHON -m jobs.feishu.write_inventory_to_feishu
 EXIT_CODE_2=$?
 
@@ -68,6 +68,16 @@ if [ $EXIT_CODE_2 -ne 0 ]; then
   handle_error "写入飞书多维表" $EXIT_CODE_2
 else
   echo "✓ 写入完成"
+fi
+
+echo "[3/3] 获取货件单号列表..."
+$PYTHON jobs/feishu/Shipment_Number.py
+EXIT_CODE_3=$?
+
+if [ $EXIT_CODE_3 -ne 0 ]; then
+  handle_error "获取货件单号列表" $EXIT_CODE_3
+else
+  echo "✓ 获取完成"
 fi
 
 echo "==================================="
