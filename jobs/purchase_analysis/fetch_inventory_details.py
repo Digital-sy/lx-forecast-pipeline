@@ -86,6 +86,7 @@ async def fetch_page_with_retry(op_api: OpenApiBase, token: str,
         Tuple[List, int, str, bool]: (数据列表, 总数, 错误信息, 是否遇到限流)
     """
     was_rate_limited = False
+    all_retries_rate_limited = True  # 标记是否所有重试都遇到限流
     
     for retry in range(MAX_RETRIES):
         try:
@@ -115,6 +116,9 @@ async def fetch_page_with_retry(op_api: OpenApiBase, token: str,
                 logger.warning(f"⚠️  令牌桶无令牌（第 {retry + 1}/{MAX_RETRIES} 次），等待 {wait_time} 秒让令牌回收...")
                 await asyncio.sleep(wait_time)
                 continue
+            
+            # 如果成功获取数据，说明不是所有重试都限流
+            all_retries_rate_limited = False
             
             # 检查是否token过期
             # 错误码：401, 403, 2001003, 3001001, 3001002 都表示Token过期或无效
@@ -148,6 +152,7 @@ async def fetch_page_with_retry(op_api: OpenApiBase, token: str,
             return items, total, "", was_rate_limited
             
         except Exception as e:
+            all_retries_rate_limited = False  # 异常不是限流问题
             logger.error(f"❌ 请求异常（第 {retry + 1}/{MAX_RETRIES} 次尝试）: {e}")
             if retry < MAX_RETRIES - 1:
                 wait_time = RETRY_DELAY * (retry + 1)
@@ -157,6 +162,9 @@ async def fetch_page_with_retry(op_api: OpenApiBase, token: str,
                 logger.error(f"❌ 达到最大重试次数，请求失败")
                 return [], 0, f"EXCEPTION: {str(e)}", was_rate_limited
     
+    # 如果所有重试都遇到限流，返回特殊错误码，让外层函数知道这是限流问题
+    if all_retries_rate_limited:
+        return [], 0, "RATE_LIMITED_EXCEEDED", True
     return [], 0, "MAX_RETRIES_EXCEEDED", was_rate_limited
 
 
@@ -309,8 +317,57 @@ async def fetch_all_inventory_details(op_api: OpenApiBase, token_resp) -> List[D
                 logger.error(f"Token刷新失败: {e}")
                 break
         
+        # 处理令牌桶限流：5次重试后仍然限流，可能是token过期，先尝试刷新token
+        if error == "RATE_LIMITED_EXCEEDED":
+            logger.warning(f"⚠️  offset={offset} 在5次重试后仍然遇到令牌桶限流")
+            logger.info("🔍 怀疑可能是token过期，先尝试刷新token...")
+            
+            # 先尝试刷新token（以防token过期被误判为限流）
+            try:
+                logger.info("🔄 正在刷新token...")
+                token_resp = await op_api.generate_access_token()
+                token = token_resp.access_token
+                logger.info(f"✅ Token刷新成功，有效期: {token_resp.expires_in}秒")
+                logger.info("🔄 使用新token重新尝试获取数据...")
+                items, total, error, was_rate_limited = await fetch_page_with_retry(op_api, token, req_body, offset)
+                
+                # 如果刷新token后成功了，说明确实是token过期
+                if not error:
+                    logger.info("✅ 刷新token后成功获取数据，确认是token过期问题")
+                    # 继续正常流程，不break
+                elif error == "RATE_LIMITED_EXCEEDED":
+                    # 刷新token后仍然限流，说明不是token问题，等待令牌桶恢复
+                    logger.warning("⚠️  刷新token后仍然限流，说明不是token过期，等待令牌桶恢复...")
+                    logger.info("💤 等待180秒（3分钟）让令牌桶完全恢复后继续重试...")
+                    await asyncio.sleep(180)
+                    
+                    # 再次尝试获取数据
+                    logger.info("🔄 重新尝试获取数据...")
+                    items, total, error, was_rate_limited = await fetch_page_with_retry(op_api, token, req_body, offset)
+                    
+                    # 如果仍然失败，再等待一次
+                    if error == "RATE_LIMITED_EXCEEDED":
+                        logger.warning("⚠️  仍然遇到令牌桶限流，再等待180秒...")
+                        await asyncio.sleep(180)
+                        logger.info("🔄 最后一次尝试获取数据...")
+                        items, total, error, was_rate_limited = await fetch_page_with_retry(op_api, token, req_body, offset)
+            except Exception as e:
+                logger.error(f"❌ Token刷新失败: {e}")
+                logger.warning("⚠️  将尝试等待令牌桶恢复...")
+                await asyncio.sleep(180)
+                logger.info("🔄 重新尝试获取数据...")
+                items, total, error, was_rate_limited = await fetch_page_with_retry(op_api, token, req_body, offset)
+            
+            # 如果最终仍然失败，记录详细错误并停止
+            if error == "RATE_LIMITED_EXCEEDED":
+                logger.error(f"❌ offset={offset} 在多次尝试（刷新token + 长时间等待）后仍然无法获取数据")
+                logger.error(f"   已尝试：5次常规重试 + token刷新 + 2次长时间等待重试")
+                logger.error(f"   建议：请检查API服务状态，或稍后手动重试该任务")
+                logger.error(f"   当前已获取 {len(all_items)} 条数据，缺失从offset={offset}开始的数据")
+                break
+        
         # 处理其他错误
-        if error and error != "TOKEN_EXPIRED":
+        if error and error != "TOKEN_EXPIRED" and error != "RATE_LIMITED_EXCEEDED":
             logger.error(f"获取offset={offset}数据失败: {error}")
             break
         
