@@ -450,12 +450,13 @@ def get_color_mapping() -> Dict[str, str]:
 
 def get_responsible_from_listing() -> Dict[Tuple[str, str], str]:
     """
-    从listing表获取负责人信息（使用SKU+店铺匹配）
+    从listing表获取负责人信息（使用SPU+店铺匹配）
+    从SKU中提取SPU，然后按SPU+店铺匹配负责人
     
     Returns:
-        Dict[Tuple[str, str], str]: {(SKU, 店铺): 负责人}
+        Dict[Tuple[str, str], str]: {(SPU, 店铺): 负责人}
     """
-    logger.info("正在从listing表获取负责人信息...")
+    logger.info("正在从listing表获取负责人信息（按SPU+店铺匹配）...")
     
     responsible_map = {}
     
@@ -504,12 +505,15 @@ def get_responsible_from_listing() -> Dict[Tuple[str, str], str]:
                 responsible = row['负责人'].strip() if row['负责人'] else ''
                 
                 if sku and shop and responsible:
-                    key = (sku, shop)
-                    # 如果同一个SKU+店铺有多个负责人，保留第一个
-                    if key not in responsible_map:
-                        responsible_map[key] = responsible
+                    # 从SKU中提取SPU
+                    spu = extract_spu_from_sku(sku)
+                    if spu:
+                        key = (spu, shop)
+                        # 如果同一个SPU+店铺有多个负责人，保留第一个
+                        if key not in responsible_map:
+                            responsible_map[key] = responsible
             
-            logger.info(f"  构建了 {len(responsible_map)} 个SKU+店铺的负责人映射")
+            logger.info(f"  构建了 {len(responsible_map)} 个SPU+店铺的负责人映射")
     except Exception as e:
         logger.error(f"从listing表获取负责人信息失败: {e}", exc_info=True)
     
@@ -530,7 +534,7 @@ def merge_order_data(
         actual_orders: 实际下单量字典
         forecast_orders: 预计下单量和运营字典
         fabric_map: 面料映射字典 {SPU: 面料列表（逗号隔开）}
-        responsible_map: 负责人映射字典
+        responsible_map: 负责人映射字典（按SPU+店铺匹配）
         color_map: 颜色缩写到颜色中文名的映射
         
     Returns:
@@ -546,6 +550,40 @@ def merge_order_data(
     logger.info(f"    仅在预计下单表: {len(set(forecast_orders.keys()) - set(actual_orders.keys()))} 个")
     logger.info(f"    两表都有: {len(set(actual_orders.keys()) & set(forecast_orders.keys()))} 个")
     
+    # 第一步：先收集所有SPU+店铺的负责人（统一匹配）
+    # 优先使用运营预计下单表的运营字段，如果为空则用SPU+店铺去listing表匹配
+    spu_shop_responsible = {}  # {(SPU, 店铺): 负责人}
+    
+    # 先收集所有唯一的SPU+店铺组合
+    spu_shop_set = set()
+    for key in all_keys:
+        sku, shop, stat_date = key
+        spu, _, _ = extract_spu_and_color_from_sku(sku)
+        if spu and shop:
+            spu_shop_set.add((spu, shop))
+    
+    # 从运营预计下单表中收集SPU+店铺的运营信息（优先）
+    for forecast_key in forecast_orders.keys():
+        forecast_sku, forecast_shop, _ = forecast_key
+        forecast_spu, _, _ = extract_spu_and_color_from_sku(forecast_sku)
+        if forecast_spu and forecast_shop:
+            spu_shop_key = (forecast_spu, forecast_shop)
+            if spu_shop_key not in spu_shop_responsible:
+                forecast_data = forecast_orders.get(forecast_key, (0, ''))
+                operation = forecast_data[1]
+                if operation:
+                    spu_shop_responsible[spu_shop_key] = operation
+    
+    # 对于没有从运营预计下单表获取到负责人的SPU+店铺，从listing表匹配
+    for spu_shop_key in spu_shop_set:
+        if spu_shop_key not in spu_shop_responsible:
+            responsible = responsible_map.get(spu_shop_key, '')
+            spu_shop_responsible[spu_shop_key] = responsible
+    
+    logger.info(f"  统一匹配了 {len(spu_shop_responsible)} 个SPU+店铺的负责人")
+    logger.info(f"    有负责人的: {sum(1 for v in spu_shop_responsible.values() if v)} 个")
+    
+    # 第二步：构建合并后的数据，统一应用负责人
     merged_data = []
     
     for key in all_keys:
@@ -570,10 +608,8 @@ def merge_order_data(
         if spu in fabric_map:
             fabric = fabric_map[spu]
         
-        # 获取负责人
-        # 优先使用运营预计下单表的运营字段
-        # 如果为空，则用SKU+店铺去listing表匹配
-        responsible = operation if operation else responsible_map.get((sku, shop), '')
+        # 获取负责人（统一按SPU+店铺匹配，确保同一SPU+店铺下的所有记录负责人一致）
+        responsible = spu_shop_responsible.get((spu, shop), '')
         
         # 计算是否有预估：预计下单量>0为"有预估"，否则为"无预估"
         has_forecast = "有预估" if forecast_quantity > 0 else "无预估"
