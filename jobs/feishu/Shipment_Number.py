@@ -3,11 +3,25 @@
 """获取货件单号列表"""
 import asyncio
 import json
+import sys
+from pathlib import Path
 from datetime import datetime, timedelta
+from typing import List, Dict, Any
 
-from openapi import OpenApiBase
-from feishu_bitable import write_to_feishu_bitable_by_date_range
-from feishu_config import FEISHU_CONFIG
+# 添加项目根目录到Python路径
+project_root = Path(__file__).resolve().parent.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+from lingxing.openapi import OpenApiBase
+from common.feishu import FeishuClient
+from common import settings, get_logger
+
+logger = get_logger('feishu_shipment')
+
+# 飞书多维表格配置
+FEISHU_APP_TOKEN = "BnYebX3DmaFNqXsxS0OcmMPXnTe"  # 多维表的App Token
+FEISHU_TABLE_ID = "tblQxRq8lBEZUkEG"  # 数据表ID
 
 
 def process_box_info(box_data, shipment_id, sid, seller_name="", shipment_info=None):
@@ -289,6 +303,152 @@ def format_for_feishu(processed_data):
         result.append({"fields": fields})
     
     return result
+
+
+async def write_to_feishu(records: List[Dict[str, Any]]) -> bool:
+    """
+    将数据写入飞书多维表
+    
+    Args:
+        records: 记录列表，每个记录是一个字典，键为字段名，值为字段值
+        
+    Returns:
+        bool: 是否成功
+    """
+    try:
+        logger.info(f"\n{'='*80}")
+        logger.info(f"正在写入数据到飞书多维表...")
+        logger.info(f"{'='*80}")
+        
+        # 创建飞书客户端
+        feishu_client = FeishuClient(
+            app_token=FEISHU_APP_TOKEN,
+            table_id=FEISHU_TABLE_ID
+        )
+        
+        # 准备字段列表（根据 format_for_feishu 中的字段定义）
+        field_list = [
+            {'name': '店铺', 'type': 'text'},
+            {'name': '货件单号', 'type': 'text'},
+            {'name': '货件名称', 'type': 'text'},
+            {'name': '货件状态', 'type': 'text'},
+            {'name': '目的仓库', 'type': 'text'},
+            {'name': '运输方式', 'type': 'text'},
+            {'name': '发货国家', 'type': 'text'},
+            {'name': '发货城市', 'type': 'text'},
+            {'name': '收货国家', 'type': 'text'},
+            {'name': '收货城市', 'type': 'text'},
+            {'name': '收货仓库代码', 'type': 'text'},
+            {'name': '箱号', 'type': 'text'},
+            {'name': 'SPU', 'type': 'text'},
+            {'name': '品名', 'type': 'text'},
+            {'name': 'Title', 'type': 'text'},
+            {'name': '父ASIN', 'type': 'text'},
+            {'name': 'FNSKU', 'type': 'text'},
+            {'name': 'MSKU', 'type': 'text'},
+            {'name': '单箱数量', 'type': 'number'},
+            {'name': '单箱总数', 'type': 'number'},
+            {'name': '箱子长度cm', 'type': 'number'},
+            {'name': '箱子宽度cm', 'type': 'number'},
+            {'name': '箱子高度cm', 'type': 'number'},
+            {'name': '箱体积m3', 'type': 'number'},
+            {'name': '箱子重量kg', 'type': 'number'},
+            {'name': '箱子体积重kg', 'type': 'number'},
+            {'name': '图片链接', 'type': 'url'},
+            {'name': '创建时间', 'type': 'date'},
+            {'name': '修改时间', 'type': 'date'},
+            {'name': '工作时间', 'type': 'date'},
+            {'name': '发货时间', 'type': 'date'},
+            {'name': '接收时间', 'type': 'date'},
+            {'name': '关闭时间', 'type': 'date'},
+            {'name': '同步时间', 'type': 'date'},
+            {'name': '预计送达开始', 'type': 'date'},
+            {'name': '预计送达结束', 'type': 'date'},
+        ]
+        
+        # 确保字段存在
+        logger.info(f"正在确保字段存在...")
+        existing_fields = await feishu_client.get_table_fields()  # {field_id: field_name}
+        existing_field_names = set(existing_fields.values())
+        
+        # 创建缺失的字段
+        for field_info in field_list:
+            field_name = field_info.get('name', '')
+            field_type_str = field_info.get('type', 'text')
+            
+            if field_name in existing_field_names:
+                logger.debug(f"字段 {field_name} 已存在，跳过创建")
+                continue
+            
+            # 转换字段类型
+            if field_type_str == 'number':
+                field_type = "2"  # 数字类型
+            elif field_type_str == 'date':
+                field_type = "5"  # 日期类型
+            elif field_type_str == 'url':
+                field_type = "15"  # 超链接类型
+            else:
+                field_type = "1"  # 多行文本类型
+            
+            try:
+                await feishu_client.create_field(field_name, field_type)
+                logger.info(f"创建字段: {field_name} (类型: {field_type_str})")
+            except Exception as e:
+                logger.warning(f"创建字段 {field_name} 失败: {e}")
+                # 继续处理其他字段
+        
+        if not records:
+            logger.warning("没有数据需要写入")
+            return True
+        
+        # 先清空现有数据
+        logger.info(f"正在清空现有数据...")
+        max_retries = 3
+        deleted_count = 0
+        
+        for retry in range(max_retries):
+            try:
+                deleted_count = await feishu_client.delete_all_records()
+                logger.info(f"成功清空 {deleted_count} 条旧记录")
+                break
+            except asyncio.TimeoutError:
+                if retry < max_retries - 1:
+                    wait_time = (retry + 1) * 10
+                    logger.warning(f"清空数据超时（尝试 {retry + 1}/{max_retries}），{wait_time}秒后重试...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"清空数据超时，已重试 {max_retries} 次")
+                    raise Exception(f"清空数据失败：超时")
+            except Exception as e:
+                error_str = str(e)
+                if "超时" in error_str or "timeout" in error_str.lower():
+                    if retry < max_retries - 1:
+                        wait_time = (retry + 1) * 10
+                        logger.warning(f"清空数据超时（尝试 {retry + 1}/{max_retries}），{wait_time}秒后重试...")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        logger.error(f"清空数据超时，已重试 {max_retries} 次")
+                        raise Exception(f"清空数据失败：超时")
+                else:
+                    logger.error(f"清空数据失败: {e}")
+                    raise Exception(f"清空数据失败: {e}")
+        
+        # 检查记录数限制（飞书多维表最大支持20000条记录）
+        max_records = 20000
+        if len(records) > max_records:
+            logger.error(f"要写入的记录数 {len(records)} 超过飞书多维表的最大限制 {max_records} 条")
+            raise Exception(f"要写入的记录数 {len(records)} 超过飞书多维表的最大限制 {max_records} 条")
+        
+        # 写入数据
+        logger.info(f"正在写入数据到飞书多维表...")
+        written_count = await feishu_client.write_records(records, batch_size=500)
+        logger.info(f"✓ 成功写入 {written_count} 条记录到飞书多维表")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"写入飞书多维表失败: {e}", exc_info=True)
+        return False
 
 
 async def main():
@@ -831,31 +991,28 @@ async def main():
             
             print(f"📋 准备写入 {len(feishu_data)} 条记录到飞书...")
             
-            # 计算日期范围的毫秒时间戳用于删除（只删除查询日期范围内的旧数据）
-            start_timestamp = int(start_date.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
-            end_timestamp = int(end_date.replace(hour=23, minute=59, second=59, microsecond=999999).timestamp() * 1000)
-            
-            print(f"🗑️  将删除日期范围内的旧数据: {start_date_str} 到 {end_date_str}")
+            # 转换为 FeishuClient 需要的格式（去掉 "fields" 外层）
+            records = []
+            for item in feishu_data:
+                if "fields" in item:
+                    records.append(item["fields"])
+                else:
+                    records.append(item)
             
             try:
-                result = write_to_feishu_bitable_by_date_range(
-                    processed_data=feishu_data,
-                    app_id=FEISHU_CONFIG["app_id"],
-                    app_secret=FEISHU_CONFIG["app_secret"],
-                    app_token=FEISHU_CONFIG["app_token"],
-                    table_id="tbl4iOz64WPm6Qhh",
-                    start_timestamp=start_timestamp,
-                    end_timestamp=end_timestamp
-                )
+                # 使用 FeishuClient 写入数据
+                success = await write_to_feishu(records)
                 
-                if result:
+                if success:
                     print(f"✅ 数据已成功写入飞书多维表")
-                    print(f"📊 写入统计: {len(feishu_data)} 条记录")
+                    print(f"📊 写入统计: {len(records)} 条记录")
                 else:
                     print(f"❌ 写入飞书失败")
                     
             except Exception as e:
                 print(f"❌ 写入飞书异常: {e}")
+                import traceback
+                traceback.print_exc()
         else:
             print(f"\n⚠️  没有数据需要写入飞书")
     

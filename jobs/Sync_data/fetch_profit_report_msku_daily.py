@@ -151,6 +151,9 @@ async def fetch_all_profit_reports(op_api: OpenApiBase, token_resp,
     length = 1000  # 每页1000条
     token = token_resp.access_token
     total_records = None
+    total_filtered = 0  # 统计被过滤掉的店铺数据总数
+    # 需要过滤的店铺列表
+    excluded_shops = ['CY-US', 'WSH-US', 'ZX-US']
     
     # 令牌桶感知：动态调整请求间隔
     current_delay = REQUEST_DELAY  # 当前请求间隔
@@ -209,7 +212,21 @@ async def fetch_all_profit_reports(op_api: OpenApiBase, token_resp,
                 logger.warning("第一页就没有数据")
             break
         
-        all_records.extend(records)
+        # 过滤掉指定店铺的数据（CY-US, WSH-US, ZX-US）
+        filtered_records = [r for r in records if r.get('storeName', '') not in excluded_shops]
+        filtered_count = len(records) - len(filtered_records)
+        if filtered_count > 0:
+            total_filtered += filtered_count
+            # 统计每个被过滤店铺的数量
+            shop_filtered = {}
+            for r in records:
+                shop_name = r.get('storeName', '')
+                if shop_name in excluded_shops:
+                    shop_filtered[shop_name] = shop_filtered.get(shop_name, 0) + 1
+            filtered_shops_str = ', '.join([f"{shop}: {count}条" for shop, count in shop_filtered.items()])
+            logger.info(f"  过滤掉 {filtered_count} 条店铺数据 ({filtered_shops_str})")
+        
+        all_records.extend(filtered_records)
         
         # 测试模式：如果设置了最大记录数，达到后退出
         if max_records and len(all_records) >= max_records:
@@ -223,11 +240,6 @@ async def fetch_all_profit_reports(op_api: OpenApiBase, token_resp,
             logger.info(f"📈 进度: {len(all_records)}/{total_records} ({progress:.1f}%)")
         elif max_records:
             logger.info(f"📈 进度: {len(all_records)}/{max_records} (测试模式)")
-        
-        # 如果已经获取所有数据，退出循环
-        if total_records and len(all_records) >= total_records:
-            logger.info("✅ 所有数据获取完成")
-            break
         
         # 如果返回的数据少于length，说明已经是最后一页
         if len(records) < length:
@@ -257,12 +269,15 @@ async def fetch_all_profit_reports(op_api: OpenApiBase, token_resp,
         # 请求间隔延时（动态调整，令牌桶感知）
         await asyncio.sleep(current_delay)
     
-    # 数据完整性检查
-    if total_records and len(all_records) < total_records:
-        logger.warning(f"⚠️  数据可能不完整: 预期 {total_records} 条，实际获取 {len(all_records)} 条")
-        logger.warning(f"   缺失: {total_records - len(all_records)} 条数据")
-    elif total_records:
-        logger.info(f"✅ 数据完整性验证通过: {len(all_records)}/{total_records} 条")
+    # 数据完整性检查（考虑被过滤的店铺数据）
+    if total_records:
+        expected_after_filter = total_records - total_filtered
+        excluded_shops_str = ', '.join(excluded_shops)
+        if len(all_records) < expected_after_filter:
+            logger.warning(f"⚠️  数据可能不完整: 预期 {expected_after_filter} 条（已排除 {total_filtered} 条店铺数据: {excluded_shops_str}），实际获取 {len(all_records)} 条")
+            logger.warning(f"   缺失: {expected_after_filter - len(all_records)} 条数据")
+        else:
+            logger.info(f"✅ 数据完整性验证通过: {len(all_records)}/{expected_after_filter} 条（已排除 {total_filtered} 条店铺数据: {excluded_shops_str}）")
     
     return all_records
 
@@ -284,24 +299,44 @@ def create_table_if_needed(table_name: str, sample_row: Dict[str, Any]) -> None:
         exists = cursor.fetchone()
         
         if exists:
-            # 检查表结构是否匹配
+            # 检查表结构，自动添加缺失的字段
             cursor.execute(f"SHOW COLUMNS FROM `{table_name}`")
-            columns = [row[0] for row in cursor.fetchall()]
-            expected = ['id'] + list(sample_row.keys())
+            existing_columns = {row[0] for row in cursor.fetchall()}
+            expected_columns = set(sample_row.keys())
             
-            if columns == expected:
-                logger.info(f"表 {table_name} 结构正确")
-                return
-            else:
-                # 表存在但结构不匹配，报错而不是重建
-                error_msg = (
-                    f"表 {table_name} 已存在但结构不匹配！\n"
-                    f"  期望字段: {expected}\n"
-                    f"  实际字段: {columns}\n"
-                    f"  请手动处理表结构问题，不要自动重建表"
-                )
-                logger.error(error_msg)
-                raise ValueError(error_msg)
+            # 找出缺失的字段
+            missing_columns = expected_columns - existing_columns
+            
+            if missing_columns:
+                logger.info(f"表 {table_name} 缺少字段: {missing_columns}，正在添加...")
+                for col_name in missing_columns:
+                    col_value = sample_row[col_name]
+                    if isinstance(col_value, int):
+                        col_type = "INT"
+                    elif isinstance(col_value, float):
+                        col_type = "DOUBLE"
+                    elif col_name == '统计日期':
+                        col_type = "DATE"
+                    elif col_name in ['店铺', 'MSKU', 'ASIN']:
+                        col_type = "VARCHAR(100)"
+                    elif '缩略图' in col_name or 'URL' in col_name.upper() or '地址' in col_name or col_name == '商品标题':
+                        col_type = "TEXT"
+                    else:
+                        col_type = "VARCHAR(500)"
+                    
+                    try:
+                        cursor.execute(f"ALTER TABLE `{table_name}` ADD COLUMN `{col_name}` {col_type}")
+                        logger.info(f"  ✅ 已添加字段: {col_name} ({col_type})")
+                    except Exception as e:
+                        logger.error(f"  ❌ 添加字段 {col_name} 失败: {e}")
+            
+            # 检查是否有多余的字段（只警告，不报错）
+            extra_columns = existing_columns - expected_columns - {'id'}
+            if extra_columns:
+                logger.warning(f"表 {table_name} 存在额外字段: {extra_columns}")
+            
+            logger.info(f"表 {table_name} 结构检查完成")
+            return
         
         # 表不存在，创建表
         fields = []
@@ -528,6 +563,9 @@ def convert_profit_report_data(records: List[Dict[str, Any]],
         # 交易状态
         transaction_status = record.get('transactionStatus', '') or ''
         
+        # 计算实际销量 = FBA销量 + FBM销量 + FBM补换货量 + FBA补换货量 - 退货量（可售） - 退货量（不可售）
+        actual_quantity = fba_sales_quantity + fbm_sales_quantity + reship_fba_product_sales_quantity + reship_fbm_product_sales_quantity - fba_returns_saleable_quantity - fba_returns_unsaleable_quantity
+        
         # 构建报表记录（只保留必要字段）
         report_record = {
             'SKU': local_sku,
@@ -584,6 +622,7 @@ def convert_profit_report_data(records: List[Dict[str, Any]],
             '销售税': total_sales_tax,
             '平台其他费总计': total_platform_other_fee,
             '交易状态': transaction_status,
+            '实际销量': actual_quantity,  # 计算的实际销量
             '实际头程费用': 0.0,  # 新增字段，保留为空（浮点数0）
             '录入费用单头程': 0.0,  # 新增字段，保留为空（浮点数0）
         }
@@ -624,15 +663,15 @@ async def main():
     # 不使用店铺映射，直接使用API返回的原始店铺名称
     sid_to_name_map = None
     
-    # 拉取2025-12-31的完整数据
+    # 拉取2026-01-19到2026-01-29的数据
     TEST_MODE = False
     
-    # 定义查询日期范围（只拉取2025-12-31这一天）
-    month_start = datetime(2025, 12, 31)
-    month_end = datetime(2025, 12, 31)
+    # 定义查询日期范围（从2026-01-19到2026-01-29）
+    month_start = datetime(2026, 1, 19)
+    month_end = datetime(2026, 1, 29)
     
-    logger.info(f"📅 拉取2025-12-31的完整数据")
-    logger.info(f"日期: 2025-12-31")
+    logger.info(f"📅 拉取2026-01-19到2026-01-29的完整数据")
+    logger.info(f"日期范围: 2026-01-19 ~ 2026-01-29")
     logger.info(f"⏱️  配置参数（令牌桶容量为10）:")
     logger.info(f"   - 请求间隔: {REQUEST_DELAY}秒")
     logger.info(f"   - 最大重试: {MAX_RETRIES}次")
