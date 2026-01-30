@@ -71,7 +71,7 @@ else
 fi
 
 echo "[3/3] 获取货件单号列表..."
-$PYTHON jobs/feishu/Shipment_Number.py
+$PYTHON "$PROJECT_DIR/jobs/feishu/Shipment_Number.py"
 EXIT_CODE_3=$?
 
 if [ $EXIT_CODE_3 -ne 0 ]; then
