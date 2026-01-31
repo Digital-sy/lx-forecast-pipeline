@@ -21,7 +21,7 @@ logger = get_logger('feishu_shipment')
 
 # 飞书多维表格配置
 FEISHU_APP_TOKEN = "BnYebX3DmaFNqXsxS0OcmMPXnTe"  # 多维表的App Token
-FEISHU_TABLE_ID = "tblQxRq8lBEZUkEG"  # 数据表ID
+FEISHU_TABLE_ID = "tbl4iOz64WPm6Qhh"  # 数据表ID
 
 
 def process_box_info(box_data, shipment_id, sid, seller_name="", shipment_info=None):
@@ -551,10 +551,10 @@ async def main():
     # ========== 第三步：设置查询参数 ==========
     print(f"\n📋 第三步：设置查询参数")
     
-    # 设置日期范围为前3天（包含当天）
+    # 设置日期范围为前5天（包含当天）
     # 注意：API接口的日期范围是左闭右开，所以end_date需要加1天才能包含当天
     end_date = datetime.now() + timedelta(days=1)  # 加1天以包含当天
-    start_date = end_date - timedelta(days=3)
+    start_date = end_date - timedelta(days=5)
     
     # 格式化日期为 Y-m-d 格式
     start_date_str = start_date.strftime('%Y-%m-%d')
