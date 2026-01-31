@@ -632,8 +632,14 @@ def convert_profit_report_data(records: List[Dict[str, Any]],
     return report_list
 
 
-async def main():
-    """主函数"""
+async def main(start_date: str = None, end_date: str = None):
+    """
+    主函数
+    
+    Args:
+        start_date: 开始日期，格式：Y-m-d，默认：前15天
+        end_date: 结束日期，格式：Y-m-d，默认：今天
+    """
     logger.info("="*80)
     logger.info("利润报表-MSKU维度按天数据采集")
     logger.info("="*80)
@@ -663,15 +669,20 @@ async def main():
     # 不使用店铺映射，直接使用API返回的原始店铺名称
     sid_to_name_map = None
     
-    # 拉取2026-01-19到2026-01-29的数据
-    TEST_MODE = False
+    # 确定日期范围（默认前15天到今天）
+    if not end_date:
+        month_end = datetime.now()
+    else:
+        month_end = datetime.strptime(end_date, '%Y-%m-%d')
     
-    # 定义查询日期范围（从2026-01-19到2026-01-29）
-    month_start = datetime(2026, 1, 19)
-    month_end = datetime(2026, 1, 29)
+    if not start_date:
+        # 默认更新前15天的数据
+        month_start = month_end - timedelta(days=15)
+    else:
+        month_start = datetime.strptime(start_date, '%Y-%m-%d')
     
-    logger.info(f"📅 拉取2026-01-19到2026-01-29的完整数据")
-    logger.info(f"日期范围: 2026-01-19 ~ 2026-01-29")
+    logger.info(f"📅 拉取数据（默认前15天）")
+    logger.info(f"日期范围: {month_start.strftime('%Y-%m-%d')} ~ {month_end.strftime('%Y-%m-%d')}")
     logger.info(f"⏱️  配置参数（令牌桶容量为10）:")
     logger.info(f"   - 请求间隔: {REQUEST_DELAY}秒")
     logger.info(f"   - 最大重试: {MAX_RETRIES}次")
@@ -883,10 +894,25 @@ async def main():
         logger.warning(f"查询数据库统计失败: {e}")
     
     logger.info("="*80)
-    logger.info("✅ 1月份数据采集全部完成！")
+    logger.info("✅ 数据采集全部完成！")
     logger.info("="*80)
 
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='利润报表数据采集')
+    parser.add_argument('--start-date', type=str, default=None,
+                       help='开始日期，格式：Y-m-d，默认：前15天')
+    parser.add_argument('--end-date', type=str, default=None,
+                       help='结束日期，格式：Y-m-d，默认：今天')
+    
+    args = parser.parse_args()
+    
+    try:
+        asyncio.run(main(start_date=args.start_date, end_date=args.end_date))
+    except KeyboardInterrupt:
+        logger.warning("\n⚠️  用户中断执行")
+    except Exception as e:
+        logger.error(f"\n❌ 执行失败: {e}", exc_info=True)
 

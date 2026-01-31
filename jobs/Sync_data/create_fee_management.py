@@ -1204,23 +1204,28 @@ async def create_fee_orders_from_profit_report(
     return success_count
 
 
-async def main(start_date: str = "2026-01-01", end_date: str = None):
+async def main(start_date: str = None, end_date: str = None):
     """
     主函数 - 从数据库读取利润报表并创建费用单
     
     Args:
-        start_date: 开始日期，格式：Y-m-d，默认：2026-01-01
+        start_date: 开始日期，格式：Y-m-d，默认：前15天
         end_date: 结束日期，格式：Y-m-d，默认：今天
     """
-    from datetime import datetime, date
+    from datetime import datetime, date, timedelta
     
+    # 确定日期范围（默认前15天到今天）
     if end_date is None:
         end_date = date.today().strftime('%Y-%m-%d')
+    
+    if start_date is None:
+        # 默认更新前15天的数据
+        start_date = (date.today() - timedelta(days=15)).strftime('%Y-%m-%d')
     
     logger.info("=" * 80)
     logger.info("🚀 费用单管理 - 从利润报表创建费用单")
     logger.info("=" * 80)
-    logger.info(f"日期范围: {start_date} 至 {end_date}")
+    logger.info(f"日期范围: {start_date} 至 {end_date}（默认前15天）")
     logger.info("=" * 80)
     
     # 初始化费用管理

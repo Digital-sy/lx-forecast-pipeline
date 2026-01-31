@@ -530,12 +530,12 @@ def main(start_date: Optional[str] = None, end_date: Optional[str] = None, limit
     logger.info("\n📋 步骤1.1: 检查并创建未匹配数据表...")
     create_unmatched_data_table_if_not_exist()
     
-    # 2. 确定日期范围（默认更新前16天的数据）
+    # 2. 确定日期范围（默认更新前15天的数据）
     if not end_date:
         end_date = datetime.now().strftime('%Y-%m-%d')
     if not start_date:
-        # 默认更新前16天的数据
-        start_date = (datetime.now() - timedelta(days=16)).strftime('%Y-%m-%d')
+        # 默认更新前15天的数据
+        start_date = (datetime.now() - timedelta(days=15)).strftime('%Y-%m-%d')
     
     logger.info(f"\n📅 步骤2: 确定更新范围")
     logger.info(f"  日期范围: {start_date} ~ {end_date}")
