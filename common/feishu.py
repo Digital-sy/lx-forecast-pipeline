@@ -1221,6 +1221,9 @@ class FeishuClient:
             
         Returns:
             bool: 是否成功
+            
+        Raises:
+            Exception: 当发生超时或其他错误时抛出异常
         """
         if not self._access_token:
             await self.get_access_token()
@@ -1232,17 +1235,231 @@ class FeishuClient:
         }
         
         timeout = httpx.Timeout(60.0, connect=10.0)
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.delete(url, headers=headers)
+                result = response.json()
+                
+                if result.get("code") == 0:
+                    logger.info(f"删除字段成功 (ID: {field_id})")
+                    return True
+                else:
+                    error_msg = result.get('msg', '未知错误')
+                    # 如果是超时错误，抛出异常以便调用处重试
+                    if "timeout" in error_msg.lower() or "Gateway timeout" in error_msg:
+                        raise Exception(f"删除字段失败: {error_msg}")
+                    else:
+                        error_msg_full = f"删除字段失败: {error_msg}"
+                        logger.warning(error_msg_full)
+                        return False
+        except (httpx.TimeoutException, asyncio.TimeoutError) as e:
+            # httpx 超时异常，重新抛出以便调用处重试
+            raise Exception(f"删除字段超时: {str(e)}")
+        except Exception as e:
+            # 其他异常，检查是否是超时相关
+            error_str = str(e)
+            if "timeout" in error_str.lower() or "Gateway timeout" in error_str:
+                raise  # 重新抛出超时异常
+            else:
+                logger.warning(f"删除字段异常: {e}")
+                return False
+    
+    async def get_ordered_fields(self) -> List[Dict[str, Any]]:
+        """
+        获取表格字段列表（按顺序）
+        
+        Returns:
+            List[Dict[str, Any]]: 字段列表，每个字段包含 field_id, field_name 等信息，按顺序排列
+        """
+        if not self._access_token:
+            await self.get_access_token()
+        
+        url = f"{self.api_base}/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/fields"
+        headers = {
+            "Authorization": f"Bearer {self._access_token}",
+            "Content-Type": "application/json; charset=utf-8"
+        }
+        
+        timeout = httpx.Timeout(60.0, connect=10.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.delete(url, headers=headers)
+            response = await client.get(url, headers=headers)
             result = response.json()
             
             if result.get("code") == 0:
-                logger.info(f"删除字段成功 (ID: {field_id})")
-                return True
+                fields = result.get("data", {}).get("items", [])
+                # 返回字段列表，保持API返回的顺序
+                return fields
             else:
-                error_msg = f"删除字段失败: {result.get('msg')}"
-                logger.warning(error_msg)
+                error_msg = f"获取表格字段失败: {result.get('msg')}"
+                logger.error(error_msg)
+                raise Exception(error_msg)
+    
+    async def reorder_fields(self, field_order: List[str], field_info_list: List[Dict[str, Any]] = None) -> bool:
+        """
+        调整字段顺序
+        
+        方法：如果字段顺序不一致，从"总库存"字段后面开始删除所有字段，然后按照期望顺序重新创建
+        
+        Args:
+            field_order: 期望的字段名顺序列表
+            field_info_list: 字段信息列表，每个字段是一个字典，包含 'name', 'type', 'precision' 等
+                            如果为None，则只删除字段，不重新创建（需要后续调用ensure_table_and_fields来创建）
+            
+        Returns:
+            bool: 是否成功
+        """
+        if not self._access_token:
+            await self.get_access_token()
+        
+        # 获取当前字段列表（按顺序）
+        current_fields = await self.get_ordered_fields()
+        current_field_names = [field.get("field_name", "") for field in current_fields]
+        
+        # 创建字段名到字段信息的映射
+        field_name_to_info = {field.get("field_name", ""): field for field in current_fields}
+        
+        # 检查顺序是否一致
+        # 只比较存在的字段，忽略不存在的字段
+        existing_field_order = [name for name in field_order if name in current_field_names]
+        current_existing_fields = [name for name in current_field_names if name in field_order]
+        
+        # 如果顺序一致，直接返回
+        if existing_field_order == current_existing_fields:
+            logger.debug("字段顺序已正确，无需调整")
+            return True
+        
+        logger.info(f"检测到字段顺序不一致，期望顺序: {existing_field_order}")
+        logger.info(f"当前顺序: {current_existing_fields}")
+        
+        try:
+            # 找到"总库存"字段的位置
+            inventory_field_name = "总库存"
+            inventory_index = -1
+            for i, field_name in enumerate(current_field_names):
+                if field_name == inventory_field_name:
+                    inventory_index = i
+                    break
+            
+            if inventory_index == -1:
+                logger.warning("未找到'总库存'字段，无法调整字段顺序")
                 return False
+            
+            # 系统字段和需要保留的字段（SKU, SPU, 运营, 总库存）
+            protected_fields = {
+                'SKU', 
+                'SPU',
+                '运营',
+                '总库存',
+                '名称', 
+                '多行文本',  # 默认主字段
+                '创建时间', 
+                '更新时间', 
+                '创建人', 
+                '更新人',
+                '最后更新时间',
+                '最后更新人'
+            }
+            
+            # 删除"总库存"后面的所有字段（除了系统字段）
+            deleted_count = 0
+            fields_to_delete = []
+            
+            # 从后往前删除，避免索引变化问题
+            for i in range(len(current_fields) - 1, inventory_index, -1):
+                field = current_fields[i]
+                field_name = field.get("field_name", "")
+                field_id = field.get("field_id", "")
+                
+                # 如果不是受保护字段，则删除
+                if field_name not in protected_fields:
+                    fields_to_delete.append((field_id, field_name))
+            
+            # 执行删除（带重试机制）
+            max_retries = 3
+            for idx, (field_id, field_name) in enumerate(fields_to_delete):
+                logger.info(f"删除字段 '{field_name}' 以调整顺序 ({idx + 1}/{len(fields_to_delete)})")
+                success = False
+                
+                for retry in range(max_retries):
+                    try:
+                        success = await self.delete_field(field_id)
+                        if success:
+                            deleted_count += 1
+                            break  # 成功删除，退出重试循环
+                    except Exception as e:
+                        error_str = str(e)
+                        # 检查是否是超时错误
+                        if "timeout" in error_str.lower() or "Gateway timeout" in error_str:
+                            if retry < max_retries - 1:
+                                wait_time = (retry + 1) * 5  # 等待5秒、10秒、15秒
+                                logger.warning(f"删除字段 '{field_name}' 超时（尝试 {retry + 1}/{max_retries}），{wait_time}秒后重试...")
+                                await asyncio.sleep(wait_time)
+                            else:
+                                logger.error(f"删除字段 '{field_name}' 超时，已重试 {max_retries} 次，跳过该字段")
+                        else:
+                            logger.warning(f"删除字段 '{field_name}' 失败: {e}")
+                            break  # 非超时错误，不重试
+                
+                # 删除字段之间添加延迟，避免API限流（最后一个字段不需要延迟）
+                if idx < len(fields_to_delete) - 1:
+                    await asyncio.sleep(1)  # 每次删除后等待1秒
+            
+            logger.info(f"已删除 {deleted_count} 个字段（共尝试删除 {len(fields_to_delete)} 个字段）")
+            
+            # 如果提供了字段信息列表，按照期望顺序重新创建字段
+            if field_info_list:
+                # 找到"总库存"在期望顺序中的位置
+                inventory_index_in_order = -1
+                for i, field_info in enumerate(field_info_list):
+                    if field_info.get('name') == inventory_field_name:
+                        inventory_index_in_order = i
+                        break
+                
+                if inventory_index_in_order >= 0:
+                    # 创建"总库存"后面的字段
+                    fields_to_create = field_info_list[inventory_index_in_order + 1:]
+                    created_count = 0
+                    
+                    # 重新获取当前字段列表（删除后）
+                    current_fields_after_delete = await self.get_ordered_fields()
+                    existing_field_names_after_delete = {field.get("field_name", "") for field in current_fields_after_delete}
+                    
+                    for field_info in fields_to_create:
+                        field_name = field_info.get('name', '')
+                        
+                        # 如果字段已存在，跳过（不应该发生，但为了安全）
+                        if field_name in existing_field_names_after_delete:
+                            logger.debug(f"字段 '{field_name}' 已存在，跳过创建")
+                            continue
+                        
+                        field_type_str = field_info.get('type', 'text')
+                        precision = field_info.get('precision', 0)
+                        
+                        # 转换字段类型
+                        if field_type_str == 'number':
+                            field_type = "2"  # 数字类型
+                        else:
+                            field_type = "1"  # 多行文本类型
+                        
+                        try:
+                            logger.info(f"重新创建字段 '{field_name}'")
+                            await self.create_field(field_name, field_type, precision)
+                            created_count += 1
+                        except Exception as e:
+                            logger.warning(f"创建字段 '{field_name}' 失败: {e}")
+                    
+                    logger.info(f"已重新创建 {created_count} 个字段")
+                else:
+                    logger.warning("未在字段信息列表中找到'总库存'字段，无法重新创建字段")
+            else:
+                logger.info("未提供字段信息列表，字段将在后续的ensure_table_and_fields中创建")
+            
+            logger.info("字段顺序调整完成")
+            return True
+            
+        except Exception as e:
+            logger.warning(f"调整字段顺序时出错: {e}，将继续处理")
+            return False
     
     async def ensure_table_and_fields(self, table_name: str, field_names: List[Dict[str, str]], 
                                       remove_extra_fields: bool = False) -> str:

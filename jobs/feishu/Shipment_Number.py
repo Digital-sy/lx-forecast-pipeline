@@ -44,11 +44,35 @@ def process_box_info(box_data, shipment_id, sid, seller_name="", shipment_info=N
     # 提取货件级别信息
     shipment_data = {}
     if shipment_info:
+        # 尝试多个可能的创建时间字段名
+        create_time = (
+            shipment_info.get("gmt_create") or
+            shipment_info.get("create_time") or
+            shipment_info.get("created_at") or
+            shipment_info.get("create_date") or
+            shipment_info.get("gmtCreate") or
+            shipment_info.get("createTime") or
+            shipment_info.get("createdAt") or
+            ""
+        )
+        
+        # 如果没有找到创建时间，使用当前时间
+        if not create_time:
+            create_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
         shipment_data = {
             "货件名称": shipment_info.get("shipment_name", ""),
             "货件状态": shipment_info.get("shipment_status", ""),
-            "创建时间": shipment_info.get("gmt_create", ""),
-            "修改时间": shipment_info.get("gmt_modified", ""),
+            "创建时间": create_time,
+            "修改时间": (
+                shipment_info.get("gmt_modified") or
+                shipment_info.get("update_time") or
+                shipment_info.get("updated_at") or
+                shipment_info.get("gmtModified") or
+                shipment_info.get("updateTime") or
+                shipment_info.get("updatedAt") or
+                ""
+            ),
             "工作时间": shipment_info.get("working_time", ""),
             "发货时间": shipment_info.get("shipped_time", ""),
             "接收时间": shipment_info.get("receiving_time", ""),
@@ -305,9 +329,99 @@ def format_for_feishu(processed_data):
     return result
 
 
+async def delete_records_by_ids(feishu_client: FeishuClient, record_ids: List[str]) -> int:
+    """
+    批量删除指定的记录ID
+    
+    Args:
+        feishu_client: 飞书客户端实例
+        record_ids: 要删除的记录ID列表
+        
+    Returns:
+        int: 成功删除的记录数量
+    """
+    if not record_ids:
+        return 0
+    
+    import httpx
+    try:
+        import lark_oapi as lark
+        from lark_oapi.api.bitable.v1 import (
+            BatchDeleteAppTableRecordRequest,
+            BatchDeleteAppTableRecordRequestBody
+        )
+        LARK_SDK_AVAILABLE = True
+    except ImportError:
+        LARK_SDK_AVAILABLE = False
+    
+    batch_size = 500
+    deleted_count = 0
+    total_batches = (len(record_ids) + batch_size - 1) // batch_size
+    timeout = httpx.Timeout(120.0, connect=30.0)
+    
+    if LARK_SDK_AVAILABLE:
+        def delete_with_sdk(batch_ids: List[str], access_token: str) -> bool:
+            try:
+                client = lark.Client.builder() \
+                    .enable_set_token(True) \
+                    .log_level(lark.LogLevel.INFO) \
+                    .build()
+                
+                request = BatchDeleteAppTableRecordRequest.builder() \
+                    .app_token(feishu_client.app_token) \
+                    .table_id(feishu_client.table_id) \
+                    .request_body(BatchDeleteAppTableRecordRequestBody.builder()
+                        .records(batch_ids)
+                        .build()) \
+                    .build()
+                
+                option = lark.RequestOption.builder().tenant_access_token(access_token).build()
+                response = client.bitable.v1.app_table_record.batch_delete(request, option)
+                
+                return response.success()
+            except Exception as e:
+                logger.error(f"SDK删除失败: {e}")
+                return False
+        
+        loop = asyncio.get_event_loop()
+        for batch_idx, i in enumerate(range(0, len(record_ids), batch_size), 1):
+            batch_ids = record_ids[i:i+batch_size]
+            success = await loop.run_in_executor(None, delete_with_sdk, batch_ids, feishu_client._access_token)
+            
+            if success:
+                deleted_count += len(batch_ids)
+                logger.info(f"  删除进度: {batch_idx}/{total_batches} 批，已删除 {deleted_count}/{len(record_ids)} 条")
+            else:
+                raise Exception(f"删除记录失败（批次 {batch_idx}）")
+    else:
+        delete_url = f"{feishu_client.api_base}/bitable/v1/apps/{feishu_client.app_token}/tables/{feishu_client.table_id}/records/batch_delete"
+        headers = {
+            "Authorization": f"Bearer {feishu_client._access_token}",
+            "Content-Type": "application/json; charset=utf-8"
+        }
+        
+        for batch_idx, i in enumerate(range(0, len(record_ids), batch_size), 1):
+            batch_ids = record_ids[i:i+batch_size]
+            data = {"records": batch_ids}
+            
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(delete_url, headers=headers, json=data)
+                result = response.json()
+                
+                if result.get("code") == 0:
+                    deleted_count += len(batch_ids)
+                    logger.info(f"  删除进度: {batch_idx}/{total_batches} 批，已删除 {deleted_count}/{len(record_ids)} 条")
+                else:
+                    error_msg = f"删除记录失败: {result.get('msg')}"
+                    logger.error(error_msg)
+                    raise Exception(error_msg)
+    
+    return deleted_count
+
+
 async def write_to_feishu(records: List[Dict[str, Any]]) -> bool:
     """
-    将数据写入飞书多维表
+    将数据全量写入飞书多维表（删除前30天的数据后重新插入）
     
     Args:
         records: 记录列表，每个记录是一个字典，键为字段名，值为字段值
@@ -317,7 +431,7 @@ async def write_to_feishu(records: List[Dict[str, Any]]) -> bool:
     """
     try:
         logger.info(f"\n{'='*80}")
-        logger.info(f"正在写入数据到飞书多维表...")
+        logger.info(f"正在全量更新数据到飞书多维表...")
         logger.info(f"{'='*80}")
         
         # 创建飞书客户端
@@ -401,48 +515,29 @@ async def write_to_feishu(records: List[Dict[str, Any]]) -> bool:
             logger.warning("没有数据需要写入")
             return True
         
-        # 先清空现有数据
-        logger.info(f"正在清空现有数据...")
-        max_retries = 3
-        deleted_count = 0
+        # 读取现有记录
+        logger.info(f"正在读取现有记录...")
+        existing_records = await feishu_client.read_records()
+        logger.info(f"现有记录数: {len(existing_records)}")
         
-        for retry in range(max_retries):
-            try:
-                deleted_count = await feishu_client.delete_all_records()
-                logger.info(f"成功清空 {deleted_count} 条旧记录")
-                break
-            except asyncio.TimeoutError:
-                if retry < max_retries - 1:
-                    wait_time = (retry + 1) * 10
-                    logger.warning(f"清空数据超时（尝试 {retry + 1}/{max_retries}），{wait_time}秒后重试...")
-                    await asyncio.sleep(wait_time)
-                else:
-                    logger.error(f"清空数据超时，已重试 {max_retries} 次")
-                    raise Exception(f"清空数据失败：超时")
-            except Exception as e:
-                error_str = str(e)
-                if "超时" in error_str or "timeout" in error_str.lower():
-                    if retry < max_retries - 1:
-                        wait_time = (retry + 1) * 10
-                        logger.warning(f"清空数据超时（尝试 {retry + 1}/{max_retries}），{wait_time}秒后重试...")
-                        await asyncio.sleep(wait_time)
-                    else:
-                        logger.error(f"清空数据超时，已重试 {max_retries} 次")
-                        raise Exception(f"清空数据失败：超时")
-                else:
-                    logger.error(f"清空数据失败: {e}")
-                    raise Exception(f"清空数据失败: {e}")
+        # 删除所有现有记录
+        if existing_records:
+            logger.info(f"正在清空表中所有数据...")
+            record_ids_to_delete = [record.get("record_id", "") for record in existing_records if record.get("record_id")]
+            
+            if record_ids_to_delete:
+                logger.info(f"准备删除 {len(record_ids_to_delete)} 条现有记录...")
+                deleted_count = await delete_records_by_ids(feishu_client, record_ids_to_delete)
+                logger.info(f"✓ 成功删除 {deleted_count} 条记录，表已清空")
+        else:
+            logger.info(f"表中无数据，跳过删除步骤")
         
-        # 检查记录数限制（飞书多维表最大支持20000条记录）
-        max_records = 20000
-        if len(records) > max_records:
-            logger.error(f"要写入的记录数 {len(records)} 超过飞书多维表的最大限制 {max_records} 条")
-            raise Exception(f"要写入的记录数 {len(records)} 超过飞书多维表的最大限制 {max_records} 条")
+        # 插入新数据
+        logger.info(f"正在插入 {len(records)} 条新记录...")
+        inserted_count = await feishu_client.write_records(records, batch_size=500)
+        logger.info(f"✓ 成功插入 {inserted_count} 条记录")
         
-        # 写入数据
-        logger.info(f"正在写入数据到飞书多维表...")
-        written_count = await feishu_client.write_records(records, batch_size=500)
-        logger.info(f"✓ 成功写入 {written_count} 条记录到飞书多维表")
+        logger.info(f"✓ 全量更新完成：删除所有旧数据，插入 {inserted_count} 条新数据")
         
         return True
         
@@ -551,10 +646,10 @@ async def main():
     # ========== 第三步：设置查询参数 ==========
     print(f"\n📋 第三步：设置查询参数")
     
-    # 设置日期范围为前5天（包含当天）
+    # 设置日期范围为前30天（包含当天）
     # 注意：API接口的日期范围是左闭右开，所以end_date需要加1天才能包含当天
     end_date = datetime.now() + timedelta(days=1)  # 加1天以包含当天
-    start_date = end_date - timedelta(days=5)
+    start_date = end_date - timedelta(days=30)
     
     # 格式化日期为 Y-m-d 格式
     start_date_str = start_date.strftime('%Y-%m-%d')

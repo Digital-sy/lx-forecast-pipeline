@@ -43,6 +43,10 @@ class Settings:
         self.DB_PASSWORD = os.getenv('DB_PASSWORD', '')
         self.DB_DATABASE = os.getenv('DB_DATABASE', 'lingxing')
         self.DB_CHARSET = os.getenv('DB_CHARSET', 'utf8mb4')
+        # 新增：数据库超时配置（秒）
+        self.DB_CONNECT_TIMEOUT = int(os.getenv('DB_CONNECT_TIMEOUT', '10'))
+        self.DB_READ_TIMEOUT = int(os.getenv('DB_READ_TIMEOUT', '600'))  # 10分钟
+        self.DB_WRITE_TIMEOUT = int(os.getenv('DB_WRITE_TIMEOUT', '600'))  # 10分钟
         
         # ===== 飞书API配置（全局认证信息）=====
         # 注意：app_token, table_id, view_id 等表级配置应在各业务脚本中单独指定
@@ -68,6 +72,10 @@ class Settings:
             'password': self.DB_PASSWORD,
             'database': self.DB_DATABASE,
             'charset': self.DB_CHARSET,
+            # 添加超时配置
+            'connect_timeout': self.DB_CONNECT_TIMEOUT,
+            'read_timeout': self.DB_READ_TIMEOUT,
+            'write_timeout': self.DB_WRITE_TIMEOUT,
         }
     
     @property
@@ -115,4 +123,3 @@ class Settings:
 
 # 创建全局配置实例
 settings = Settings()
-

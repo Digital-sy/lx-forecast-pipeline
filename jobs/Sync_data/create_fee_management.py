@@ -753,7 +753,7 @@ async def discard_existing_fee_orders(
     fee_type_ids: List[int]
 ) -> bool:
     """
-    作废指定日期范围内指定费用类型的费用单
+    作废指定日期范围内指定费用类型的费用单（分批查询和作废）
     
     Args:
         fee_mgmt: 费用管理实例
@@ -765,18 +765,43 @@ async def discard_existing_fee_orders(
         bool: 是否成功
     """
     logger.info("=" * 80)
-    logger.info("步骤1: 查询并作废已有费用单")
+    logger.info("步骤1: 查询并作废已有费用单（分批处理）")
     logger.info("=" * 80)
     
-    # 分页查询所有费用单
-    all_records = []
-    offset = 0
-    length = 100  # 每次查询100条
+    # 分批处理配置
+    query_batch_size = 500  # 每次查询500条
+    discard_batch_size = 200  # 每次作废200个
     
+    offset = 0
+    total_queried = 0
+    total_discarded = 0
+    total_already_discarded = 0
+    pending_numbers = []  # 累积待作废的费用单号
+    
+    # 先查询一次获取总数
+    first_query = await fee_mgmt.get_fee_list(
+        offset=0,
+        length=1,
+        date_type="date",
+        start_date=start_date,
+        end_date=end_date,
+        other_fee_type_ids=fee_type_ids
+    )
+    
+    total_count = 0
+    if first_query:
+        data = first_query.get('data', {})
+        total_count = data.get('total', 0)
+        logger.info(f"总共需要处理 {total_count} 条费用单，将分批查询和作废")
+    
+    await asyncio.sleep(REQUEST_DELAY)
+    
+    # 分批查询和作废
     while True:
+        # 查询一批费用单
         query_result = await fee_mgmt.get_fee_list(
             offset=offset,
-            length=length,
+            length=query_batch_size,
             date_type="date",
             start_date=start_date,
             end_date=end_date,
@@ -792,55 +817,76 @@ async def discard_existing_fee_orders(
         if not records:
             break
         
-        all_records.extend(records)
-        total = data.get('total', 0)
+        total_queried += len(records)
         
-        logger.info(f"  已查询 {len(all_records)}/{total} 条费用单...")
+        # 过滤出需要作废的费用单
+        batch_pending_numbers = []
+        for record in records:
+            status_order = record.get('status_order')
+            if status_order == 5 or str(status_order) == "已作废":
+                total_already_discarded += 1
+                continue
+            number = record.get('number')
+            if number:
+                batch_pending_numbers.append(number)
         
-        if len(all_records) >= total:
+        pending_numbers.extend(batch_pending_numbers)
+        
+        logger.info(f"  已查询 {total_queried}/{total_count if total_count > 0 else '?'} 条费用单，"
+                   f"累积 {len(pending_numbers)} 个待作废，{total_already_discarded} 个已作废")
+        
+        # 如果累积的待作废数量达到批次大小，或者这是最后一批，执行作废
+        if len(pending_numbers) >= discard_batch_size or total_queried >= total_count:
+            # 分批作废
+            while len(pending_numbers) >= discard_batch_size:
+                batch_numbers = pending_numbers[:discard_batch_size]
+                pending_numbers = pending_numbers[discard_batch_size:]
+                
+                logger.info(f"  准备作废 {len(batch_numbers)} 个费用单...")
+                discard_result = await fee_mgmt.discard_fee_orders(batch_numbers)
+                
+                if discard_result:
+                    total_discarded += len(batch_numbers)
+                    logger.info(f"  ✅ 成功作废 {len(batch_numbers)} 个费用单（累计 {total_discarded} 个）")
+                else:
+                    logger.error(f"  ❌ 作废失败，{len(batch_numbers)} 个费用单未作废")
+                
+                await asyncio.sleep(REQUEST_DELAY)
+        
+        # 检查是否还有更多记录
+        if total_count > 0 and total_queried >= total_count:
             break
         
-        offset += length
+        if len(records) < query_batch_size:
+            break
+        
+        offset += query_batch_size
         await asyncio.sleep(REQUEST_DELAY)
     
-    if not all_records:
-        logger.info("✅ 未找到需要作废的费用单")
-        return True
+    # 处理剩余的待作废费用单
+    if pending_numbers:
+        logger.info(f"  处理剩余的 {len(pending_numbers)} 个费用单...")
+        # 分批作废剩余的费用单
+        for i in range(0, len(pending_numbers), discard_batch_size):
+            batch_numbers = pending_numbers[i:i + discard_batch_size]
+            logger.info(f"  准备作废剩余的第 {i // discard_batch_size + 1} 批，共 {len(batch_numbers)} 个费用单...")
+            discard_result = await fee_mgmt.discard_fee_orders(batch_numbers)
+            
+            if discard_result:
+                total_discarded += len(batch_numbers)
+                logger.info(f"  ✅ 成功作废 {len(batch_numbers)} 个费用单（累计 {total_discarded} 个）")
+            else:
+                logger.error(f"  ❌ 作废失败，{len(batch_numbers)} 个费用单未作废")
+            
+            await asyncio.sleep(REQUEST_DELAY)
     
-    # 过滤掉已经作废的费用单
-    pending_records = []
-    for record in all_records:
-        status_order = record.get('status_order')
-        if status_order == 5 or str(status_order) == "已作废":
-            continue
-        pending_records.append(record)
+    logger.info("=" * 80)
+    logger.info(f"✅ 作废完成：")
+    logger.info(f"   总查询: {total_queried} 条费用单")
+    logger.info(f"   已作废: {total_discarded} 个费用单")
+    logger.info(f"   无需作废: {total_already_discarded} 个费用单（已经是作废状态）")
+    logger.info("=" * 80)
     
-    if not pending_records:
-        logger.info(f"✅ 所有 {len(all_records)} 个费用单都已经是已作废状态，无需作废操作")
-        return True
-    
-    # 批量作废（每次最多200个）
-    all_numbers = [record.get('number') for record in pending_records]
-    logger.info(f"\n找到 {len(all_records)} 个费用单，其中 {len(pending_records)} 个需要作废（已过滤 {len(all_records) - len(pending_records)} 个已作废的费用单）")
-    
-    # 分批作废，每批200个
-    batch_size = 200
-    success_count = 0
-    for i in range(0, len(all_numbers), batch_size):
-        batch_numbers = all_numbers[i:i + batch_size]
-        logger.info(f"\n准备作废第 {i // batch_size + 1} 批，共 {len(batch_numbers)} 个费用单")
-        
-        discard_result = await fee_mgmt.discard_fee_orders(batch_numbers)
-        
-        if discard_result:
-            success_count += len(batch_numbers)
-            logger.info(f"✅ 第 {i // batch_size + 1} 批作废成功")
-        else:
-            logger.error(f"❌ 第 {i // batch_size + 1} 批作废失败")
-        
-        await asyncio.sleep(REQUEST_DELAY)
-    
-    logger.info(f"\n✅ 已成功作废 {success_count} 个费用单")
     return True
 
 
@@ -1204,28 +1250,30 @@ async def create_fee_orders_from_profit_report(
     return success_count
 
 
-async def main(start_date: str = None, end_date: str = None):
+async def main(start_date: str = None, end_date: str = None, daily: bool = False):
     """
     主函数 - 从数据库读取利润报表并创建费用单
     
     Args:
         start_date: 开始日期，格式：Y-m-d，默认：前15天
         end_date: 结束日期，格式：Y-m-d，默认：今天
+        daily: 是否按天处理，默认：False
     """
     from datetime import datetime, date, timedelta
     
-    # 确定日期范围（默认前15天到今天）
+    # 确定日期范围（默认前5天到今天）
     if end_date is None:
         end_date = date.today().strftime('%Y-%m-%d')
     
     if start_date is None:
-        # 默认更新前15天的数据
-        start_date = (date.today() - timedelta(days=15)).strftime('%Y-%m-%d')
+        # 默认更新前5天的数据
+        start_date = (date.today() - timedelta(days=5)).strftime('%Y-%m-%d')
     
     logger.info("=" * 80)
     logger.info("🚀 费用单管理 - 从利润报表创建费用单")
     logger.info("=" * 80)
-    logger.info(f"日期范围: {start_date} 至 {end_date}（默认前15天）")
+    logger.info(f"日期范围: {start_date} 至 {end_date}")
+    logger.info(f"处理模式: {'按天处理' if daily else '批量处理'}")
     logger.info("=" * 80)
     
     # 初始化费用管理
@@ -1261,36 +1309,153 @@ async def main(start_date: str = None, end_date: str = None):
         '头程费用_id': 头程费用_id
     }
     
-    # 步骤1: 作废已有费用单
+    # 如果启用按天处理，循环处理每一天
+    if daily:
+        start_dt = datetime.strptime(start_date, '%Y-%m-%d').date()
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d').date()
+        
+        current_date = start_dt
+        total_success = 0
+        
+        while current_date <= end_dt:
+            current_date_str = current_date.strftime('%Y-%m-%d')
+            
+            logger.info("\n" + "=" * 80)
+            logger.info(f"📅 处理日期: {current_date_str}")
+            logger.info("=" * 80)
+            
+            # 步骤1: 作废已有费用单
+            await discard_existing_fee_orders(
+                fee_mgmt,
+                current_date_str,
+                current_date_str,
+                [商品成本附加费_id, 头程成本附加费_id, 头程费用_id]
+            )
+            
+            await asyncio.sleep(REQUEST_DELAY)
+            
+            # 步骤2: 从数据库读取利润报表数据
+            logger.info(f"从数据库读取 {current_date_str} 的利润报表数据")
+            profit_data = fetch_profit_report_data(current_date_str, current_date_str)
+            
+            if not profit_data:
+                logger.warning(f"⚠️  {current_date_str} 未找到需要创建费用单的数据")
+            else:
+                # 步骤3: 创建费用单
+                success_count = await create_fee_orders_from_profit_report(
+                    fee_mgmt,
+                    profit_data,
+                    fee_type_ids
+                )
+                total_success += success_count
+                logger.info(f"✅ {current_date_str} 完成，成功创建 {success_count} 个费用单")
+            
+            # 移动到下一天
+            current_date += timedelta(days=1)
+            
+            # 如果不是最后一天，等待一下
+            if current_date <= end_dt:
+                await asyncio.sleep(REQUEST_DELAY)
+        
+        logger.info("\n" + "=" * 80)
+        logger.info(f"✅ 所有日期处理完成，总共成功创建 {total_success} 个费用单")
+        logger.info("=" * 80)
+    else:
+        # 批量处理模式（原有逻辑）
+        # 步骤1: 作废已有费用单
+        await discard_existing_fee_orders(
+            fee_mgmt,
+            start_date,
+            end_date,
+            [商品成本附加费_id, 头程成本附加费_id, 头程费用_id]
+        )
+        
+        await asyncio.sleep(REQUEST_DELAY)
+        
+        # 步骤2: 从数据库读取利润报表数据
+        logger.info("=" * 80)
+        logger.info("步骤2: 从数据库读取利润报表数据")
+        logger.info("=" * 80)
+        
+        profit_data = fetch_profit_report_data(start_date, end_date)
+        
+        if not profit_data:
+            logger.warning("⚠️  未找到需要创建费用单的数据")
+            return
+        
+        # 步骤3: 创建费用单
+        success_count = await create_fee_orders_from_profit_report(
+            fee_mgmt,
+            profit_data,
+            fee_type_ids
+        )
+        
+        logger.info("=" * 80)
+        logger.info(f"✅ 费用单管理任务完成，成功创建 {success_count} 个费用单")
+        logger.info("=" * 80)
+
+
+async def discard_fee_orders_by_date_range(start_date: str, end_date: str):
+    """
+    作废指定日期范围内的三个费用类型的费用单
+    
+    Args:
+        start_date: 开始日期，格式：Y-m-d
+        end_date: 结束日期，格式：Y-m-d
+    """
+    from datetime import date
+    
+    logger.info("=" * 80)
+    logger.info("🗑️  作废费用单任务")
+    logger.info("=" * 80)
+    logger.info(f"日期范围: {start_date} 至 {end_date}")
+    logger.info("费用类型: 商品成本附加费, 头程成本附加费, 头程费用")
+    logger.info("=" * 80)
+    
+    # 初始化费用管理
+    fee_mgmt = FeeManagement()
+    
+    # 查询费用类型列表
+    logger.info("查询费用类型列表...")
+    fee_types = await fee_mgmt.get_fee_types()
+    
+    if not fee_types:
+        logger.error("❌ 无法获取费用类型列表")
+        return
+    
+    await asyncio.sleep(REQUEST_DELAY)
+    
+    # 从费用类型列表中找到需要的三个费用类型
+    fee_type_map = {ft.get('name'): ft.get('id') for ft in fee_types}
+    
+    商品成本附加费_id = fee_type_map.get('商品成本附加费')
+    头程成本附加费_id = fee_type_map.get('头程成本附加费')
+    头程费用_id = fee_type_map.get('头程费用')
+    
+    if not 商品成本附加费_id or not 头程成本附加费_id or not 头程费用_id:
+        logger.error("❌ 无法找到所需的费用类型ID")
+        logger.error(f"  商品成本附加费_id: {商品成本附加费_id}")
+        logger.error(f"  头程成本附加费_id: {头程成本附加费_id}")
+        logger.error(f"  头程费用_id: {头程费用_id}")
+        return
+    
+    fee_type_ids = [商品成本附加费_id, 头程成本附加费_id, 头程费用_id]
+    
+    logger.info(f"找到费用类型ID:")
+    logger.info(f"  商品成本附加费_id: {商品成本附加费_id}")
+    logger.info(f"  头程成本附加费_id: {头程成本附加费_id}")
+    logger.info(f"  头程费用_id: {头程费用_id}")
+    
+    # 作废费用单
     await discard_existing_fee_orders(
         fee_mgmt,
         start_date,
         end_date,
-        [商品成本附加费_id, 头程成本附加费_id, 头程费用_id]
-    )
-    
-    await asyncio.sleep(REQUEST_DELAY)
-    
-    # 步骤2: 从数据库读取利润报表数据
-    logger.info("=" * 80)
-    logger.info("步骤2: 从数据库读取利润报表数据")
-    logger.info("=" * 80)
-    
-    profit_data = fetch_profit_report_data(start_date, end_date)
-    
-    if not profit_data:
-        logger.warning("⚠️  未找到需要创建费用单的数据")
-        return
-    
-    # 步骤3: 创建费用单
-    success_count = await create_fee_orders_from_profit_report(
-        fee_mgmt,
-        profit_data,
         fee_type_ids
     )
     
     logger.info("=" * 80)
-    logger.info(f"✅ 费用单管理任务完成，成功创建 {success_count} 个费用单")
+    logger.info("✅ 作废费用单任务完成")
     logger.info("=" * 80)
 
 
@@ -1298,15 +1463,27 @@ if __name__ == '__main__':
     import argparse
     
     parser = argparse.ArgumentParser(description='从利润报表创建费用单')
-    parser.add_argument('--start-date', type=str, default='2026-01-01', 
-                       help='开始日期，格式：Y-m-d，默认：2026-01-01')
+    parser.add_argument('--start-date', type=str, default=None, 
+                       help='开始日期，格式：Y-m-d，默认：前5天')
     parser.add_argument('--end-date', type=str, default=None,
                        help='结束日期，格式：Y-m-d，默认：今天')
+    parser.add_argument('--daily', action='store_true',
+                       help='按天处理（每天单独处理，避免一次性处理太多数据）')
+    parser.add_argument('--discard-only', action='store_true',
+                       help='仅作废费用单，不创建新费用单')
     
     args = parser.parse_args()
     
     try:
-        asyncio.run(main(start_date=args.start_date, end_date=args.end_date))
+        if args.discard_only:
+            # 仅作废模式
+            from datetime import date
+            start_date = args.start_date or '2026-01-01'
+            end_date = args.end_date or date.today().strftime('%Y-%m-%d')
+            asyncio.run(discard_fee_orders_by_date_range(start_date, end_date))
+        else:
+            # 正常模式：创建费用单
+            asyncio.run(main(start_date=args.start_date, end_date=args.end_date, daily=args.daily))
     except KeyboardInterrupt:
         logger.info("⚠️  任务被用户中断")
     except Exception as e:

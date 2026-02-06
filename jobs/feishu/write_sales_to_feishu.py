@@ -1054,6 +1054,37 @@ async def process_shop_data(shop_name: str,
         # 更新client的table_id
         feishu_client.table_id = table_id
         
+        # 检查并调整字段顺序
+        logger.info(f"正在检查字段顺序...")
+        try:
+            # 获取期望的字段顺序（字段名列表）
+            expected_field_order = [field_info.get('name', '') for field_info in field_list]
+            
+            # 获取当前字段顺序
+            current_fields = await feishu_client.get_ordered_fields()
+            current_field_names = [field.get("field_name", "") for field in current_fields]
+            
+            # 只比较存在的字段，忽略不存在的字段
+            existing_expected_fields = [name for name in expected_field_order if name in current_field_names]
+            current_existing_fields = [name for name in current_field_names if name in expected_field_order]
+            
+            # 检查顺序是否一致
+            if existing_expected_fields != current_existing_fields:
+                logger.info(f"检测到字段顺序不一致，正在调整...")
+                logger.info(f"期望顺序: {existing_expected_fields}")
+                logger.info(f"当前顺序: {current_existing_fields}")
+                
+                # 尝试调整字段顺序：删除"总库存"后面的字段，然后按顺序重新创建
+                success = await feishu_client.reorder_fields(expected_field_order, field_info_list=field_list)
+                if success:
+                    logger.info(f"字段顺序调整完成")
+                else:
+                    logger.warning(f"字段顺序调整失败，将继续使用当前顺序")
+            else:
+                logger.debug(f"字段顺序正确，无需调整")
+        except Exception as e:
+            logger.warning(f"检查字段顺序时出错: {e}，将继续处理")
+        
         # 从运营预计下单表获取预计下单量默认值
         logger.info(f"正在从运营预计下单表获取预计下单量默认值...")
         order_forecast_data = get_order_forecast_from_db(shop_name)

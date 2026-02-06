@@ -282,6 +282,81 @@ async def fetch_all_profit_reports(op_api: OpenApiBase, token_resp,
     return all_records
 
 
+def add_performance_indexes(table_name: str) -> None:
+    """
+    添加性能优化索引（如果不存在）
+    
+    这些索引用于优化后续的查询性能，特别是：
+    - update_profit_report_calculated_fields.py 中的复杂查询
+    - 按日期、店铺、SKU等维度的数据分析
+    
+    Args:
+        table_name: 表名
+    """
+    indexes_to_add = [
+        {
+            'name': 'idx_stat_date',
+            'columns': ['统计日期'],
+            'comment': '统计日期索引，用于日期范围查询'
+        },
+        {
+            'name': 'idx_shop',
+            'columns': ['店铺'],
+            'comment': '店铺索引，用于按店铺查询'
+        },
+        {
+            'name': 'idx_sku',
+            'columns': ['SKU'],
+            'comment': 'SKU索引，用于产品管理表JOIN'
+        },
+        {
+            'name': 'idx_shop_person_date',
+            'columns': ['店铺', '负责人', '统计日期'],
+            'comment': '店铺+负责人+统计日期复合索引，用于头程单价匹配'
+        },
+        {
+            'name': 'idx_date_shop',
+            'columns': ['统计日期', '店铺'],
+            'comment': '统计日期+店铺复合索引，用于日期范围内按店铺查询'
+        },
+    ]
+    
+    with db_cursor(dictionary=False) as cursor:
+        # 获取已存在的索引
+        cursor.execute(f"""
+            SELECT DISTINCT INDEX_NAME 
+            FROM information_schema.STATISTICS 
+            WHERE TABLE_SCHEMA = DATABASE() 
+              AND TABLE_NAME = '{table_name}'
+        """)
+        existing_indexes = {row[0] for row in cursor.fetchall()}
+        
+        added_count = 0
+        for idx_info in indexes_to_add:
+            idx_name = idx_info['name']
+            
+            # 检查索引是否已存在
+            if idx_name in existing_indexes:
+                logger.debug(f"  索引 {idx_name} 已存在，跳过")
+                continue
+            
+            try:
+                # 构建索引SQL
+                columns_str = ', '.join([f"`{col}`" for col in idx_info['columns']])
+                sql = f"CREATE INDEX `{idx_name}` ON `{table_name}` ({columns_str})"
+                
+                cursor.execute(sql)
+                logger.info(f"  ✅ 已添加索引: {idx_name} ({columns_str}) - {idx_info['comment']}")
+                added_count += 1
+            except Exception as e:
+                logger.error(f"  ❌ 添加索引 {idx_name} 失败: {e}")
+        
+        if added_count > 0:
+            logger.info(f"成功添加 {added_count} 个性能优化索引")
+        else:
+            logger.info("所有性能优化索引都已存在")
+
+
 def create_table_if_needed(table_name: str, sample_row: Dict[str, Any]) -> None:
     """
     创建数据表（如果不存在），如果表存在但结构不匹配则报错
@@ -299,10 +374,32 @@ def create_table_if_needed(table_name: str, sample_row: Dict[str, Any]) -> None:
         exists = cursor.fetchone()
         
         if exists:
+            # 字段重命名映射（旧字段名 -> 新字段名）
+            field_rename_map = {
+                '平台佣金': '平台费',
+                'FBM销售退款': 'FBM销售退款额',
+                'FBA销售退款': 'FBA销售退款额',
+                '买家运费退款': '买家运费退款额',
+                '促销折扣退款': '促销折扣退款额',
+                '库存调整费': '库存调整费用',
+                'FBA国际入库费': 'FBA国际物流货运费',
+            }
+            
             # 检查表结构，自动添加缺失的字段
             cursor.execute(f"SHOW COLUMNS FROM `{table_name}`")
             existing_columns = {row[0] for row in cursor.fetchall()}
             expected_columns = set(sample_row.keys())
+            
+            # 处理字段重命名
+            for old_name, new_name in field_rename_map.items():
+                if old_name in existing_columns and new_name in expected_columns:
+                    try:
+                        cursor.execute(f"ALTER TABLE `{table_name}` CHANGE COLUMN `{old_name}` `{new_name}` DOUBLE")
+                        logger.info(f"  ✅ 已重命名字段: {old_name} -> {new_name}")
+                        existing_columns.remove(old_name)
+                        existing_columns.add(new_name)
+                    except Exception as e:
+                        logger.error(f"  ❌ 重命名字段 {old_name} -> {new_name} 失败: {e}")
             
             # 找出缺失的字段
             missing_columns = expected_columns - existing_columns
@@ -336,6 +433,10 @@ def create_table_if_needed(table_name: str, sample_row: Dict[str, Any]) -> None:
                 logger.warning(f"表 {table_name} 存在额外字段: {extra_columns}")
             
             logger.info(f"表 {table_name} 结构检查完成")
+            
+            # 检查并添加性能优化索引
+            logger.info("正在检查性能优化索引...")
+            add_performance_indexes(table_name)
             return
         
         # 表不存在，创建表
@@ -369,6 +470,10 @@ def create_table_if_needed(table_name: str, sample_row: Dict[str, Any]) -> None:
         )"""
         cursor.execute(sql)
         logger.info(f"表 {table_name} 创建成功（唯一键：统计日期 + 店铺 + MSKU + ASIN）")
+        
+        # 创建性能优化索引
+        logger.info("正在添加性能优化索引...")
+        add_performance_indexes(table_name)
 
 
 def insert_data_batch(table_name: str, data_list: List[Dict[str, Any]]) -> Tuple[int, int]:
@@ -435,11 +540,17 @@ def convert_profit_report_data(records: List[Dict[str, Any]],
     - 销量：FBA销量, FBM销量, FBA补换货量, FBM补换货量
     - 退货：退货量(可售), 退货量(不可售)
     - 销售额：总退款额, FBA销售额, FBM销售额
-    - 收入：包装收入, 买家交易保障索赔, 积分抵减收入, FBA库存赔偿, 促销折扣, 买家运费, 其他收入, 平台收入
-    - 费用：平台佣金, FBM销售退款, FBA销售退款, 买家运费退款, 促销折扣退款, 费用退款, FBA配送费
-    - 广告费：广告费总计
-    - 仓储费：仓储费总计, 入库配置费, 库存调整费, FBA国际入库费
-    - 成本：采购成本, 头程成本, 其他成本, 销毁费用, 商品成本附加费, 头程成本附加费
+    - 收入：包装收入, 买家交易保障索赔, 积分抵减收入, FBA库存赔偿, 促销折扣, 买家运费, 其他收入, 
+            清算收入, 亚马逊运费赔偿, Safe-T索赔, Netco交易, 赔偿收入, 追索收入, 清算调整, 混合VAT收入, 平台收入
+    - 费用：平台费, FBM销售退款额, FBA销售退款额, 买家运费退款额, 买家包装退款额, 促销折扣退款额, 
+            买家拒付, 积分抵减退回, 平台费退款额, 发货费退款额, 其他订单费退款额, 运输标签费退款, 
+            交易费用退款额, 积分费用, 费用退款, FBA发货费, FBA发货费(多渠道), FBA配送费, 其他订单费用,
+            FBA国际物流货运费, 调整费用, 订阅费, 秒杀费, 优惠券, 早期评论人计划, vine
+    - 广告费：广告费总计, SP广告费, SB广告费, SBV广告费, SD广告费
+    - 仓储费：仓储费总计, 其他仓储费, 月仓储费-本月计提, 月仓储费-上月冲销, 长期仓储费-本月计提, 
+              长期仓储费-上月冲销, FBA销毁费, FBA移除费, 入仓手续费, 标签费, 塑料包装费, 
+              FBA卖家退回费, FBA仓储费入库缺陷费, 库存调整费用, 合作承运费, 入库配置费, 超量仓储费, 清算费, 其他服务费
+    - 成本：采购成本, 头程成本, 其他成本, 销毁费用, 商品成本附加费, 头程成本附加费, 广告费用减免
     - 税费：销售税
     - 其他：平台其他费总计, 交易状态
     
@@ -509,27 +620,78 @@ def convert_profit_report_data(records: List[Dict[str, Any]],
         promotional_rebates = float(record.get('promotionalRebates', 0) or 0)  # 促销折扣
         shipping_credits = float(record.get('shippingCredits', 0) or 0)  # 买家运费
         other_in_amount = float(record.get('otherInAmount', 0) or 0)  # 其他收入
+        fba_liquidation_proceeds = float(record.get('fbaLiquidationProceeds', 0) or 0)  # 清算收入
+        amazon_shipping_reimbursement = float(record.get('amazonShippingReimbursement', 0) or 0)  # 亚马逊运费赔偿
+        safe_t_reimbursement = float(record.get('safeTReimbursement', 0) or 0)  # Safe-T索赔
+        netco_transaction = float(record.get('netcoTransaction', 0) or 0)  # Netco交易
+        reimbursements = float(record.get('reimbursements', 0) or 0)  # 赔偿收入
+        clawbacks = float(record.get('clawbacks', 0) or 0)  # 追索收入
+        fba_liquidation_proceeds_adjustments = float(record.get('fbaLiquidationProceedsAdjustments', 0) or 0)  # 清算调整
+        shared_commingling_vat_income = float(record.get('sharedComminglingVatIncome', 0) or 0)  # 混合VAT收入
         
         # 平台收入（总销售额）- 强制转换为float
         total_sales_amount = float(record.get('totalSalesAmount', 0) or 0)
         
         # 费用数据 - 强制转换为float
-        platform_fee = float(record.get('platformFee', 0) or 0)  # 平台佣金
-        fbm_sales_refunds = float(record.get('fbmSalesRefunds', 0) or 0)  # FBM销售退款
-        fba_sales_refunds = float(record.get('fbaSalesRefunds', 0) or 0)  # FBA销售退款
-        shipping_credit_refunds = float(record.get('shippingCreditRefunds', 0) or 0)  # 买家运费退款
-        promotional_rebate_refunds = float(record.get('promotionalRebateRefunds', 0) or 0)  # 促销折扣退款
+        platform_fee = float(record.get('platformFee', 0) or 0)  # 平台费
+        fbm_sales_refunds = float(record.get('fbmSalesRefunds', 0) or 0)  # FBM销售退款额
+        fba_sales_refunds = float(record.get('fbaSalesRefunds', 0) or 0)  # FBA销售退款额
+        shipping_credit_refunds = float(record.get('shippingCreditRefunds', 0) or 0)  # 买家运费退款额
+        gift_wrap_credit_refunds = float(record.get('giftWrapCreditRefunds', 0) or 0)  # 买家包装退款额
+        promotional_rebate_refunds = float(record.get('promotionalRebateRefunds', 0) or 0)  # 促销折扣退款额
+        chargebacks = float(record.get('chargebacks', 0) or 0)  # 买家拒付
+        cost_of_po_integers_returned = float(record.get('costOfPoIntegersReturned', 0) or 0)  # 积分抵减退回
+        selling_fee_refunds = float(record.get('sellingFeeRefunds', 0) or 0)  # 平台费退款额
+        fba_transaction_fee_refunds = float(record.get('fbaTransactionFeeRefunds', 0) or 0)  # 发货费退款额
+        other_transaction_fee_refunds = float(record.get('otherTransactionFeeRefunds', 0) or 0)  # 其他订单费退款额
+        shipping_label_refunds = float(record.get('shippingLabelRefunds', 0) or 0)  # 运输标签费退款
+        refund_administration_fees = float(record.get('refundAdministrationFees', 0) or 0)  # 交易费用退款额
+        points_adjusted = float(record.get('pointsAdjusted', 0) or 0)  # 积分费用
         total_fee_refunds = float(record.get('totalFeeRefunds', 0) or 0)  # 费用退款
+        fba_delivery_fee = float(record.get('fbaDeliveryFee', 0) or 0)  # FBA发货费
+        mc_fba_delivery_fee = float(record.get('mcFbaDeliveryFee', 0) or 0)  # FBA发货费(多渠道)
         total_fba_delivery_fee = float(record.get('totalFbaDeliveryFee', 0) or 0)  # FBA配送费
+        other_transaction_fees = float(record.get('otherTransactionFees', 0) or 0)  # 其他订单费用
+        shared_fba_integerernational_inbound_fee = float(record.get('sharedFbaIntegerernationalInboundFee', 0) or 0)  # FBA国际物流货运费
+        adjustments = float(record.get('adjustments', 0) or 0)  # 调整费用
+        shared_subscription_fee = float(record.get('sharedSubscriptionFee', 0) or 0)  # 订阅费
+        shared_ld_fee = float(record.get('sharedLdFee', 0) or 0)  # 秒杀费
+        shared_coupon_fee = float(record.get('sharedCouponFee', 0) or 0)  # 优惠券
+        shared_early_reviewer_program_fee = float(record.get('sharedEarlyReviewerProgramFee', 0) or 0)  # 早期评论人计划
+        shared_vine_fee = float(record.get('sharedVineFee', 0) or 0)  # vine
         
         # 广告费 - 强制转换为float
-        total_ads_cost = float(record.get('totalAdsCost', 0) or 0)
+        total_ads_cost = float(record.get('totalAdsCost', 0) or 0)  # 广告费总计
+        ads_sp_cost = float(record.get('adsSpCost', 0) or 0)  # SP广告费
+        ads_sb_cost = float(record.get('adsSbCost', 0) or 0)  # SB广告费
+        ads_sbv_cost = float(record.get('adsSbvCost', 0) or 0)  # SBV广告费
+        ads_sd_cost = float(record.get('adsSdCost', 0) or 0)  # SD广告费
         
         # 仓储费 - 强制转换为float
         total_storage_fee = float(record.get('totalStorageFee', 0) or 0)  # 仓储费总计
+        shared_other_fba_inventory_fees = float(record.get('sharedOtherFbaInventoryFees', 0) or 0)  # 其他仓储费
+        fba_storage_fee_accrual = float(record.get('fbaStorageFeeAccrual', 0) or 0)  # 月仓储费-本月计提
+        fba_storage_fee_accrual_difference = float(record.get('fbaStorageFeeAccrualDifference', 0) or 0)  # 月仓储费-上月冲销
+        long_term_storage_fee_accrual = float(record.get('longTermStorageFeeAccrual', 0) or 0)  # 长期仓储费-本月计提
+        long_term_storage_fee_accrual_difference = float(record.get('longTermStorageFeeAccrualDifference', 0) or 0)  # 长期仓储费-上月冲销
+        # 新增仓储费用字段
+        fba_storage_fee = float(record.get('fbaStorageFee', 0) or 0)  # 月度仓储费
+        shared_fba_storage_fee = float(record.get('sharedFbaStorageFee', 0) or 0)  # 月度仓储费差异
+        long_term_storage_fee = float(record.get('longTermStorageFee', 0) or 0)  # 长期仓储费
+        shared_long_term_storage_fee = float(record.get('sharedLongTermStorageFee', 0) or 0)  # 长期仓储费差异
+        shared_fba_disposal_fee = float(record.get('sharedFbaDisposalFee', 0) or 0)  # FBA销毁费
+        shared_fba_removal_fee = float(record.get('sharedFbaRemovalFee', 0) or 0)  # FBA移除费
+        shared_fba_inbound_transportation_program_fee = float(record.get('sharedFbaInboundTransportationProgramFee', 0) or 0)  # 入仓手续费
+        shared_labeling_fee = float(record.get('sharedLabelingFee', 0) or 0)  # 标签费
+        shared_polybagging_fee = float(record.get('sharedPolybaggingFee', 0) or 0)  # 塑料包装费
+        shared_fba_customer_return_fee = float(record.get('sharedFbaCustomerReturnFee', 0) or 0)  # FBA卖家退回费
+        shared_fba_inbound_defect_fee = float(record.get('sharedFbaInboundDefectFee', 0) or 0)  # FBA仓储费入库缺陷费
+        shared_item_fee_adjustment = float(record.get('sharedItemFeeAdjustment', 0) or 0)  # 库存调整费用
+        shared_amazon_partnered_carrier_shipment_fee = float(record.get('sharedAmazonPartneredCarrierShipmentFee', 0) or 0)  # 合作承运费
         shared_fba_inbound_convenience_fee = float(record.get('sharedFbaInboundConvenienceFee', 0) or 0)  # 入库配置费
-        shared_item_fee_adjustment = float(record.get('sharedItemFeeAdjustment', 0) or 0)  # 库存调整费
-        shared_fba_integerernational_inbound_fee = float(record.get('sharedFbaIntegerernationalInboundFee', 0) or 0)  # FBA国际入库费
+        shared_fba_overage_fee = float(record.get('sharedFbaOverageFee', 0) or 0)  # 超量仓储费
+        shared_liquidations_fees = float(record.get('sharedLiquidationsFees', 0) or 0)  # 清算费
+        shared_other_service_fees = float(record.get('sharedOtherServiceFees', 0) or 0)  # 其他服务费
         
         # 成本数据 - 强制转换为float
         cg_price_total = float(record.get('cgPriceTotal', 0) or 0)  # 采购成本
@@ -541,6 +703,7 @@ def convert_profit_report_data(records: List[Dict[str, Any]],
         disposal_fee = 0.0  # 销毁费用
         cg_price_additional_fee = 0.0  # 商品成本附加费
         cg_transport_additional_fee = 0.0  # 头程成本附加费
+        ads_fee_reduction = 0.0  # 广告费用减免
         
         if other_fee_str and isinstance(other_fee_str, list):
             for fee_item in other_fee_str:
@@ -553,6 +716,8 @@ def convert_profit_report_data(records: List[Dict[str, Any]],
                     cg_price_additional_fee = fee_amount
                 elif fee_name == '头程成本附加费':
                     cg_transport_additional_fee = fee_amount
+                elif fee_name == '广告费用减免':
+                    ads_fee_reduction = fee_amount
         
         # 税费数据 - 强制转换为float
         total_sales_tax = float(record.get('totalSalesTax', 0) or 0)
@@ -600,25 +765,76 @@ def convert_profit_report_data(records: List[Dict[str, Any]],
             '促销折扣': promotional_rebates,
             '买家运费': shipping_credits,
             '其他收入': other_in_amount,
+            '清算收入': fba_liquidation_proceeds,
+            '亚马逊运费赔偿': amazon_shipping_reimbursement,
+            'Safe-T索赔': safe_t_reimbursement,
+            'Netco交易': netco_transaction,
+            '赔偿收入': reimbursements,
+            '追索收入': clawbacks,
+            '清算调整': fba_liquidation_proceeds_adjustments,
+            '混合VAT收入': shared_commingling_vat_income,
             '平台收入': total_sales_amount,
-            '平台佣金': platform_fee,
-            'FBM销售退款': fbm_sales_refunds,
-            'FBA销售退款': fba_sales_refunds,
-            '买家运费退款': shipping_credit_refunds,
-            '促销折扣退款': promotional_rebate_refunds,
+            '平台费': platform_fee,
+            'FBM销售退款额': fbm_sales_refunds,
+            'FBA销售退款额': fba_sales_refunds,
+            '买家运费退款额': shipping_credit_refunds,
+            '买家包装退款额': gift_wrap_credit_refunds,
+            '促销折扣退款额': promotional_rebate_refunds,
+            '买家拒付': chargebacks,
+            '积分抵减退回': cost_of_po_integers_returned,
+            '平台费退款额': selling_fee_refunds,
+            '发货费退款额': fba_transaction_fee_refunds,
+            '其他订单费退款额': other_transaction_fee_refunds,
+            '运输标签费退款': shipping_label_refunds,
+            '交易费用退款额': refund_administration_fees,
+            '积分费用': points_adjusted,
             '费用退款': total_fee_refunds,
+            'FBA发货费': fba_delivery_fee,
+            'FBA发货费(多渠道)': mc_fba_delivery_fee,
             'FBA配送费': total_fba_delivery_fee,
+            '其他订单费用': other_transaction_fees,
+            'FBA国际物流货运费': shared_fba_integerernational_inbound_fee,
+            '调整费用': adjustments,
+            '订阅费': shared_subscription_fee,
+            '秒杀费': shared_ld_fee,
+            '优惠券': shared_coupon_fee,
+            '早期评论人计划': shared_early_reviewer_program_fee,
+            'vine': shared_vine_fee,
             '广告费总计': total_ads_cost,
+            'SP广告费': ads_sp_cost,
+            'SB广告费': ads_sb_cost,
+            'SBV广告费': ads_sbv_cost,
+            'SD广告费': ads_sd_cost,
             '仓储费总计': total_storage_fee,
+            '其他仓储费': shared_other_fba_inventory_fees,
+            '月仓储费-本月计提': fba_storage_fee_accrual,
+            '月仓储费-上月冲销': fba_storage_fee_accrual_difference,
+            '长期仓储费-本月计提': long_term_storage_fee_accrual,
+            '长期仓储费-上月冲销': long_term_storage_fee_accrual_difference,
+            '月度仓储费': fba_storage_fee,
+            '月度仓储费差异': shared_fba_storage_fee,
+            '长期仓储费': long_term_storage_fee,
+            '长期仓储费差异': shared_long_term_storage_fee,
+            'FBA销毁费': shared_fba_disposal_fee,
+            'FBA移除费': shared_fba_removal_fee,
+            '入仓手续费': shared_fba_inbound_transportation_program_fee,
+            '标签费': shared_labeling_fee,
+            '塑料包装费': shared_polybagging_fee,
+            'FBA卖家退回费': shared_fba_customer_return_fee,
+            'FBA仓储费入库缺陷费': shared_fba_inbound_defect_fee,
+            '库存调整费用': shared_item_fee_adjustment,
+            '合作承运费': shared_amazon_partnered_carrier_shipment_fee,
             '入库配置费': shared_fba_inbound_convenience_fee,
-            '库存调整费': shared_item_fee_adjustment,
-            'FBA国际入库费': shared_fba_integerernational_inbound_fee,
+            '超量仓储费': shared_fba_overage_fee,
+            '清算费': shared_liquidations_fees,
+            '其他服务费': shared_other_service_fees,
             '采购成本': cg_price_total,
             '头程成本': cg_transport_costs_total,
             '其他成本': cg_other_costs_total,
             '销毁费用': disposal_fee,
             '商品成本附加费': cg_price_additional_fee,
             '头程成本附加费': cg_transport_additional_fee,
+            '广告费用减免': ads_fee_reduction,
             '销售税': total_sales_tax,
             '平台其他费总计': total_platform_other_fee,
             '交易状态': transaction_status,
@@ -637,7 +853,7 @@ async def main(start_date: str = None, end_date: str = None):
     主函数
     
     Args:
-        start_date: 开始日期，格式：Y-m-d，默认：前15天
+        start_date: 开始日期，格式：Y-m-d，默认：1月1号
         end_date: 结束日期，格式：Y-m-d，默认：今天
     """
     logger.info("="*80)
@@ -669,19 +885,19 @@ async def main(start_date: str = None, end_date: str = None):
     # 不使用店铺映射，直接使用API返回的原始店铺名称
     sid_to_name_map = None
     
-    # 确定日期范围（默认前15天到今天）
+    # 确定日期范围（默认1月1号到今天）
     if not end_date:
         month_end = datetime.now()
     else:
         month_end = datetime.strptime(end_date, '%Y-%m-%d')
     
     if not start_date:
-        # 默认更新前15天的数据
-        month_start = month_end - timedelta(days=15)
+        # 默认从1月1号开始
+        month_start = month_end.replace(month=1, day=1)
     else:
         month_start = datetime.strptime(start_date, '%Y-%m-%d')
     
-    logger.info(f"📅 拉取数据（默认前15天）")
+    logger.info(f"📅 拉取数据（1月1号到今天）")
     logger.info(f"日期范围: {month_start.strftime('%Y-%m-%d')} ~ {month_end.strftime('%Y-%m-%d')}")
     logger.info(f"⏱️  配置参数（令牌桶容量为10）:")
     logger.info(f"   - 请求间隔: {REQUEST_DELAY}秒")
@@ -887,7 +1103,7 @@ async def main(start_date: str = None, end_date: str = None):
                 logger.info(f"    {shop['店铺']}: {shop['count']} 条记录")
             if len(shop_stats) > 10:
                 logger.info(f"    ... 还有 {len(shop_stats) - 10} 个店铺")
-            logger.info(f"  1月份各日期统计：")
+            logger.info(f"  各日期统计：")
             for date_stat in date_stats:
                 logger.info(f"    {date_stat['统计日期']}: {date_stat['count']} 条记录")
     except Exception as e:
@@ -903,7 +1119,7 @@ if __name__ == '__main__':
     
     parser = argparse.ArgumentParser(description='利润报表数据采集')
     parser.add_argument('--start-date', type=str, default=None,
-                       help='开始日期，格式：Y-m-d，默认：前15天')
+                       help='开始日期，格式：Y-m-d，默认：1月1号')
     parser.add_argument('--end-date', type=str, default=None,
                        help='结束日期，格式：Y-m-d，默认：今天')
     
