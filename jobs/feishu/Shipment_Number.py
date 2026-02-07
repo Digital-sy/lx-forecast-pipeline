@@ -154,7 +154,13 @@ def process_box_info(box_data, shipment_id, sid, seller_name="", shipment_info=N
                 continue
             
             # 使用sku提取SPU（ZSY503-BE-S → ZSY503）
-            spu = sku.split('-')[0] if sku else (raw_msku.split('-')[0] if raw_msku else "")
+            # 如果从MSKU获取，需要去掉前两个字符（ABZSY503 → ZSY503）
+            if sku:
+                spu = sku.split('-')[0]
+            elif raw_msku:
+                spu = raw_msku.split('-')[0][2:] if len(raw_msku.split('-')[0]) > 2 else raw_msku.split('-')[0]
+            else:
+                spu = ""
             fnsku = item.get("fulfillment_network_sku", "")
             
             # 获取品名、图片、父ASIN、title（新接口提供）

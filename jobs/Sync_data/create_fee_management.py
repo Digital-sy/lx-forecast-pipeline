@@ -6,6 +6,13 @@
 API: 
   - /bd/fee/management/open/feeManagement/otherFee/type (查询费用类型列表)
   - /bd/fee/management/open/feeManagement/otherFee/create (创建费用单)
+
+Token管理策略：
+  采用与其他文件（fetch_listing.py, fetch_fba_inventory.py等）一致的简化策略：
+  1. 启动时获取一次token
+  2. token自然使用到过期
+  3. 只在API明确返回token错误时才刷新一次
+  4. 避免频繁刷新导致API缓存问题
 """
 import asyncio
 import json
@@ -22,12 +29,15 @@ logger = get_logger('fee_management')
 
 # 重试配置（令牌桶容量为1，需要更长的间隔）
 MAX_RETRIES = 5  # 最大重试次数
-RETRY_DELAY = 10  # 重试延迟（秒）
-REQUEST_DELAY = 3  # 请求间隔（秒）- 令牌桶容量为1，需要保守一些
+RETRY_DELAY = 15  # 重试延迟（秒），增加到15秒以避免频繁请求
+REQUEST_DELAY = 8  # 请求间隔（秒），增加到8秒以避免触发API累积限流
 TOKEN_BUCKET_CAPACITY = 1  # 令牌桶容量
 
 # 费用单创建配置
-MAX_FEE_ITEMS_PER_ORDER = 100  # 每个费用单最多包含的费用明细项数量（避免超过API限制）
+MAX_FEE_ITEMS_PER_ORDER = 50  # 每个费用单最多包含的费用明细项数量（恢复为50，因为之前100也能成功）
+MAX_FORMATTED_PARAMS_LENGTH = 8000  # 格式化参数的最大长度（字符数），超过此值将减小批次
+REST_BATCH_INTERVAL = 20  # 每创建N批后休息一次，避免累积速率限制
+REST_DURATION = 30  # 休息时长（秒）
 
 
 class FeeManagement:
@@ -48,142 +58,173 @@ class FeeManagement:
             app_secret=settings.LINGXING_APP_SECRET,
             proxy_url=proxy_url
         )
-        self.token = None
-        self.refresh_token_str = None
+        # 初始化时不获取token，让调用者在外部管理token（学习其他文件）
+        self.token_resp = None  # 存储 token_resp 对象
+        self.token = None  # 存储 access_token 字符串
         
-    async def init_token(self, force_new: bool = False):
+    async def init_token(self, force_new: bool = False, retry_count: int = 0):
         """
         初始化或刷新访问令牌
         
         Args:
-            force_new: 是否强制生成新token（忽略refresh_token）
+            force_new: 是否强制生成新token（而不是使用refresh_token）
+            retry_count: 内部重试计数（避免无限递归）
+            
+        Returns:
+            bool: 成功返回True，失败返回False
         """
         try:
-            # 如果强制生成新token，或者没有refresh_token，直接生成新token
-            if force_new or not self.refresh_token_str:
-                logger.info("🔑 生成新的访问令牌")
-                token_dto = await self.op_api.generate_access_token()
-            else:
-                # 尝试使用refresh_token刷新
+            # 防止无限递归
+            if retry_count >= 3:
+                logger.warning(f"⚠️  Token刷新已达到最大重试次数，接受当前token（即使相同）")
+                if self.token:
+                    return True  # 如果有token，即使相同也接受
+                return False
+            
+            old_token = self.token[:10] if self.token else "None"
+            
+            # 如果有token_resp且有refresh_token，优先使用refresh_token
+            if not force_new and self.token_resp and hasattr(self.token_resp, 'refresh_token'):
                 try:
-                    logger.info("🔄 使用refresh_token刷新访问令牌")
-                    token_dto = await self.op_api.refresh_token(self.refresh_token_str)
-                except Exception as refresh_error:
-                    # refresh_token失败，清除并生成新token
-                    error_msg = str(refresh_error)
-                    if 'invalid' in error_msg.lower() or 'expired' in error_msg.lower():
-                        logger.warning(f"⚠️  refresh_token无效或已过期: {error_msg}，将生成新token")
-                        self.refresh_token_str = None  # 清除无效的refresh_token
-                        token_dto = await self.op_api.generate_access_token()
-                    else:
-                        # 其他错误，重新抛出
-                        raise
+                    logger.info(f"🔄 使用refresh_token刷新访问令牌（旧token前10位: {old_token}...）")
+                    self.token_resp = await self.op_api.refresh_token(self.token_resp.refresh_token)
+                    self.token = self.token_resp.access_token
+                    
+                    new_token = self.token[:10] if self.token else "None"
+                    logger.info(f"✅ Token刷新成功，有效期: {self.token_resp.expires_in}秒")
+                    logger.info(f"   旧token: {old_token}... -> 新token: {new_token}...")
+                    
+                    if old_token != "None" and old_token == new_token:
+                        logger.warning(f"⚠️  警告：刷新后token相同，可能是服务器缓存")
+                        logger.warning(f"⚠️  但token可能仍然有效（之前能成功），将接受此token")
+                        # 即使相同也接受，因为之前能成功说明token有效
+                        return True
+                    
+                    return True
+                except Exception as e:
+                    logger.warning(f"⚠️  refresh_token失败: {str(e)}，将尝试生成新token")
+                    # 失败则继续下面的generate_access_token
             
-            # 兼容Pydantic v1和v2
-            try:
-                token_data = token_dto.model_dump()  # Pydantic v2
-            except AttributeError:
-                token_data = token_dto.dict()  # Pydantic v1
+            # 生成新的access_token
+            logger.info(f"🔑 生成新的访问令牌（旧token前10位: {old_token}...）")
+            self.token_resp = await self.op_api.generate_access_token()
+            self.token = self.token_resp.access_token
             
-            self.token = token_data.get('access_token')
-            self.refresh_token_str = token_data.get('refresh_token')
+            new_token = self.token[:10] if self.token else "None"
+            logger.info(f"✅ Token获取成功，有效期: {self.token_resp.expires_in}秒")
+            logger.info(f"   旧token: {old_token}... -> 新token: {new_token}...")
             
-            logger.info(f"✅ 令牌获取成功")
+            if old_token != "None" and old_token == new_token:
+                logger.warning(f"⚠️  警告：API返回了相同的token！这可能是服务器缓存")
+                if retry_count < 2:
+                    logger.warning(f"⚠️  等待5秒后重试（第{retry_count + 1}次）...")
+                    await asyncio.sleep(5)
+                    # 清除token，强制下次重新生成
+                    self.token = None
+                    self.token_resp = None
+                    return await self.init_token(force_new=True, retry_count=retry_count + 1)
+                else:
+                    logger.warning(f"⚠️  已达到最大重试次数，接受当前token（即使相同）")
+                    # 即使相同也接受，因为之前能成功说明token可能仍然有效
+                    return True
+            
             return True
             
         except Exception as e:
             logger.error(f"❌ 令牌获取失败: {str(e)}")
-            # 如果失败，清除token和refresh_token，下次会重新生成
             self.token = None
-            self.refresh_token_str = None
+            self.token_resp = None
             return False
     
-    async def get_fee_types(self) -> Optional[List[Dict[str, Any]]]:
+    async def _handle_api_request(
+        self,
+        url: str,
+        method: str = "POST",
+        req_body: Dict[str, Any] = None,
+        operation_name: str = "API请求"
+    ) -> Optional[Dict[str, Any]]:
         """
-        查询费用类型列表
+        通用API请求处理方法，包含重试和token刷新逻辑
         
+        Args:
+            url: API路径
+            method: 请求方法
+            req_body: 请求体
+            operation_name: 操作名称（用于日志）
+            
         Returns:
-            List[Dict]: 费用类型列表，包含id, name, sort, fpoft_id等字段
-            None: 查询失败
+            Dict: API响应结果
+            None: 请求失败
         """
-        if not self.token:
-            if not await self.init_token():
-                return None
-        
         for retry in range(MAX_RETRIES):
             try:
                 if retry > 0:
-                    logger.debug(f"查询费用类型列表，第 {retry + 1}/{MAX_RETRIES} 次尝试")
+                    logger.debug(f"{operation_name}，第 {retry + 1}/{MAX_RETRIES} 次尝试")
                 
-                # 费用类型查询接口：POST请求，无请求参数，无请求体
                 resp = await self.op_api.request(
                     self.token,
-                    "/bd/fee/management/open/feeManagement/otherFee/type",
-                    "POST"
+                    url,
+                    method,
+                    req_body=req_body
                 )
                 
                 # 兼容Pydantic v1和v2
                 try:
-                    result = resp.model_dump()  # Pydantic v2
+                    result = resp.model_dump()
                 except AttributeError:
-                    result = resp.dict()  # Pydantic v1
+                    result = resp.dict()
                 
                 code = result.get('code', 0)
                 message = result.get('msg', '') or result.get('message', '')
                 
                 # 检查是否请求过于频繁（使用指数退避）
-                if code == 3001008:  # 请求过于频繁（令牌桶无令牌）
-                    wait_time = RETRY_DELAY * (2 ** retry)  # 指数退避
+                if code == 3001008:
+                    wait_time = RETRY_DELAY * (2 ** retry)
                     logger.warning(f"⚠️  令牌桶无令牌（第 {retry + 1}/{MAX_RETRIES} 次），等待 {wait_time} 秒...")
                     await asyncio.sleep(wait_time)
                     continue
                 
-                # 检查是否token过期
-                if code in [401, 403, 2001003, 2001005, 3001001, 3001002]:
-                    logger.warning(f"🔑 Token错误 (code={code}): {message}，尝试刷新token")
-                    # 如果refresh_token也无效，会尝试生成新token
-                    if await self.init_token():
-                        continue
-                    else:
-                        logger.error(f"❌ Token刷新失败，尝试强制生成新token")
-                        # 最后一次尝试：强制生成新token
-                        if await self.init_token(force_new=True):
+                # 检查是否token过期或签名错误
+                if code in [401, 403, 2001003, 2001005, 2001006, 3001001, 3001002]:
+                    logger.warning(f"🔑 Token/签名错误 (code={code}): {message}")
+                    # 只在第一次遇到时刷新token
+                    if retry == 0:
+                        logger.info(f"Token已过期，正在刷新...")
+                        logger.info(f"当前token前10位: {self.token[:10] if self.token else 'None'}...")
+                        if await self.init_token():
+                            logger.info(f"Token刷新成功，新token前10位: {self.token[:10]}...")
+                            logger.info(f"⏱️  等待10秒让服务器端token缓存更新...")
+                            await asyncio.sleep(10)  # 增加到10秒
                             continue
                         else:
-                            logger.error(f"❌ 无法获取有效token")
+                            logger.error(f"Token刷新失败")
                             return None
+                    else:
+                        # 已经刷新过，但还是失败，说明有其他问题
+                        logger.error(f"⚠️  Token已刷新过但还是签名错误！当前token前10位: {self.token[:10] if self.token else 'None'}...")
+                        logger.error(f"⚠️  这可能是API服务器端缓存问题或时间同步问题")
+                        wait_time = RETRY_DELAY * retry
+                        logger.info(f"⏳ 等待 {wait_time} 秒后重试...")
+                        await asyncio.sleep(wait_time)
+                        continue
                 
                 # 检查其他错误
                 if code != 0:
-                    logger.warning(f"⚠️  API返回错误: code={code}, message={message}")
+                    logger.warning(f"⚠️  {operation_name}返回错误: code={code}, message={message}")
                     if retry < MAX_RETRIES - 1:
                         wait_time = RETRY_DELAY * (retry + 1)
                         logger.info(f"⏳ 等待 {wait_time} 秒后重试...")
                         await asyncio.sleep(wait_time)
                         continue
                     else:
-                        logger.error(f"❌ 达到最大重试次数，查询费用类型列表失败")
+                        logger.error(f"❌ 达到最大重试次数，{operation_name}失败")
                         return None
                 
-                # 获取数据
-                data = result.get('data', [])
-                if data is None:
-                    data = []
-                
-                logger.info(f"✅ 查询费用类型列表成功，共 {len(data)} 个费用类型")
-                
-                # 打印费用类型列表供参考
-                if data:
-                    logger.info("=" * 50)
-                    logger.info("费用类型列表:")
-                    for fee_type in data:
-                        logger.info(f"  ID: {fee_type.get('id')} | 名称: {fee_type.get('name')} | 排序: {fee_type.get('sort')}")
-                    logger.info("=" * 50)
-                
-                return data
+                # 请求成功
+                return result
                 
             except Exception as e:
-                logger.error(f"❌ 查询费用类型列表异常: {str(e)}")
+                logger.error(f"❌ {operation_name}异常: {str(e)}")
                 if retry < MAX_RETRIES - 1:
                     wait_time = RETRY_DELAY * (retry + 1)
                     logger.info(f"⏳ 等待 {wait_time} 秒后重试...")
@@ -194,6 +235,41 @@ class FeeManagement:
                     return None
         
         return None
+    
+    async def get_fee_types(self) -> Optional[List[Dict[str, Any]]]:
+        """
+        查询费用类型列表
+        
+        Returns:
+            List[Dict]: 费用类型列表，包含id, name, sort, fpoft_id等字段
+            None: 查询失败
+        """
+        result = await self._handle_api_request(
+            "/bd/fee/management/open/feeManagement/otherFee/type",
+            "POST",
+            None,
+            "查询费用类型列表"
+        )
+        
+        if not result:
+            return None
+        
+        # 获取数据
+        data = result.get('data', [])
+        if data is None:
+            data = []
+        
+        logger.info(f"✅ 查询费用类型列表成功，共 {len(data)} 个费用类型")
+        
+        # 打印费用类型列表供参考
+        if data:
+            logger.info("=" * 50)
+            logger.info("费用类型列表:")
+            for fee_type in data:
+                logger.info(f"  ID: {fee_type.get('id')} | 名称: {fee_type.get('name')} | 排序: {fee_type.get('sort')}")
+            logger.info("=" * 50)
+        
+        return data
     
     async def get_fee_list(
         self,
@@ -212,6 +288,8 @@ class FeeManagement:
         """
         查询费用明细列表
         
+        注意：调用此方法前，请确保已经调用init_token()获取了token
+        
         Args:
             offset: 分页偏移量，默认0
             length: 分页长度，默认20
@@ -229,10 +307,6 @@ class FeeManagement:
             Dict: 查询结果，包含total和records
             None: 查询失败
         """
-        if not self.token:
-            if not await self.init_token():
-                return None
-        
         # 构建请求体
         req_body = {
             "offset": offset,
@@ -281,13 +355,24 @@ class FeeManagement:
                     await asyncio.sleep(wait_time)
                     continue
                 
-                if code in [401, 403, 2001003, 2001005, 3001001, 3001002]:
-                    logger.warning(f"🔑 Token错误 (code={code}): {message}，尝试刷新token")
-                    if await self.init_token():
-                        continue
+                if code in [401, 403, 2001003, 2001005, 2001006, 3001001, 3001002]:
+                    logger.warning(f"🔑 Token/签名错误 (code={code}): {message}")
+                    # 只在第一次遇到时刷新token
+                    if retry == 0:
+                        logger.info(f"Token已过期，正在刷新...")
+                        if await self.init_token():
+                            logger.info(f"Token刷新成功")
+                            await asyncio.sleep(2)
+                            continue
+                        else:
+                            logger.error(f"Token刷新失败")
+                            return None
                     else:
-                        logger.error(f"❌ Token刷新失败")
-                        return None
+                        # 已经刷新过，等待后重试
+                        wait_time = RETRY_DELAY * retry
+                        logger.info(f"⏳ 等待 {wait_time} 秒后重试...")
+                        await asyncio.sleep(wait_time)
+                        continue
                 
                 if code != 0:
                     logger.warning(f"⚠️  API返回错误: code={code}, message={message}")
@@ -331,6 +416,8 @@ class FeeManagement:
         """
         作废费用单
         
+        注意：调用此方法前，请确保已经调用init_token()获取了token
+        
         Args:
             numbers: 费用单号列表，上限200
         
@@ -338,10 +425,6 @@ class FeeManagement:
             Dict: 作废结果
             None: 作废失败
         """
-        if not self.token:
-            if not await self.init_token():
-                return None
-        
         req_body = {
             "numbers": numbers
         }
@@ -374,13 +457,24 @@ class FeeManagement:
                     await asyncio.sleep(wait_time)
                     continue
                 
-                if code in [401, 403, 2001003, 2001005, 3001001, 3001002]:
-                    logger.warning(f"🔑 Token错误 (code={code}): {message}，尝试刷新token")
-                    if await self.init_token():
-                        continue
+                if code in [401, 403, 2001003, 2001005, 2001006, 3001001, 3001002]:
+                    logger.warning(f"🔑 Token/签名错误 (code={code}): {message}")
+                    # 只在第一次遇到时刷新token
+                    if retry == 0:
+                        logger.info(f"Token已过期，正在刷新...")
+                        if await self.init_token():
+                            logger.info(f"Token刷新成功")
+                            await asyncio.sleep(2)
+                            continue
+                        else:
+                            logger.error(f"Token刷新失败")
+                            return None
                     else:
-                        logger.error(f"❌ Token刷新失败")
-                        return None
+                        # 已经刷新过，等待后重试
+                        wait_time = RETRY_DELAY * retry
+                        logger.info(f"⏳ 等待 {wait_time} 秒后重试...")
+                        await asyncio.sleep(wait_time)
+                        continue
                 
                 if code != 0:
                     logger.error(f"❌ API返回错误: code={code}, message={message}")
@@ -423,6 +517,8 @@ class FeeManagement:
         """
         创建费用单
         
+        注意：调用此方法前，请确保已经调用init_token()获取了token
+        
         Args:
             submit_type: 提交类型：1 暂存，2 提交
             dimension: 分摊维度：1 msku, 2 asin, 3 店铺, 4 父asin, 5 sku, 6 企业
@@ -442,10 +538,6 @@ class FeeManagement:
             Dict: 创建结果
             None: 创建失败
         """
-        if not self.token:
-            if not await self.init_token():
-                return None
-        
         # 构建请求体
         req_body = {
             "submit_type": submit_type,
@@ -464,6 +556,36 @@ class FeeManagement:
         logger.info(f"  是否请款: {is_request_pool} (0=否, 1=是)")
         logger.info(f"  备注: {remark}")
         logger.info(f"  费用明细项数量: {len(fee_items)}")
+        logger.info(f"  当前token前10位: {self.token[:10] if self.token else 'None'}...")
+        
+        # 详细诊断：打印前3个费用项的完整内容
+        if fee_items:
+            logger.info(f"  📋 前3个费用项的详细信息:")
+            for idx, item in enumerate(fee_items[:3]):
+                logger.info(f"    [{idx+1}]:")
+                logger.info(f"      - MSKU: {item.get('dimension_value', 'N/A')}")
+                logger.info(f"      - 店铺ID: {item.get('sids', 'N/A')} (类型: {type(item.get('sids')).__name__})")
+                logger.info(f"      - 日期: {item.get('date', 'N/A')}")
+                logger.info(f"      - 费用类型ID: {item.get('other_fee_type_id', 'N/A')} (类型: {type(item.get('other_fee_type_id')).__name__})")
+                logger.info(f"      - 金额: {item.get('fee', 'N/A')} (类型: {type(item.get('fee')).__name__})")
+                logger.info(f"      - 币种: {item.get('currency_code', 'N/A')}")
+                logger.info(f"      - 备注: {item.get('remark', 'N/A')}")
+                
+                # 检查是否有特殊字符
+                msku = str(item.get('dimension_value', ''))
+                if any(ord(c) > 127 for c in msku):
+                    logger.warning(f"      ⚠️  包含非ASCII字符！")
+                
+                # 检查金额精度
+                fee_value = item.get('fee')
+                if isinstance(fee_value, float):
+                    logger.info(f"      - 金额原始值: {repr(fee_value)}")
+        
+        # 输出完整请求体大小
+        import json
+        req_body_json = json.dumps(req_body, ensure_ascii=False)
+        logger.info(f"  📦 请求体大小: {len(req_body_json)} 字节")
+        
         logger.info("=" * 50)
         
         for retry in range(MAX_RETRIES):
@@ -494,24 +616,87 @@ class FeeManagement:
                     await asyncio.sleep(wait_time)
                     continue
                 
-                # 检查是否token过期
-                if code in [401, 403, 2001003, 2001005, 3001001, 3001002]:
-                    logger.warning(f"🔑 Token错误 (code={code}): {message}，尝试刷新token")
-                    # 如果refresh_token也无效，会尝试生成新token
-                    if await self.init_token():
+                # 检查是否token过期或签名错误
+                if code in [401, 403, 2001003, 2001005, 2001006, 3001001, 3001002]:
+                    logger.error(f"🔑 Token/签名错误 (code={code}): {message}")
+                    logger.error(f"📋 完整错误响应: {json.dumps(result, ensure_ascii=False, indent=2)}")
+                    logger.error(f"🔍 诊断信息:")
+                    logger.error(f"  - 当前token前10位: {self.token[:10] if self.token else 'None'}...")
+                    logger.error(f"  - token_resp有效期: {self.token_resp.expires_in if self.token_resp else 'N/A'}秒")
+                    logger.error(f"  - 重试次数: {retry + 1}/{MAX_RETRIES}")
+                    logger.error(f"  - 请求体大小: {len(req_body_json)} 字节")
+                    
+                    # 🔍 添加签名计算的详细调试
+                    import time
+                    import copy
+                    from lingxing.sign import SignBase
+                    
+                    timestamp = int(time.time())
+                    gen_sign_params = copy.deepcopy(req_body)
+                    gen_sign_params.update({
+                        "app_key": self.op_api.app_id,
+                        "access_token": self.token,
+                        "timestamp": f'{timestamp}',
+                    })
+                    
+                    # 格式化参数（用于签名）
+                    formatted_params = SignBase.format_params(gen_sign_params)
+                    
+                    logger.error(f"🔐 签名计算详情:")
+                    logger.error(f"  - timestamp: {timestamp}")
+                    logger.error(f"  - 格式化参数总长度: {len(formatted_params)} 字符")
+                    logger.error(f"  - 前300字符: {formatted_params[:300]}")
+                    logger.error(f"  - 后300字符: {formatted_params[-300:]}")
+                    
+                    # 检查特殊字符
+                    special_chars = set()
+                    for char in req_body_json:
+                        if ord(char) > 127:
+                            special_chars.add(char)
+                    if special_chars:
+                        logger.error(f"  ⚠️  包含非ASCII字符: {list(special_chars)[:20]}")
+                    
+                    # 检查每个费用项的数据类型
+                    logger.error(f"  📋 费用项数据类型检查（前3个）:")
+                    for idx, item in enumerate(req_body['fee_items'][:3], 1):
+                        logger.error(f"    [{idx}] sids类型={type(item['sids']).__name__}, fee类型={type(item['fee']).__name__}")
+                        logger.error(f"        date类型={type(item['date']).__name__}, other_fee_type_id类型={type(item['other_fee_type_id']).__name__}")
+                    
+                    # 先重试几次（可能是速率限制），最后再刷新token
+                    if retry < 2:
+                        # 前2次重试：可能是速率限制，等待后重试（不刷新token）
+                        wait_time = RETRY_DELAY * (retry + 1) * 2  # 增加等待时间：5秒、10秒
+                        logger.warning(f"⚠️  签名错误可能是速率限制，等待 {wait_time} 秒后重试（不刷新token）...")
+                        await asyncio.sleep(wait_time)
                         continue
-                    else:
-                        logger.error(f"❌ Token刷新失败，尝试强制生成新token")
-                        # 最后一次尝试：强制生成新token
-                        if await self.init_token(force_new=True):
+                    elif retry == 2:
+                        # 第3次：尝试刷新token
+                        logger.info(f"Token已过期，正在刷新...")
+                        if await self.init_token():
+                            logger.info(f"Token刷新成功，新token前10位: {self.token[:10]}...")
+                            logger.info(f"⏱️  等待10秒让服务器端token缓存更新...")
+                            await asyncio.sleep(10)
                             continue
                         else:
-                            logger.error(f"❌ 无法获取有效token")
-                            return None
+                            logger.error(f"Token刷新失败")
+                            # 继续重试，不返回None
+                            wait_time = RETRY_DELAY * (retry + 1)
+                            logger.info(f"⏳ 等待 {wait_time} 秒后重试...")
+                            await asyncio.sleep(wait_time)
+                            continue
+                    else:
+                        # 已经刷新过，但还是失败
+                        logger.error(f"⚠️  Token已刷新过但还是签名错误！")
+                        logger.error(f"⚠️  这可能是数据或签名计算问题，而不是token问题")
+                        wait_time = RETRY_DELAY * retry
+                        logger.info(f"⏳ 等待 {wait_time} 秒后重试...")
+                        await asyncio.sleep(wait_time)
+                        continue
                 
                 # 检查其他错误
                 if code != 0:
                     logger.error(f"❌ API返回错误: code={code}, message={message}")
+                    logger.error(f"📋 完整错误响应: {json.dumps(result, ensure_ascii=False, indent=2)}")
                     if retry < MAX_RETRIES - 1:
                         wait_time = RETRY_DELAY * (retry + 1)
                         logger.info(f"⏳ 等待 {wait_time} 秒后重试...")
@@ -530,6 +715,7 @@ class FeeManagement:
                 
             except Exception as e:
                 logger.error(f"❌ 创建费用单异常: {str(e)}")
+                logger.error(f"📋 异常详情:", exc_info=True)
                 if retry < MAX_RETRIES - 1:
                     wait_time = RETRY_DELAY * (retry + 1)
                     logger.info(f"⏳ 等待 {wait_time} 秒后重试...")
@@ -629,7 +815,7 @@ async def create_test_fee_order(
     logger.info("=" * 80)
     
     # 构建费用子项备注
-    fee_item_remark = f"{dimension_value}-费用类型ID:{fee_type_id}"
+    fee_item_remark = f"{dimension_value}-FeeTypeID:{fee_type_id}"
     
     # 构建费用明细项
     fee_items = [
@@ -729,6 +915,59 @@ def fetch_profit_report_data(start_date: str, end_date: str) -> List[Dict[str, A
         return []
 
 
+def fetch_profit_report_data_daily(target_date: str) -> List[Dict[str, Any]]:
+    """
+    从数据库读取利润报表数据（按日，不汇总）
+    
+    Args:
+        target_date: 目标日期，格式：Y-m-d
+    
+    Returns:
+        List[Dict]: 利润报表数据列表，按日返回
+    """
+    try:
+        with db_cursor() as cursor:
+            sql = """
+                SELECT 
+                    `MSKU`,
+                    `店铺id`,
+                    `统计日期`,
+                    `商品成本附加费`,
+                    `头程成本附加费`,
+                    `录入费用单头程`,
+                    `汇损`
+                FROM `利润报表`
+                WHERE `统计日期` = %s
+                  AND (
+                      (`商品成本附加费` IS NOT NULL AND `商品成本附加费` != 0) OR
+                      (`头程成本附加费` IS NOT NULL AND `头程成本附加费` != 0) OR
+                      (`录入费用单头程` IS NOT NULL AND `录入费用单头程` != 0) OR
+                      (`汇损` IS NOT NULL AND `汇损` != 0)
+                  )
+                ORDER BY `店铺id`, `MSKU`
+            """
+            cursor.execute(sql, (target_date,))
+            records = cursor.fetchall()
+            
+            if records:
+                unique_msku_shop = set()
+                for record in records:
+                    msku = record.get('MSKU', '').strip()
+                    shop_id = record.get('店铺id')
+                    if msku and shop_id:
+                        unique_msku_shop.add((msku, str(shop_id)))
+                
+                logger.info(f"✅ 从数据库读取到 {len(records)} 条日期为 {target_date} 的利润报表数据")
+                logger.info(f"   包含 {len(unique_msku_shop)} 个不同的(MSKU, 店铺ID)组合")
+            else:
+                logger.info(f"ℹ️  日期 {target_date} 没有需要创建费用单的数据")
+            
+            return records
+    except Exception as e:
+        logger.error(f"❌ 读取日期 {target_date} 的利润报表数据失败: {str(e)}")
+        return []
+
+
 async def discard_existing_fee_orders(
     fee_mgmt: FeeManagement,
     start_date: str,
@@ -749,6 +988,7 @@ async def discard_existing_fee_orders(
     """
     logger.info("=" * 80)
     logger.info("步骤1: 查询并作废已有费用单（分批处理）")
+    logger.info(f"将作废日期范围 {start_date} 至 {end_date} 内所有【已处理】状态的费用单")
     logger.info("=" * 80)
     
     # 分批处理配置
@@ -931,7 +1171,6 @@ async def create_fee_orders_from_profit_report(
     
     success_count = 0
     total_count = 0
-    failed_groups = []  # 记录创建失败的组
     skipped_groups = []  # 记录被跳过的组
     
     # 按年月和店铺分组创建费用单
@@ -984,7 +1223,7 @@ async def create_fee_orders_from_profit_report(
                     "other_fee_type_id": fee_type_ids['商品成本附加费_id'],
                     "fee": fees['商品成本附加费'],
                     "currency_code": "CNY",
-                    "remark": f"{msku}-商品成本附加费"
+                    "remark": f"{msku}-ProductCost"
                 })
             
             # 头程成本附加费
@@ -996,7 +1235,7 @@ async def create_fee_orders_from_profit_report(
                     "other_fee_type_id": fee_type_ids['头程成本附加费_id'],
                     "fee": fees['头程成本附加费'],
                     "currency_code": "CNY",
-                    "remark": f"{msku}-头程成本附加费"
+                    "remark": f"{msku}-InboundCost"
                 })
             
             # 录入费用单头程（对应头程费用）
@@ -1008,7 +1247,7 @@ async def create_fee_orders_from_profit_report(
                     "other_fee_type_id": fee_type_ids['头程费用_id'],
                     "fee": fees['录入费用单头程'],
                     "currency_code": "CNY",
-                    "remark": f"{msku}-头程费用"
+                    "remark": f"{msku}-InboundFee"
                 })
             
             # 汇损
@@ -1020,7 +1259,7 @@ async def create_fee_orders_from_profit_report(
                     "other_fee_type_id": fee_type_ids['汇损_id'],
                     "fee": fees['汇损'],
                     "currency_code": "CNY",
-                    "remark": f"{msku}-汇损"
+                    "remark": f"{msku}-ExchangeLoss"
                 })
         
         logger.info(f"  该组包含 {msku_count} 个MSKU，生成 {len(fee_items)} 个费用明细项")
@@ -1041,39 +1280,91 @@ async def create_fee_orders_from_profit_report(
         if len(fee_items) > MAX_FEE_ITEMS_PER_ORDER:
             logger.info(f"  ⚠️  费用明细项数量({len(fee_items)})超过限制({MAX_FEE_ITEMS_PER_ORDER})，将分批创建")
             
-            # 分批创建费用单
-            batch_count = (len(fee_items) + MAX_FEE_ITEMS_PER_ORDER - 1) // MAX_FEE_ITEMS_PER_ORDER
-            logger.info(f"  将分成 {batch_count} 批创建费用单")
+            # 动态调整批次大小：根据格式化参数长度
+            def estimate_formatted_params_length(batch_items, batch_num):
+                """估算格式化参数的长度"""
+                import time
+                import copy
+                from lingxing.sign import SignBase
+                
+                # 构建临时请求体
+                temp_req_body = {
+                    "submit_type": 2,
+                    "dimension": 1,
+                    "apportion_rule": 2,
+                    "is_request_pool": 0,
+                    "remark": f"Auto-{year_month}-{batch_num}",
+                    "fee_items": batch_items
+                }
+                
+                # 模拟签名计算
+                timestamp = int(time.time())
+                gen_sign_params = copy.deepcopy(temp_req_body)
+                gen_sign_params.update({
+                    "app_key": fee_mgmt.op_api.app_id,
+                    "access_token": "temp_token_for_length_check",
+                    "timestamp": f'{timestamp}',
+                })
+                
+                formatted_params = SignBase.format_params(gen_sign_params)
+                return len(formatted_params)
             
-            for batch_idx in range(batch_count):
-                start_idx = batch_idx * MAX_FEE_ITEMS_PER_ORDER
-                end_idx = min(start_idx + MAX_FEE_ITEMS_PER_ORDER, len(fee_items))
+            # 智能分批：动态调整批次大小
+            current_batch_size = MAX_FEE_ITEMS_PER_ORDER
+            batch_count = (len(fee_items) + current_batch_size - 1) // current_batch_size
+            logger.info(f"  初始计划分成 {batch_count} 批，每批 {current_batch_size} 项")
+            
+            batch_idx = 0
+            processed_count = 0
+            
+            while processed_count < len(fee_items):
+                # 尝试当前批次大小
+                start_idx = processed_count
+                end_idx = min(start_idx + current_batch_size, len(fee_items))
                 batch_fee_items = fee_items[start_idx:end_idx]
                 
-                logger.info(f"  创建第 {batch_idx + 1}/{batch_count} 批，包含 {len(batch_fee_items)} 个费用明细项")
+                # 估算格式化参数长度
+                estimated_length = estimate_formatted_params_length(
+                    batch_fee_items, 
+                    batch_idx + 1
+                )
                 
+                # 如果超过限制，减小批次大小
+                if estimated_length > MAX_FORMATTED_PARAMS_LENGTH:
+                    logger.warning(f"  ⚠️  批次 {batch_idx + 1} 的格式化参数长度({estimated_length})超过限制({MAX_FORMATTED_PARAMS_LENGTH})")
+                    logger.warning(f"  ⚠️  将减小批次大小: {current_batch_size} -> {current_batch_size - 5}")
+                    current_batch_size = max(10, current_batch_size - 5)  # 最小10项
+                    batch_count = (len(fee_items) - processed_count + current_batch_size - 1) // current_batch_size
+                    continue  # 重新计算当前批次
+                
+                batch_idx += 1
+                logger.info(f"  创建第 {batch_idx} 批，包含 {len(batch_fee_items)} 个费用明细项（格式化参数长度: {estimated_length} 字符）")
+                
+                # 创建费用单（内部已有重试和token刷新逻辑）
                 result = await fee_mgmt.create_fee_order(
                     submit_type=2,  # 2=提交
                     dimension=1,  # 1=msku
                     apportion_rule=2,  # 2=按销量
                     is_request_pool=0,  # 0=否
-                    remark=f"利润报表自动创建-{year_month} (第{batch_idx + 1}/{batch_count}批)",
+                    remark=f"Auto-{year_month}-{batch_idx}",
                     fee_items=batch_fee_items
                 )
                 
                 if result:
                     success_count += 1
-                    logger.info(f"  ✅ 第 {batch_idx + 1}/{batch_count} 批费用单创建成功")
+                    logger.info(f"  ✅ 第 {batch_idx} 批费用单创建成功")
+                    processed_count = end_idx  # 更新已处理数量
+                    
+                    # 每N批后休息一次，避免累积速率限制
+                    if batch_idx % REST_BATCH_INTERVAL == 0:
+                        logger.info(f"  ⏸️  已创建 {batch_idx} 批，休息 {REST_DURATION} 秒以避免累积速率限制...")
+                        await asyncio.sleep(REST_DURATION)
                 else:
-                    logger.error(f"  ❌ 第 {batch_idx + 1}/{batch_count} 批费用单创建失败")
-                    # 记录失败的批次
-                    failed_groups.append({
-                        'year_month': year_month,
-                        'shop_id': shop_id,
-                        'batch': f"{batch_idx + 1}/{batch_count}",
-                        'fee_items_count': len(batch_fee_items),
-                        'fee_items': batch_fee_items  # 保存失败的数据，以便后续重试
-                    })
+                    error_msg = f"第 {batch_idx} 批费用单创建失败 (年月={year_month}, 店铺ID={shop_id})"
+                    logger.error(f"  ❌ {error_msg}")
+                    logger.error(f"  包含 {len(batch_fee_items)} 个费用明细项")
+                    logger.error(f"  已成功创建 {success_count} 个费用单，现在停止执行")
+                    raise RuntimeError(f"费用单创建失败: {error_msg}，请检查日志并重试")
                 
                 await asyncio.sleep(REQUEST_DELAY)
         else:
@@ -1083,7 +1374,7 @@ async def create_fee_orders_from_profit_report(
                 dimension=1,  # 1=msku
                 apportion_rule=2,  # 2=按销量
                 is_request_pool=0,  # 0=否
-                remark=f"利润报表自动创建-{year_month}",
+                remark=f"Auto-{year_month}",
                 fee_items=fee_items
             )
             
@@ -1091,15 +1382,11 @@ async def create_fee_orders_from_profit_report(
                 success_count += 1
                 logger.info(f"  ✅ 费用单创建成功")
             else:
-                logger.error(f"  ❌ 费用单创建失败")
-                # 记录失败的组
-                failed_groups.append({
-                    'year_month': year_month,
-                    'shop_id': shop_id,
-                    'batch': '1/1',
-                    'fee_items_count': len(fee_items),
-                    'fee_items': fee_items  # 保存失败的数据，以便后续重试
-                })
+                error_msg = f"费用单创建失败 (年月={year_month}, 店铺ID={shop_id})"
+                logger.error(f"  ❌ {error_msg}")
+                logger.error(f"  包含 {len(fee_items)} 个费用明细项")
+                logger.error(f"  已成功创建 {success_count} 个费用单，现在停止执行")
+                raise RuntimeError(f"费用单创建失败: {error_msg}，请检查日志并重试")
             
             await asyncio.sleep(REQUEST_DELAY)
     
@@ -1124,16 +1411,6 @@ async def create_fee_orders_from_profit_report(
         for skip in skipped_groups[:10]:  # 只显示前10个
             logger.warning(f"    年月={skip['year_month']}, 店铺ID={skip['shop_id']}, MSKU数量={skip['msku_count']}")
     
-    # 报告创建失败的组
-    if failed_groups:
-        logger.error(f"\n  ❌ 错误：有 {len(failed_groups)} 个费用单创建失败:")
-        total_failed_items = 0
-        for fail in failed_groups:
-            logger.error(f"    年月={fail['year_month']}, 店铺ID={fail['shop_id']}, "
-                        f"批次={fail['batch']}, 费用明细项数量={fail['fee_items_count']}")
-            total_failed_items += fail['fee_items_count']
-        logger.error(f"    共 {total_failed_items} 个费用明细项未成功创建，需要重试")
-    
     # 验证是否有遗漏
     all_msku_shops = set()
     for record in profit_data:
@@ -1151,14 +1428,13 @@ async def create_fee_orders_from_profit_report(
         logger.info(f"\n  ✅ 所有数据都已处理，无遗漏")
     
     # 最终统计
-    if failed_groups or skipped_groups or missing:
+    if skipped_groups or missing:
         logger.warning(f"\n  ⚠️  总结：")
         logger.warning(f"    成功创建: {success_count} 个费用单")
         logger.warning(f"    被跳过: {len(skipped_groups)} 个组（费用为0）")
-        logger.warning(f"    创建失败: {len(failed_groups)} 个费用单（需要重试）")
         logger.warning(f"    数据遗漏: {len(missing)} 个(MSKU, 店铺ID)组合")
     else:
-        logger.info(f"\n  ✅ 所有数据都已成功处理，无遗漏、无失败")
+        logger.info(f"\n  ✅ 所有数据都已成功处理，无遗漏")
     
     return success_count
 
@@ -1168,32 +1444,53 @@ async def main(start_date: str = None, end_date: str = None, daily: bool = False
     主函数 - 从数据库读取利润报表并创建费用单（按月汇总）
     
     Args:
-        start_date: 开始日期，格式：Y-m-d，默认：本月1号
-        end_date: 结束日期，格式：Y-m-d，默认：今天
+        start_date: 开始日期，格式：Y-m-d，默认：上个月1号
+        end_date: 结束日期，格式：Y-m-d，默认：上个月最后一天
         daily: 是否按天处理（已废弃，现在按月处理），默认：False
     """
     from datetime import datetime, date, timedelta
+    from calendar import monthrange
     
-    # 确定日期范围（默认为本月的1号到今天）
+    # 确定日期范围（默认为上个月）
     if end_date is None or start_date is None:
         today = date.today()
-        # 本月的1号
-        this_month_first_day = date(today.year, today.month, 1)
+        
+        # 计算上个月
+        # 如果当前是1月，上个月就是去年12月
+        if today.month == 1:
+            last_month_year = today.year - 1
+            last_month = 12
+        else:
+            last_month_year = today.year
+            last_month = today.month - 1
+        
+        # 上个月的第一天
+        last_month_first_day = date(last_month_year, last_month, 1)
+        
+        # 上个月的最后一天
+        last_day_of_month = monthrange(last_month_year, last_month)[1]
+        last_month_last_day = date(last_month_year, last_month, last_day_of_month)
         
         if start_date is None:
-            start_date = this_month_first_day.strftime('%Y-%m-%d')
+            start_date = last_month_first_day.strftime('%Y-%m-%d')
         if end_date is None:
-            end_date = today.strftime('%Y-%m-%d')
+            end_date = last_month_last_day.strftime('%Y-%m-%d')
     
     logger.info("=" * 80)
     logger.info("🚀 费用单管理 - 从利润报表创建费用单（按月汇总）")
     logger.info("=" * 80)
     logger.info(f"日期范围: {start_date} 至 {end_date}")
-    logger.info(f"处理模式: 按月汇总处理")
+    logger.info(f"处理模式: 按月汇总处理（默认：上个月）")
     logger.info("=" * 80)
     
     # 初始化费用管理
     fee_mgmt = FeeManagement()
+    
+    # 获取访问令牌（学习其他文件的做法）
+    logger.info("获取访问令牌...")
+    if not await fee_mgmt.init_token():
+        logger.error("❌ 无法获取访问令牌")
+        return
     
     # 步骤0: 查询费用类型列表
     logger.info("查询费用类型列表...")
@@ -1276,10 +1573,17 @@ async def discard_fee_orders_by_date_range(start_date: str, end_date: str):
     logger.info("=" * 80)
     logger.info(f"日期范围: {start_date} 至 {end_date}")
     logger.info("费用类型: 商品成本附加费, 头程成本附加费, 头程费用, 汇损")
+    logger.info(f"说明: 作废指定日期范围内所有相关费用类型的费用单（默认：上个月）")
     logger.info("=" * 80)
     
     # 初始化费用管理
     fee_mgmt = FeeManagement()
+    
+    # 获取访问令牌
+    logger.info("获取访问令牌...")
+    if not await fee_mgmt.init_token():
+        logger.error("❌ 无法获取访问令牌")
+        return
     
     # 查询费用类型列表
     logger.info("查询费用类型列表...")
@@ -1333,9 +1637,9 @@ if __name__ == '__main__':
     
     parser = argparse.ArgumentParser(description='从利润报表创建费用单（按月汇总）')
     parser.add_argument('--start-date', type=str, default=None, 
-                       help='开始日期，格式：Y-m-d，默认：本月1号')
+                       help='开始日期，格式：Y-m-d，默认：上个月1号')
     parser.add_argument('--end-date', type=str, default=None,
-                       help='结束日期，格式：Y-m-d，默认：今天')
+                       help='结束日期，格式：Y-m-d，默认：上个月最后一天')
     parser.add_argument('--daily', action='store_true',
                        help='（已废弃）现在统一按月汇总处理')
     parser.add_argument('--discard-only', action='store_true',
@@ -1345,12 +1649,34 @@ if __name__ == '__main__':
     
     try:
         if args.discard_only:
-            # 仅作废模式
+            # 仅作废模式 - 默认作废上个月的费用单
             from datetime import date
-            today = date.today()
-            this_month_first_day = date(today.year, today.month, 1)
-            start_date = args.start_date or this_month_first_day.strftime('%Y-%m-%d')
-            end_date = args.end_date or today.strftime('%Y-%m-%d')
+            from calendar import monthrange
+            
+            if args.start_date or args.end_date:
+                # 用户指定了日期
+                start_date = args.start_date
+                end_date = args.end_date
+            else:
+                # 默认使用上个月
+                today = date.today()
+                
+                # 计算上个月
+                if today.month == 1:
+                    last_month_year = today.year - 1
+                    last_month = 12
+                else:
+                    last_month_year = today.year
+                    last_month = today.month - 1
+                
+                # 上个月的第一天和最后一天
+                last_month_first_day = date(last_month_year, last_month, 1)
+                last_day_of_month = monthrange(last_month_year, last_month)[1]
+                last_month_last_day = date(last_month_year, last_month, last_day_of_month)
+                
+                start_date = last_month_first_day.strftime('%Y-%m-%d')
+                end_date = last_month_last_day.strftime('%Y-%m-%d')
+            
             asyncio.run(discard_fee_orders_by_date_range(start_date, end_date))
         else:
             # 正常模式：创建费用单
