@@ -30,14 +30,14 @@ logger = get_logger('fee_management')
 # 重试配置（令牌桶容量为1，需要更长的间隔）
 MAX_RETRIES = 5  # 最大重试次数
 RETRY_DELAY = 15  # 重试延迟（秒），增加到15秒以避免频繁请求
-REQUEST_DELAY = 8  # 请求间隔（秒），增加到8秒以避免触发API累积限流
+REQUEST_DELAY = 10  # 请求间隔（秒），增加到10秒以避免触发API累积限流
 TOKEN_BUCKET_CAPACITY = 1  # 令牌桶容量
 
 # 费用单创建配置
 MAX_FEE_ITEMS_PER_ORDER = 50  # 每个费用单最多包含的费用明细项数量（恢复为50，因为之前100也能成功）
 MAX_FORMATTED_PARAMS_LENGTH = 8000  # 格式化参数的最大长度（字符数），超过此值将减小批次
-REST_BATCH_INTERVAL = 20  # 每创建N批后休息一次，避免累积速率限制
-REST_DURATION = 30  # 休息时长（秒）
+REST_BATCH_INTERVAL = 15  # 每创建N批后休息一次，避免累积速率限制（从20改为15，更频繁休息）
+REST_DURATION = 40  # 休息时长（秒）（从30改为40，休息更久）
 
 
 class FeeManagement:
@@ -1172,9 +1172,13 @@ async def create_fee_orders_from_profit_report(
     success_count = 0
     total_count = 0
     skipped_groups = []  # 记录被跳过的组
+    failed_groups = []  # 记录创建失败的组
     
-    # 按年月和店铺分组创建费用单
-    for (year_month, shop_id), records in grouped_data.items():
+    # 按年月和店铺分组创建费用单（按年月排序，确保处理顺序一致）
+    sorted_groups = sorted(grouped_data.items(), key=lambda x: (x[0][0], x[0][1]))  # 按年月、店铺ID排序
+    logger.info(f"  已按年月排序，将按顺序处理 {len(sorted_groups)} 个组")
+    
+    for (year_month, shop_id), records in sorted_groups:
         total_count += 1
         
         # 统计该组包含的MSKU
@@ -1187,6 +1191,7 @@ async def create_fee_orders_from_profit_report(
         logger.info(f"\n处理第 {total_count}/{len(grouped_data)} 组：年月={year_month}, 店铺ID={shop_id}, 包含 {len(records)} 条记录, {len(group_mskus)} 个MSKU")
         
         # 数据已经按月汇总，直接构建费用明细项
+        # 注意：如果同一个MSKU有多条记录（虽然理论上不应该有），需要累加而不是覆盖
         msku_fees = {}
         
         for record in records:
@@ -1194,18 +1199,26 @@ async def create_fee_orders_from_profit_report(
             if not msku:
                 continue
             
-            # 获取汇总后的金额（数据库已经SUM了）
-            cg_price_additional_fee = float(record.get('商品成本附加费', 0) or 0)
-            cg_transport_additional_fee = float(record.get('头程成本附加费', 0) or 0)
-            recorded_freight = float(record.get('录入费用单头程', 0) or 0)
-            exchange_loss = float(record.get('汇损', 0) or 0)
+            # 获取汇总后的金额（数据库已经SUM了），并控制精度（保留4位小数，避免浮点数精度问题导致签名不一致）
+            cg_price_additional_fee = round(float(record.get('商品成本附加费', 0) or 0), 4)
+            cg_transport_additional_fee = round(float(record.get('头程成本附加费', 0) or 0), 4)
+            recorded_freight = round(float(record.get('录入费用单头程', 0) or 0), 4)
+            exchange_loss = round(float(record.get('汇损', 0) or 0), 4)
             
-            msku_fees[msku] = {
-                '商品成本附加费': cg_price_additional_fee,
-                '头程成本附加费': cg_transport_additional_fee,
-                '录入费用单头程': recorded_freight,
-                '汇损': exchange_loss
-            }
+            # 如果同一个MSKU有多条记录，累加而不是覆盖（虽然理论上不应该有）
+            if msku in msku_fees:
+                logger.warning(f"  ⚠️  警告：MSKU {msku} 在同一个月有多条记录，将累加费用")
+                msku_fees[msku]['商品成本附加费'] = round(msku_fees[msku]['商品成本附加费'] + cg_price_additional_fee, 4)
+                msku_fees[msku]['头程成本附加费'] = round(msku_fees[msku]['头程成本附加费'] + cg_transport_additional_fee, 4)
+                msku_fees[msku]['录入费用单头程'] = round(msku_fees[msku]['录入费用单头程'] + recorded_freight, 4)
+                msku_fees[msku]['汇损'] = round(msku_fees[msku]['汇损'] + exchange_loss, 4)
+            else:
+                msku_fees[msku] = {
+                    '商品成本附加费': cg_price_additional_fee,
+                    '头程成本附加费': cg_transport_additional_fee,
+                    '录入费用单头程': recorded_freight,
+                    '汇损': exchange_loss
+                }
         
         # 构建费用明细项（数据已按月汇总）
         fee_items = []
@@ -1280,65 +1293,20 @@ async def create_fee_orders_from_profit_report(
         if len(fee_items) > MAX_FEE_ITEMS_PER_ORDER:
             logger.info(f"  ⚠️  费用明细项数量({len(fee_items)})超过限制({MAX_FEE_ITEMS_PER_ORDER})，将分批创建")
             
-            # 动态调整批次大小：根据格式化参数长度
-            def estimate_formatted_params_length(batch_items, batch_num):
-                """估算格式化参数的长度"""
-                import time
-                import copy
-                from lingxing.sign import SignBase
-                
-                # 构建临时请求体
-                temp_req_body = {
-                    "submit_type": 2,
-                    "dimension": 1,
-                    "apportion_rule": 2,
-                    "is_request_pool": 0,
-                    "remark": f"Auto-{year_month}-{batch_num}",
-                    "fee_items": batch_items
-                }
-                
-                # 模拟签名计算
-                timestamp = int(time.time())
-                gen_sign_params = copy.deepcopy(temp_req_body)
-                gen_sign_params.update({
-                    "app_key": fee_mgmt.op_api.app_id,
-                    "access_token": "temp_token_for_length_check",
-                    "timestamp": f'{timestamp}',
-                })
-                
-                formatted_params = SignBase.format_params(gen_sign_params)
-                return len(formatted_params)
-            
-            # 智能分批：动态调整批次大小
-            current_batch_size = MAX_FEE_ITEMS_PER_ORDER
-            batch_count = (len(fee_items) + current_batch_size - 1) // current_batch_size
-            logger.info(f"  初始计划分成 {batch_count} 批，每批 {current_batch_size} 项")
+            batch_size = MAX_FEE_ITEMS_PER_ORDER
+            batch_count = (len(fee_items) + batch_size - 1) // batch_size
+            logger.info(f"  将分成 {batch_count} 批，每批 {batch_size} 项")
             
             batch_idx = 0
             processed_count = 0
             
             while processed_count < len(fee_items):
-                # 尝试当前批次大小
                 start_idx = processed_count
-                end_idx = min(start_idx + current_batch_size, len(fee_items))
+                end_idx = min(start_idx + batch_size, len(fee_items))
                 batch_fee_items = fee_items[start_idx:end_idx]
                 
-                # 估算格式化参数长度
-                estimated_length = estimate_formatted_params_length(
-                    batch_fee_items, 
-                    batch_idx + 1
-                )
-                
-                # 如果超过限制，减小批次大小
-                if estimated_length > MAX_FORMATTED_PARAMS_LENGTH:
-                    logger.warning(f"  ⚠️  批次 {batch_idx + 1} 的格式化参数长度({estimated_length})超过限制({MAX_FORMATTED_PARAMS_LENGTH})")
-                    logger.warning(f"  ⚠️  将减小批次大小: {current_batch_size} -> {current_batch_size - 5}")
-                    current_batch_size = max(10, current_batch_size - 5)  # 最小10项
-                    batch_count = (len(fee_items) - processed_count + current_batch_size - 1) // current_batch_size
-                    continue  # 重新计算当前批次
-                
                 batch_idx += 1
-                logger.info(f"  创建第 {batch_idx} 批，包含 {len(batch_fee_items)} 个费用明细项（格式化参数长度: {estimated_length} 字符）")
+                logger.info(f"  创建第 {batch_idx} 批，包含 {len(batch_fee_items)} 个费用明细项")
                 
                 # 创建费用单（内部已有重试和token刷新逻辑）
                 result = await fee_mgmt.create_fee_order(
@@ -1363,8 +1331,16 @@ async def create_fee_orders_from_profit_report(
                     error_msg = f"第 {batch_idx} 批费用单创建失败 (年月={year_month}, 店铺ID={shop_id})"
                     logger.error(f"  ❌ {error_msg}")
                     logger.error(f"  包含 {len(batch_fee_items)} 个费用明细项")
-                    logger.error(f"  已成功创建 {success_count} 个费用单，现在停止执行")
-                    raise RuntimeError(f"费用单创建失败: {error_msg}，请检查日志并重试")
+                    # 记录失败但继续处理，不中断整个流程
+                    failed_groups.append({
+                        'year_month': year_month,
+                        'shop_id': shop_id,
+                        'batch_idx': batch_idx,
+                        'error': error_msg,
+                        'fee_items_count': len(batch_fee_items)
+                    })
+                    logger.warning(f"  ⚠️  该批次创建失败，但将继续处理后续数据（不中断）")
+                    processed_count = end_idx  # 即使失败也更新已处理数量，避免无限循环
                 
                 await asyncio.sleep(REQUEST_DELAY)
         else:
@@ -1385,8 +1361,15 @@ async def create_fee_orders_from_profit_report(
                 error_msg = f"费用单创建失败 (年月={year_month}, 店铺ID={shop_id})"
                 logger.error(f"  ❌ {error_msg}")
                 logger.error(f"  包含 {len(fee_items)} 个费用明细项")
-                logger.error(f"  已成功创建 {success_count} 个费用单，现在停止执行")
-                raise RuntimeError(f"费用单创建失败: {error_msg}，请检查日志并重试")
+                # 记录失败但继续处理，不中断整个流程
+                failed_groups.append({
+                    'year_month': year_month,
+                    'shop_id': shop_id,
+                    'batch_idx': None,
+                    'error': error_msg,
+                    'fee_items_count': len(fee_items)
+                })
+                logger.warning(f"  ⚠️  费用单创建失败，但将继续处理后续数据（不中断）")
             
             await asyncio.sleep(REQUEST_DELAY)
     
@@ -1404,6 +1387,16 @@ async def create_fee_orders_from_profit_report(
     logger.info(f"\n✅ 费用单创建完成：成功创建 {success_count} 个费用单（来自 {total_count} 个年月+店铺组合）")
     logger.info(f"   处理了 {len(processed_shops)} 个不同的店铺ID")
     logger.info(f"   处理了 {len(processed_msku_shops)} 个(MSKU, 店铺ID)组合")
+    
+    # 报告创建失败的组
+    if failed_groups:
+        logger.error(f"\n  ❌ 错误：有 {len(failed_groups)} 个组创建失败（已记录但未中断流程）")
+        for fail in failed_groups[:20]:  # 显示前20个
+            if fail['batch_idx']:
+                logger.error(f"    年月={fail['year_month']}, 店铺ID={fail['shop_id']}, 批次={fail['batch_idx']}, 费用项数={fail['fee_items_count']}")
+            else:
+                logger.error(f"    年月={fail['year_month']}, 店铺ID={fail['shop_id']}, 费用项数={fail['fee_items_count']}")
+        logger.error(f"  ⚠️  请检查上述失败的组，可能需要手动重试")
     
     # 报告被跳过的组
     if skipped_groups:
@@ -1428,11 +1421,14 @@ async def create_fee_orders_from_profit_report(
         logger.info(f"\n  ✅ 所有数据都已处理，无遗漏")
     
     # 最终统计
-    if skipped_groups or missing:
+    if skipped_groups or missing or failed_groups:
         logger.warning(f"\n  ⚠️  总结：")
         logger.warning(f"    成功创建: {success_count} 个费用单")
+        logger.warning(f"    创建失败: {len(failed_groups)} 个组（需要手动重试）")
         logger.warning(f"    被跳过: {len(skipped_groups)} 个组（费用为0）")
         logger.warning(f"    数据遗漏: {len(missing)} 个(MSKU, 店铺ID)组合")
+        if failed_groups:
+            logger.error(f"\n  ❌ 重要：有 {len(failed_groups)} 个组创建失败，请检查日志并手动重试这些组")
     else:
         logger.info(f"\n  ✅ 所有数据都已成功处理，无遗漏")
     

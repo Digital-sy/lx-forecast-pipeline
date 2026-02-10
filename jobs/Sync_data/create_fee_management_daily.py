@@ -13,11 +13,13 @@ from typing import List, Dict, Any
 # 导入公共模块
 from common import settings, get_logger
 from common.database import db_cursor
-from create_fee_management import (
+from jobs.Sync_data.create_fee_management import (
     FeeManagement,
     discard_existing_fee_orders,
     REQUEST_DELAY,
-    MAX_FEE_ITEMS_PER_ORDER
+    MAX_FEE_ITEMS_PER_ORDER,
+    REST_BATCH_INTERVAL,
+    REST_DURATION
 )
 
 # 获取日志记录器
@@ -160,11 +162,11 @@ async def create_fee_orders_for_single_day(
             if not msku:
                 continue
             
-            # 获取金额
-            cg_price_additional_fee = float(record.get('商品成本附加费', 0) or 0)
-            cg_transport_additional_fee = float(record.get('头程成本附加费', 0) or 0)
-            recorded_freight = float(record.get('录入费用单头程', 0) or 0)
-            exchange_loss = float(record.get('汇损', 0) or 0)
+            # 获取金额，并控制精度（保留4位小数，避免浮点数精度问题导致签名不一致）
+            cg_price_additional_fee = round(float(record.get('商品成本附加费', 0) or 0), 4)
+            cg_transport_additional_fee = round(float(record.get('头程成本附加费', 0) or 0), 4)
+            recorded_freight = round(float(record.get('录入费用单头程', 0) or 0), 4)
+            exchange_loss = round(float(record.get('汇损', 0) or 0), 4)
             
             # 商品成本附加费
             if cg_price_additional_fee != 0:
@@ -175,7 +177,7 @@ async def create_fee_orders_for_single_day(
                     "other_fee_type_id": fee_type_ids['商品成本附加费_id'],
                     "fee": cg_price_additional_fee,
                     "currency_code": "CNY",
-                    "remark": f"{msku}-商品成本附加费"
+                    "remark": f"{msku}-ProductCost"
                 })
             
             # 头程成本附加费
@@ -187,7 +189,7 @@ async def create_fee_orders_for_single_day(
                     "other_fee_type_id": fee_type_ids['头程成本附加费_id'],
                     "fee": cg_transport_additional_fee,
                     "currency_code": "CNY",
-                    "remark": f"{msku}-头程成本附加费"
+                    "remark": f"{msku}-InboundCost"
                 })
             
             # 录入费用单头程（对应头程费用）
@@ -199,7 +201,7 @@ async def create_fee_orders_for_single_day(
                     "other_fee_type_id": fee_type_ids['头程费用_id'],
                     "fee": recorded_freight,
                     "currency_code": "CNY",
-                    "remark": f"{msku}-头程费用"
+                    "remark": f"{msku}-InboundFee"
                 })
             
             # 汇损
@@ -211,7 +213,7 @@ async def create_fee_orders_for_single_day(
                     "other_fee_type_id": fee_type_ids['汇损_id'],
                     "fee": exchange_loss,
                     "currency_code": "CNY",
-                    "remark": f"{msku}-汇损"
+                    "remark": f"{msku}-ExchangeLoss"
                 })
         
         if not fee_items:
@@ -239,13 +241,18 @@ async def create_fee_orders_for_single_day(
                     dimension=1,  # 1=msku
                     apportion_rule=2,  # 2=按销量
                     is_request_pool=0,  # 0=否
-                    remark=f"利润报表自动创建-{target_date} (第{batch_idx + 1}/{batch_count}批)",
+                    remark=f"Auto-{target_date}-{batch_idx + 1}/{batch_count}",
                     fee_items=batch_fee_items
                 )
                 
                 if result:
                     success_count += 1
                     logger.info(f"    ✅ 第 {batch_idx + 1}/{batch_count} 批费用单创建成功")
+                    
+                    # 每N批后休息一次，避免累积速率限制
+                    if (batch_idx + 1) % REST_BATCH_INTERVAL == 0:
+                        logger.info(f"    ⏸️  已创建 {batch_idx + 1} 批，休息 {REST_DURATION} 秒以避免累积速率限制...")
+                        await asyncio.sleep(REST_DURATION)
                 else:
                     error_msg = f"第 {batch_idx + 1}/{batch_count} 批费用单创建失败 (日期={target_date}, 店铺ID={shop_id})"
                     logger.error(f"    ❌ {error_msg}")
@@ -261,7 +268,7 @@ async def create_fee_orders_for_single_day(
                 dimension=1,  # 1=msku
                 apportion_rule=2,  # 2=按销量
                 is_request_pool=0,  # 0=否
-                remark=f"利润报表自动创建-{target_date}",
+                remark=f"Auto-{target_date}",
                 fee_items=fee_items
             )
             
@@ -311,6 +318,12 @@ async def process_daily_fee_orders(start_date: str = None, end_date: str = None)
     
     # 初始化费用管理
     fee_mgmt = FeeManagement()
+    
+    # 获取访问令牌
+    logger.info("\n获取访问令牌...")
+    if not await fee_mgmt.init_token():
+        logger.error("❌ 无法获取访问令牌")
+        return
     
     # 步骤0: 查询费用类型列表
     logger.info("\n查询费用类型列表...")

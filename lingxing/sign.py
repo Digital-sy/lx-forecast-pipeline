@@ -30,7 +30,7 @@ class SignBase(object):
         sort_keys = sorted(request_params.keys())
         for k in sort_keys:
             v = request_params[k]
-            if v == "":
+            if v == "" or v is None:
                 continue
             elif isinstance(v, (dict, list)):
                 # 如果直接使用 json, 则必须使用separators=(',',':'), 去除序列化后的空格, 否则 json中带空格就导致签名异常

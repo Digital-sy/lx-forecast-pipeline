@@ -476,6 +476,26 @@ def create_table_if_needed(table_name: str, sample_row: Dict[str, Any]) -> None:
         add_performance_indexes(table_name)
 
 
+def delete_date_data(table_name: str, date_str: str) -> int:
+    """
+    删除指定日期的数据（在写入新数据前）
+    
+    Args:
+        table_name: 表名
+        date_str: 日期字符串（格式：Y-m-d）
+        
+    Returns:
+        int: 删除的记录数
+    """
+    with db_cursor(dictionary=False) as cursor:
+        sql = f"DELETE FROM `{table_name}` WHERE `统计日期` = %s"
+        cursor.execute(sql, (date_str,))
+        deleted_count = cursor.rowcount
+        if deleted_count > 0:
+            logger.info(f"  🗑️  已删除 {date_str} 的旧数据: {deleted_count} 条")
+        return deleted_count
+
+
 def insert_data_batch(table_name: str, data_list: List[Dict[str, Any]]) -> Tuple[int, int]:
     """
     批量插入数据（使用 ON DUPLICATE KEY UPDATE）
@@ -853,7 +873,7 @@ async def main(start_date: str = None, end_date: str = None):
     主函数
     
     Args:
-        start_date: 开始日期，格式：Y-m-d，默认：1月1号
+        start_date: 开始日期，格式：Y-m-d，默认：前7天
         end_date: 结束日期，格式：Y-m-d，默认：今天
     """
     logger.info("="*80)
@@ -885,19 +905,19 @@ async def main(start_date: str = None, end_date: str = None):
     # 不使用店铺映射，直接使用API返回的原始店铺名称
     sid_to_name_map = None
     
-    # 确定日期范围（默认1月1号到今天）
+    # 确定日期范围（默认前7天到今天）
     if not end_date:
         month_end = datetime.now()
     else:
         month_end = datetime.strptime(end_date, '%Y-%m-%d')
     
     if not start_date:
-        # 默认从1月1号开始
-        month_start = month_end.replace(month=1, day=1)
+        # 默认从前7天开始
+        month_start = month_end - timedelta(days=6)  # 前7天（包含今天，所以是6天前）
     else:
         month_start = datetime.strptime(start_date, '%Y-%m-%d')
     
-    logger.info(f"📅 拉取数据（1月1号到今天）")
+    logger.info(f"📅 拉取数据（前7天）")
     logger.info(f"日期范围: {month_start.strftime('%Y-%m-%d')} ~ {month_end.strftime('%Y-%m-%d')}")
     logger.info(f"⏱️  配置参数（令牌桶容量为10）:")
     logger.info(f"   - 请求间隔: {REQUEST_DELAY}秒")
@@ -965,21 +985,21 @@ async def main(start_date: str = None, end_date: str = None):
         duplicates = []
         
         for idx, record in enumerate(records):
-            # 构建唯一键
+            # 构建唯一键（与数据库唯一键保持一致：统计日期 + 店铺 + MSKU + ASIN）
             data_date = record.get('postedDateLocale', '') or record.get('reportDateMonth', '') or ''
-            sid = str(record.get('sid', ''))
+            shop_name = record.get('storeName', '') or '无'  # 使用店铺名称，与数据库唯一键一致
             msku = record.get('msku', '') or ''
             asin = record.get('asin', '') or ''
             
             # 如果为空，填"无"
-            if not sid:
-                sid = '无'
+            if not shop_name:
+                shop_name = '无'
             if not msku:
                 msku = '无'
             if not asin:
                 asin = '无'
             
-            key = (data_date, sid, msku, asin)
+            key = (data_date, shop_name, msku, asin)
             
             if key in unique_keys:
                 # 发现重复
@@ -1001,7 +1021,7 @@ async def main(start_date: str = None, end_date: str = None):
             
             for i, dup in enumerate(duplicates[:10], 1):
                 logger.info(f"\n重复 #{i}:")
-                logger.info(f"  唯一键: 日期={dup['key'][0]}, 店铺ID={dup['key'][1]}, MSKU={dup['key'][2]}, ASIN={dup['key'][3]}")
+                logger.info(f"  唯一键: 日期={dup['key'][0]}, 店铺={dup['key'][1]}, MSKU={dup['key'][2]}, ASIN={dup['key'][3]}")
                 logger.info(f"  第一条记录索引: {dup['first_index']}")
                 logger.info(f"    - 记录ID: {dup['first_record'].get('id')}")
                 logger.info(f"    - 店铺名: {dup['first_record'].get('storeName')}")
@@ -1041,7 +1061,11 @@ async def main(start_date: str = None, end_date: str = None):
                 logger.info(f"正在创建数据库表 {table_name}...")
                 create_table_if_needed(table_name, report_data_list[0])
             
-            # 插入数据（使用ON DUPLICATE KEY UPDATE）
+            # 先删除对应天的旧数据，确保数据一致性
+            logger.info(f"正在清理 {date_str} 的旧数据...")
+            delete_date_data(table_name, date_str)
+            
+            # 插入数据（使用ON DUPLICATE KEY UPDATE，但已删除旧数据，主要是插入）
             logger.info(f"正在写入 {date_str} 数据到数据库...")
             inserted, updated = insert_data_batch(table_name, report_data_list)
             
@@ -1119,7 +1143,7 @@ if __name__ == '__main__':
     
     parser = argparse.ArgumentParser(description='利润报表数据采集')
     parser.add_argument('--start-date', type=str, default=None,
-                       help='开始日期，格式：Y-m-d，默认：1月1号')
+                       help='开始日期，格式：Y-m-d，默认：前7天')
     parser.add_argument('--end-date', type=str, default=None,
                        help='结束日期，格式：Y-m-d，默认：今天')
     

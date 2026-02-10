@@ -662,12 +662,14 @@ def main(start_date: Optional[str] = None, end_date: Optional[str] = None, limit
     logger.info("更新利润报表计算字段")
     logger.info("="*80)
     
-    # 确定日期范围（默认从1月1日到今天）
+    # 确定日期范围（默认前7天到今天）
     if not end_date:
         end_date = datetime.now().strftime('%Y-%m-%d')
     if not start_date:
-        # 默认从1月1号开始（和利润报表采集脚本保持一致）
-        start_date = datetime.now().replace(month=1, day=1).strftime('%Y-%m-%d')
+        # 默认从前7天开始（和利润报表采集脚本保持一致）
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+        start_dt = end_dt - timedelta(days=6)  # 前7天（包含今天，所以是6天前）
+        start_date = start_dt.strftime('%Y-%m-%d')
     
     logger.info(f"\n📅 更新范围: {start_date} ~ {end_date}")
     if limit:
@@ -729,7 +731,7 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description='更新利润报表计算字段')
-    parser.add_argument('--start-date', type=str, help='开始日期（格式：YYYY-MM-DD），默认为1月1日')
+    parser.add_argument('--start-date', type=str, help='开始日期（格式：YYYY-MM-DD），默认为前7天')
     parser.add_argument('--end-date', type=str, help='结束日期（格式：YYYY-MM-DD），默认为今天')
     parser.add_argument('--limit', type=int, help='限制处理的记录数（用于测试）')
     

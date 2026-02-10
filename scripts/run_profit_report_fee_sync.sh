@@ -48,7 +48,7 @@ $PROJECT_DIR/logs/"
             feishu_message="${feishu_message}update_profit_report_calc.log"
             ;;
         "步骤3: 创建费用单")
-            feishu_message="${feishu_message}fee_management.log"
+            feishu_message="${feishu_message}fee_management_daily.log"
             ;;
         *)
             feishu_message="${feishu_message}profit_report_fee_sync.log"
@@ -67,7 +67,7 @@ send_success_message() {
 📊 执行步骤:
   1. ✅ 采集利润报表数据
   2. ✅ 更新计算字段
-  3. ✅ 创建费用单
+  (步骤3: 创建费用单已取消)
 
 ⏱️  总耗时: $total_time
 
@@ -84,11 +84,11 @@ START_TIME=$(date +%s)
 echo "==================================="
 echo "利润报表费用单同步任务开始: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "==================================="
-echo "默认处理范围: 前15天到今天"
+echo "默认处理范围: 本月1号到今天"
 echo ""
 
 # 步骤1: 采集利润报表数据
-echo "[1/3] 步骤1: 采集利润报表数据..."
+echo "[1/2] 步骤1: 采集利润报表数据..."
 $PYTHON -m jobs.Sync_data.fetch_profit_report_msku_daily
 EXIT_CODE_1=$?
 
@@ -99,7 +99,7 @@ else
 fi
 
 echo ""
-echo "[2/3] 步骤2: 更新计算字段..."
+echo "[2/2] 步骤2: 更新计算字段..."
 $PYTHON -m jobs.Sync_data.update_profit_report_calculated_fields
 EXIT_CODE_2=$?
 
@@ -109,16 +109,17 @@ else
     echo "✓ 步骤2完成"
 fi
 
-echo ""
-echo "[3/3] 步骤3: 创建费用单..."
-$PYTHON -m jobs.Sync_data.create_fee_management
-EXIT_CODE_3=$?
-
-if [ $EXIT_CODE_3 -ne 0 ]; then
-    handle_error "步骤3: 创建费用单" $EXIT_CODE_3
-else
-    echo "✓ 步骤3完成"
-fi
+# 步骤3: 创建费用单（已取消）
+# echo ""
+# echo "[3/3] 步骤3: 创建费用单（按日处理）..."
+# $PYTHON -m jobs.Sync_data.create_fee_management_daily
+# EXIT_CODE_3=$?
+# 
+# if [ $EXIT_CODE_3 -ne 0 ]; then
+#     handle_error "步骤3: 创建费用单" $EXIT_CODE_3
+# else
+#     echo "✓ 步骤3完成"
+# fi
 
 END_TIME=$(date +%s)
 TOTAL_TIME=$((END_TIME - START_TIME))
