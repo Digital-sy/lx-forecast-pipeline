@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m jobs.Sync_data.create_fee_management --start-date 2026-02-01 --end-date 2026-02-28 --mskus \"KZ030-RDS-JSS-YXP-FBA\" --no-discard 2>&1 | tail -n 100)",
+      "Bash(find E:pythondata -name crontab* -type f)"
+    ]
+  }
+}

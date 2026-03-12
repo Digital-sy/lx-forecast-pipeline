@@ -8,6 +8,7 @@ API: /bd/profit/report/open/report/msku/list
 """
 import asyncio
 import json
+import sys
 from typing import List, Dict, Any, Tuple
 from datetime import datetime, timedelta
 import re
@@ -1153,6 +1154,8 @@ if __name__ == '__main__':
         asyncio.run(main(start_date=args.start_date, end_date=args.end_date))
     except KeyboardInterrupt:
         logger.warning("\n⚠️  用户中断执行")
+        sys.exit(1)
     except Exception as e:
         logger.error(f"\n❌ 执行失败: {e}", exc_info=True)
+        sys.exit(1)
 

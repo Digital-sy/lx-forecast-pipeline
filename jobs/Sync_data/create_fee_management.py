@@ -16,6 +16,7 @@ Token管理策略：
 """
 import asyncio
 import json
+import sys
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
@@ -35,6 +36,7 @@ TOKEN_BUCKET_CAPACITY = 1  # 令牌桶容量
 
 # 费用单创建配置
 MAX_FEE_ITEMS_PER_ORDER = 50  # 每个费用单最多包含的费用明细项数量（恢复为50，因为之前100也能成功）
+MAX_MSKUS_PER_ORDER = 15  # 每个费用单最多包含的MSKU数量（新增：确保不拆分单个MSKU的费用）
 MAX_FORMATTED_PARAMS_LENGTH = 8000  # 格式化参数的最大长度（字符数），超过此值将减小批次
 REST_BATCH_INTERVAL = 15  # 每创建N批后休息一次，避免累积速率限制（从20改为15，更频繁休息）
 REST_DURATION = 40  # 休息时长（秒）（从30改为40，休息更久）
@@ -527,7 +529,7 @@ class FeeManagement:
             remark: 费用单备注
             fee_items: 费用明细项列表，每项包含：
                 - sids: 店铺id列表
-                - dimension_value: 纬度值，例如ASIN值
+                - dimension_value: 纬度值，例如MSKU值
                 - date: 分摊日期，格式：Y-m-d 或 Y-m
                 - other_fee_type_id: 费用类型id
                 - fee: 金额（原币金额，注意正负数）
@@ -706,12 +708,33 @@ class FeeManagement:
                         logger.error(f"❌ 达到最大重试次数，创建费用单失败")
                         return None
                 
-                # 创建成功
+                # 创建成功的判断：code=0 且 data=true
                 data = result.get('data')
-                logger.info(f"✅ 费用单创建成功!")
-                logger.info(f"返回结果: {json.dumps(result, ensure_ascii=False, indent=2)}")
                 
-                return result
+                if data is True:
+                    # 真正创建成功
+                    logger.info(f"✅ 费用单创建成功!")
+                    logger.info(f"返回结果: {json.dumps(result, ensure_ascii=False, indent=2)}")
+                    return result
+                else:
+                    # code=0 但 data 不是 true，说明创建失败
+                    logger.error(f"❌ 费用单创建失败（虽然code=0）: message={message}")
+                    logger.error(f"📋 完整响应: {json.dumps(result, ensure_ascii=False, indent=2)}")
+                    
+                    # 检查是否是MSKU不存在的错误
+                    if 'MSKU' in message or '不存在' in message:
+                        logger.error(f"⚠️  MSKU不存在错误，无法通过重试解决，直接返回失败")
+                        return None
+                    
+                    # 其他情况可以重试
+                    if retry < MAX_RETRIES - 1:
+                        wait_time = RETRY_DELAY * (retry + 1)
+                        logger.info(f"⏳ 等待 {wait_time} 秒后重试...")
+                        await asyncio.sleep(wait_time)
+                        continue
+                    else:
+                        logger.error(f"❌ 达到最大重试次数，创建费用单失败")
+                        return None
                 
             except Exception as e:
                 logger.error(f"❌ 创建费用单异常: {str(e)}")
@@ -988,7 +1011,7 @@ async def discard_existing_fee_orders(
     """
     logger.info("=" * 80)
     logger.info("步骤1: 查询并作废已有费用单（分批处理）")
-    logger.info(f"将作废日期范围 {start_date} 至 {end_date} 内所有【已处理】状态的费用单")
+    logger.info(f"将作废日期范围 {start_date} 至 {end_date} 内所有【待审批】和【已处理】状态的费用单")
     logger.info("=" * 80)
     
     # 分批处理配置
@@ -998,31 +1021,39 @@ async def discard_existing_fee_orders(
     total_queried = 0
     total_discarded = 0
     
-    # 查询需要作废的费用单（只查询"已处理"状态）
+    # 查询需要作废的费用单（查询"已处理"和"待审批"两种状态）
     all_pending_numbers = []
     
-    status = 3  # 只查询已处理状态
-    status_name = "已处理"
-    logger.info(f"查询状态为【{status_name}】的费用单...")
+    # 需要作废的状态列表：2=待审批，3=已处理
+    statuses_to_discard = [
+        (2, "待审批"),
+        (3, "已处理"),
+    ]
     
-    # 先查询总数
-    first_query = await fee_mgmt.get_fee_list(
-        offset=0,
-        length=1,
-        date_type="date",
-        start_date=start_date,
-        end_date=end_date,
-        other_fee_type_ids=fee_type_ids,
-        status_order=status
-    )
-    
-    status_total = 0
-    if first_query:
-        data = first_query.get('data', {})
-        status_total = data.get('total', 0)
-        logger.info(f"  状态【{status_name}】共有 {status_total} 条费用单")
-    
-    if status_total > 0:
+    for status, status_name in statuses_to_discard:
+        logger.info(f"查询状态为【{status_name}】的费用单...")
+        
+        # 先查询总数
+        first_query = await fee_mgmt.get_fee_list(
+            offset=0,
+            length=1,
+            date_type="date",
+            start_date=start_date,
+            end_date=end_date,
+            other_fee_type_ids=fee_type_ids,
+            status_order=status
+        )
+        
+        status_total = 0
+        if first_query:
+            data = first_query.get('data', {})
+            status_total = data.get('total', 0)
+            logger.info(f"  状态【{status_name}】共有 {status_total} 条费用单")
+        
+        if status_total == 0:
+            await asyncio.sleep(REQUEST_DELAY)
+            continue
+        
         await asyncio.sleep(REQUEST_DELAY)
         
         # 分批查询该状态的费用单
@@ -1098,6 +1129,105 @@ async def discard_existing_fee_orders(
     logger.info("=" * 80)
     
     return True
+
+
+def _build_fee_items_for_msku(
+    msku: str,
+    shop_id: int,
+    year_month: str,
+    fees: Dict[str, float],
+    fee_type_ids: Dict[str, int]
+) -> List[Dict[str, Any]]:
+    """为单个MSKU构建费用明细项列表"""
+    items = []
+    if fees.get('商品成本附加费', 0) != 0:
+        items.append({
+            "sids": [int(shop_id)],
+            "dimension_value": msku,
+            "date": year_month,
+            "other_fee_type_id": fee_type_ids['商品成本附加费_id'],
+            "fee": fees['商品成本附加费'],
+            "currency_code": "CNY",
+            "remark": f"{msku}-ProductCost"
+        })
+    if fees.get('头程成本附加费', 0) != 0:
+        items.append({
+            "sids": [int(shop_id)],
+            "dimension_value": msku,
+            "date": year_month,
+            "other_fee_type_id": fee_type_ids['头程成本附加费_id'],
+            "fee": fees['头程成本附加费'],
+            "currency_code": "CNY",
+            "remark": f"{msku}-InboundCost"
+        })
+    if fees.get('录入费用单头程', 0) != 0:
+        items.append({
+            "sids": [int(shop_id)],
+            "dimension_value": msku,
+            "date": year_month,
+            "other_fee_type_id": fee_type_ids['头程费用_id'],
+            "fee": fees['录入费用单头程'],
+            "currency_code": "CNY",
+            "remark": f"{msku}-InboundFee"
+        })
+    if fees.get('汇损', 0) != 0:
+        items.append({
+            "sids": [int(shop_id)],
+            "dimension_value": msku,
+            "date": year_month,
+            "other_fee_type_id": fee_type_ids['汇损_id'],
+            "fee": fees['汇损'],
+            "currency_code": "CNY",
+            "remark": f"{msku}-ExchangeLoss"
+        })
+    return items
+
+
+async def _retry_mskus_one_by_one(
+    fee_mgmt: 'FeeManagement',
+    msku_list: List[str],
+    shop_id: int,
+    year_month: str,
+    dim_fees: Dict[str, Dict],
+    fee_type_ids: Dict[str, int],
+    batch_label: str
+) -> tuple:
+    """
+    批量提交失败后，将该批次内每个MSKU逐个单独重试。
+    返回 (成功数, 跳过数, 真正失败的MSKU列表)
+    """
+    ok, skip, still_failed = 0, 0, []
+    total = len(msku_list)
+    logger.info(f"  🔄 [{batch_label}] 批量失败，改为逐个重试 {total} 个MSKU...")
+
+    for i, msku in enumerate(msku_list, 1):
+        fees = dim_fees.get(msku, {})
+        fee_items = _build_fee_items_for_msku(msku, shop_id, year_month, fees, fee_type_ids)
+        if not fee_items:
+            logger.info(f"    [{i}/{total}] {msku}：费用全为0，跳过")
+            skip += 1
+            continue
+
+        logger.info(f"    [{i}/{total}] 单独提交 MSKU={msku}，{len(fee_items)} 个费用项")
+        result = await fee_mgmt.create_fee_order(
+            submit_type=2,
+            dimension=1,
+            apportion_rule=2,
+            is_request_pool=0,
+            remark=f"Auto-{year_month}-retry",
+            fee_items=fee_items
+        )
+        if result:
+            logger.info(f"      ✅ 成功")
+            ok += 1
+        else:
+            logger.error(f"      ❌ 失败，跳过（MSKU在领星中可能不存在）")
+            still_failed.append(msku)
+
+        await asyncio.sleep(REQUEST_DELAY)
+
+    logger.info(f"  🔄 [{batch_label}] 逐个重试完成：成功={ok}, 跳过={skip}, 仍失败={len(still_failed)}")
+    return ok, skip, still_failed
 
 
 async def create_fee_orders_from_profit_report(
@@ -1181,197 +1311,287 @@ async def create_fee_orders_from_profit_report(
     for (year_month, shop_id), records in sorted_groups:
         total_count += 1
         
-        # 统计该组包含的MSKU
+        # 统计该组包含的MSKU数
         group_mskus = set()
         for record in records:
             msku = record.get('MSKU', '').strip()
             if msku:
                 group_mskus.add(msku)
         
-        logger.info(f"\n处理第 {total_count}/{len(grouped_data)} 组：年月={year_month}, 店铺ID={shop_id}, 包含 {len(records)} 条记录, {len(group_mskus)} 个MSKU")
+        logger.info(f"\n处理第 {total_count}/{len(grouped_data)} 组：年月={year_month}, 店铺ID={shop_id}, 包含 {len(records)} 条记录, {len(group_mskus)} 个MSKU（将以MSKU维度提交）")
         
         # 数据已经按月汇总，直接构建费用明细项
-        # 注意：如果同一个MSKU有多条记录（虽然理论上不应该有），需要累加而不是覆盖
-        msku_fees = {}
+        # key = MSKU，value = 费用字典
+        dim_fees = {}     # {msku: {fees...}}
+        dim_labels = {}   # {msku: label用于remark}
+        dim_types = {}    # {msku: dimension整数 1=msku}
         
         for record in records:
             msku = record.get('MSKU', '').strip()
             if not msku:
                 continue
+
+            dim_val = msku
+            dim_type = 1  # 统一使用MSKU维度
             
-            # 获取汇总后的金额（数据库已经SUM了），并控制精度（保留4位小数，避免浮点数精度问题导致签名不一致）
+            # 记录label（用于remark）
+            dim_labels[dim_val] = msku
+            dim_types[dim_val] = dim_type
+            
+            # 获取汇总后的金额，控制精度保留4位小数
             cg_price_additional_fee = round(float(record.get('商品成本附加费', 0) or 0), 4)
             cg_transport_additional_fee = round(float(record.get('头程成本附加费', 0) or 0), 4)
             recorded_freight = round(float(record.get('录入费用单头程', 0) or 0), 4)
             exchange_loss = round(float(record.get('汇损', 0) or 0), 4)
             
-            # 如果同一个MSKU有多条记录，累加而不是覆盖（虽然理论上不应该有）
-            if msku in msku_fees:
-                logger.warning(f"  ⚠️  警告：MSKU {msku} 在同一个月有多条记录，将累加费用")
-                msku_fees[msku]['商品成本附加费'] = round(msku_fees[msku]['商品成本附加费'] + cg_price_additional_fee, 4)
-                msku_fees[msku]['头程成本附加费'] = round(msku_fees[msku]['头程成本附加费'] + cg_transport_additional_fee, 4)
-                msku_fees[msku]['录入费用单头程'] = round(msku_fees[msku]['录入费用单头程'] + recorded_freight, 4)
-                msku_fees[msku]['汇损'] = round(msku_fees[msku]['汇损'] + exchange_loss, 4)
+            # 同一个dimension_value有多条记录则累加
+            if dim_val in dim_fees:
+                logger.warning(f"  ⚠️  警告：{dim_val} 在同一个月有多条记录，将累加费用")
+                dim_fees[dim_val]['商品成本附加费'] = round(dim_fees[dim_val]['商品成本附加费'] + cg_price_additional_fee, 4)
+                dim_fees[dim_val]['头程成本附加费'] = round(dim_fees[dim_val]['头程成本附加费'] + cg_transport_additional_fee, 4)
+                dim_fees[dim_val]['录入费用单头程'] = round(dim_fees[dim_val]['录入费用单头程'] + recorded_freight, 4)
+                dim_fees[dim_val]['汇损'] = round(dim_fees[dim_val]['汇损'] + exchange_loss, 4)
             else:
-                msku_fees[msku] = {
+                dim_fees[dim_val] = {
                     '商品成本附加费': cg_price_additional_fee,
                     '头程成本附加费': cg_transport_additional_fee,
                     '录入费用单头程': recorded_freight,
                     '汇损': exchange_loss
                 }
         
-        # 构建费用明细项（数据已按月汇总）
-        fee_items = []
-        msku_count = 0
+        # 构建费用明细项（按dimension_value分批）
+        msku_list = list(dim_fees.keys())
+        msku_count = len(msku_list)
         
-        for msku, fees in msku_fees.items():
-            msku_count += 1
-            
-            # 商品成本附加费
-            if fees['商品成本附加费'] != 0:
-                fee_items.append({
-                    "sids": [int(shop_id)],
-                    "dimension_value": msku,
-                    "date": year_month,  # 使用年月格式：Y-m
-                    "other_fee_type_id": fee_type_ids['商品成本附加费_id'],
-                    "fee": fees['商品成本附加费'],
-                    "currency_code": "CNY",
-                    "remark": f"{msku}-ProductCost"
-                })
-            
-            # 头程成本附加费
-            if fees['头程成本附加费'] != 0:
-                fee_items.append({
-                    "sids": [int(shop_id)],
-                    "dimension_value": msku,
-                    "date": year_month,  # 使用年月格式：Y-m
-                    "other_fee_type_id": fee_type_ids['头程成本附加费_id'],
-                    "fee": fees['头程成本附加费'],
-                    "currency_code": "CNY",
-                    "remark": f"{msku}-InboundCost"
-                })
-            
-            # 录入费用单头程（对应头程费用）
-            if fees['录入费用单头程'] != 0:
-                fee_items.append({
-                    "sids": [int(shop_id)],
-                    "dimension_value": msku,
-                    "date": year_month,  # 使用年月格式：Y-m
-                    "other_fee_type_id": fee_type_ids['头程费用_id'],
-                    "fee": fees['录入费用单头程'],
-                    "currency_code": "CNY",
-                    "remark": f"{msku}-InboundFee"
-                })
-            
-            # 汇损
-            if fees['汇损'] != 0:
-                fee_items.append({
-                    "sids": [int(shop_id)],
-                    "dimension_value": msku,
-                    "date": year_month,  # 使用年月格式：Y-m
-                    "other_fee_type_id": fee_type_ids['汇损_id'],
-                    "fee": fees['汇损'],
-                    "currency_code": "CNY",
-                    "remark": f"{msku}-ExchangeLoss"
-                })
+        logger.info(f"  该组包含 {msku_count} 个MSKU")
         
-        logger.info(f"  该组包含 {msku_count} 个MSKU，生成 {len(fee_items)} 个费用明细项")
-        
-        if not fee_items:
-            logger.warning(f"  ⚠️  跳过：该组没有需要创建的费用项（可能所有费用都为0）")
+        if msku_count == 0:
+            logger.warning(f"  ⚠️  跳过：该组没有有效的MSKU数据")
             skipped_groups.append({
                 'year_month': year_month,
                 'shop_id': shop_id,
-                'msku_count': msku_count,
-                'reason': '所有费用都为0'
+                'msku_count': 0,
+                'reason': '没有MSKU数据'
             })
             continue
         
-        logger.info(f"  准备创建费用单，包含 {len(fee_items)} 个费用明细项")
-        
-        # 如果费用明细项数量超过限制，分批创建
-        if len(fee_items) > MAX_FEE_ITEMS_PER_ORDER:
-            logger.info(f"  ⚠️  费用明细项数量({len(fee_items)})超过限制({MAX_FEE_ITEMS_PER_ORDER})，将分批创建")
+        # 按MSKU分批处理
+        if msku_count > MAX_MSKUS_PER_ORDER:
+            logger.info(f"  ⚠️  MSKU数量({msku_count})超过限制({MAX_MSKUS_PER_ORDER})，将按MSKU分批创建")
             
-            batch_size = MAX_FEE_ITEMS_PER_ORDER
-            batch_count = (len(fee_items) + batch_size - 1) // batch_size
-            logger.info(f"  将分成 {batch_count} 批，每批 {batch_size} 项")
+            batch_count = (msku_count + MAX_MSKUS_PER_ORDER - 1) // MAX_MSKUS_PER_ORDER
+            logger.info(f"  将分成 {batch_count} 批，每批最多 {MAX_MSKUS_PER_ORDER} 个MSKU")
             
             batch_idx = 0
-            processed_count = 0
+            processed_msku_count = 0
             
-            while processed_count < len(fee_items):
-                start_idx = processed_count
-                end_idx = min(start_idx + batch_size, len(fee_items))
-                batch_fee_items = fee_items[start_idx:end_idx]
-                
-                batch_idx += 1
-                logger.info(f"  创建第 {batch_idx} 批，包含 {len(batch_fee_items)} 个费用明细项")
-                
-                # 创建费用单（内部已有重试和token刷新逻辑）
-                result = await fee_mgmt.create_fee_order(
-                    submit_type=2,  # 2=提交
-                    dimension=1,  # 1=msku
-                    apportion_rule=2,  # 2=按销量
-                    is_request_pool=0,  # 0=否
-                    remark=f"Auto-{year_month}-{batch_idx}",
-                    fee_items=batch_fee_items
-                )
-                
-                if result:
-                    success_count += 1
-                    logger.info(f"  ✅ 第 {batch_idx} 批费用单创建成功")
-                    processed_count = end_idx  # 更新已处理数量
-                    
-                    # 每N批后休息一次，避免累积速率限制
-                    if batch_idx % REST_BATCH_INTERVAL == 0:
-                        logger.info(f"  ⏸️  已创建 {batch_idx} 批，休息 {REST_DURATION} 秒以避免累积速率限制...")
-                        await asyncio.sleep(REST_DURATION)
-                else:
-                    error_msg = f"第 {batch_idx} 批费用单创建失败 (年月={year_month}, 店铺ID={shop_id})"
-                    logger.error(f"  ❌ {error_msg}")
-                    logger.error(f"  包含 {len(batch_fee_items)} 个费用明细项")
-                    # 记录失败但继续处理，不中断整个流程
-                    failed_groups.append({
+            while processed_msku_count < msku_count:
+                start_idx = processed_msku_count
+                end_idx = min(start_idx + MAX_MSKUS_PER_ORDER, msku_count)
+                batch_mskus = msku_list[start_idx:end_idx]
+                processed_msku_count = end_idx
+
+                # 全部使用MSKU维度
+                sub_batch_list = [(list(batch_mskus), 1)]
+
+                for sub_dim_vals, batch_dimension in sub_batch_list:
+                    batch_fee_items = []
+                    for dim_val in sub_dim_vals:
+                        fees = dim_fees[dim_val]
+                        label = dim_labels.get(dim_val, dim_val)
+                        if fees['商品成本附加费'] != 0:
+                            batch_fee_items.append({
+                                "sids": [int(shop_id)],
+                                "dimension_value": dim_val,
+                                "date": year_month,
+                                "other_fee_type_id": fee_type_ids['商品成本附加费_id'],
+                                "fee": fees['商品成本附加费'],
+                                "currency_code": "CNY",
+                                "remark": f"{label}-ProductCost"
+                            })
+                        if fees['头程成本附加费'] != 0:
+                            batch_fee_items.append({
+                                "sids": [int(shop_id)],
+                                "dimension_value": dim_val,
+                                "date": year_month,
+                                "other_fee_type_id": fee_type_ids['头程成本附加费_id'],
+                                "fee": fees['头程成本附加费'],
+                                "currency_code": "CNY",
+                                "remark": f"{label}-InboundCost"
+                            })
+                        if fees['录入费用单头程'] != 0:
+                            batch_fee_items.append({
+                                "sids": [int(shop_id)],
+                                "dimension_value": dim_val,
+                                "date": year_month,
+                                "other_fee_type_id": fee_type_ids['头程费用_id'],
+                                "fee": fees['录入费用单头程'],
+                                "currency_code": "CNY",
+                                "remark": f"{label}-InboundFee"
+                            })
+                        if fees['汇损'] != 0:
+                            batch_fee_items.append({
+                                "sids": [int(shop_id)],
+                                "dimension_value": dim_val,
+                                "date": year_month,
+                                "other_fee_type_id": fee_type_ids['汇损_id'],
+                                "fee": fees['汇损'],
+                                "currency_code": "CNY",
+                                "remark": f"{label}-ExchangeLoss"
+                            })
+
+                    batch_idx += 1
+
+                    if not batch_fee_items:
+                        logger.warning(f"  ⚠️  第 {batch_idx} 批没有费用明细项（所有费用都为0），跳过")
+                        continue
+
+                    dim_label = "MSKU"
+                    dim_preview = ', '.join(sub_dim_vals[:5])
+                    if len(sub_dim_vals) > 5:
+                        dim_preview += f'... (共{len(sub_dim_vals)}个)'
+                    logger.info(f"  创建第 {batch_idx}/{batch_count} 批：{len(sub_dim_vals)} 个{dim_label}，{len(batch_fee_items)} 个费用明细项（维度={batch_dimension}）")
+                    logger.info(f"    包含{dim_label}: {dim_preview}")
+
+                    result = await fee_mgmt.create_fee_order(
+                        submit_type=2,
+                        dimension=batch_dimension,
+                        apportion_rule=2,
+                        is_request_pool=0,
+                        remark=f"Auto-{year_month}-{batch_idx}",
+                        fee_items=batch_fee_items
+                    )
+
+                    if result:
+                        success_count += 1
+                        logger.info(f"  ✅ 第 {batch_idx} 批费用单创建成功")
+                        if batch_idx % REST_BATCH_INTERVAL == 0:
+                            logger.info(f"  ⏸️  已创建 {batch_idx} 批，休息 {REST_DURATION} 秒以避免累积速率限制...")
+                            await asyncio.sleep(REST_DURATION)
+                    else:
+                        logger.warning(f"  ⚠️  第 {batch_idx} 批整批失败，改为逐个重试（避免因1个无效MSKU拖累整批）")
+                        batch_label = f"第{batch_idx}批 {year_month} 店铺{shop_id}"
+                        ok, _skip, still_failed = await _retry_mskus_one_by_one(
+                            fee_mgmt, list(sub_dim_vals), shop_id, year_month,
+                            dim_fees, fee_type_ids, batch_label
+                        )
+                        success_count += ok
+                        if still_failed:
+                            error_msg = f"第 {batch_idx} 批逐个重试后仍失败 (年月={year_month}, 店铺ID={shop_id})"
+                            failed_groups.append({
+                                'year_month': year_month,
+                                'shop_id': shop_id,
+                                'batch_idx': batch_idx,
+                                'error': error_msg,
+                                'msku_count': len(still_failed),
+                                'fee_items_count': 0,
+                                'dim_values': still_failed,
+                                'dim_types': [1] * len(still_failed)
+                            })
+
+                    await asyncio.sleep(REQUEST_DELAY)
+        else:
+            # 数量在限制内，直接创建费用单，全部使用MSKU维度
+            logger.info(f"  MSKU数量({msku_count})在限制内，直接创建费用单")
+            small_sub_batches = [(list(msku_list), 1)]
+
+            for sub_dim_vals, group_dimension in small_sub_batches:
+                fee_items = []
+                for dim_val in sub_dim_vals:
+                    fees = dim_fees[dim_val]
+                    label = dim_labels.get(dim_val, dim_val)
+                    if fees['商品成本附加费'] != 0:
+                        fee_items.append({
+                            "sids": [int(shop_id)],
+                            "dimension_value": dim_val,
+                            "date": year_month,
+                            "other_fee_type_id": fee_type_ids['商品成本附加费_id'],
+                            "fee": fees['商品成本附加费'],
+                            "currency_code": "CNY",
+                            "remark": f"{label}-ProductCost"
+                        })
+                    if fees['头程成本附加费'] != 0:
+                        fee_items.append({
+                            "sids": [int(shop_id)],
+                            "dimension_value": dim_val,
+                            "date": year_month,
+                            "other_fee_type_id": fee_type_ids['头程成本附加费_id'],
+                            "fee": fees['头程成本附加费'],
+                            "currency_code": "CNY",
+                            "remark": f"{label}-InboundCost"
+                        })
+                    if fees['录入费用单头程'] != 0:
+                        fee_items.append({
+                            "sids": [int(shop_id)],
+                            "dimension_value": dim_val,
+                            "date": year_month,
+                            "other_fee_type_id": fee_type_ids['头程费用_id'],
+                            "fee": fees['录入费用单头程'],
+                            "currency_code": "CNY",
+                            "remark": f"{label}-InboundFee"
+                        })
+                    if fees['汇损'] != 0:
+                        fee_items.append({
+                            "sids": [int(shop_id)],
+                            "dimension_value": dim_val,
+                            "date": year_month,
+                            "other_fee_type_id": fee_type_ids['汇损_id'],
+                            "fee": fees['汇损'],
+                            "currency_code": "CNY",
+                            "remark": f"{label}-ExchangeLoss"
+                        })
+
+                if not fee_items:
+                    logger.warning(f"  ⚠️  跳过：该组没有需要创建的费用项（所有费用都为0）")
+                    skipped_groups.append({
                         'year_month': year_month,
                         'shop_id': shop_id,
-                        'batch_idx': batch_idx,
-                        'error': error_msg,
-                        'fee_items_count': len(batch_fee_items)
+                        'msku_count': len(sub_dim_vals),
+                        'reason': '所有费用都为0'
                     })
-                    logger.warning(f"  ⚠️  该批次创建失败，但将继续处理后续数据（不中断）")
-                    processed_count = end_idx  # 即使失败也更新已处理数量，避免无限循环
-                
+                    continue
+
+                dim_label = "MSKU"
+                dim_preview = ', '.join(sub_dim_vals[:5])
+                if len(sub_dim_vals) > 5:
+                    dim_preview += f'... (共{len(sub_dim_vals)}个)'
+                logger.info(f"  准备创建费用单：{len(sub_dim_vals)} 个{dim_label}，{len(fee_items)} 个费用明细项（维度={group_dimension}）")
+                logger.info(f"    包含{dim_label}: {dim_preview}")
+
+                result = await fee_mgmt.create_fee_order(
+                    submit_type=2,
+                    dimension=group_dimension,
+                    apportion_rule=2,
+                    is_request_pool=0,
+                    remark=f"Auto-{year_month}",
+                    fee_items=fee_items
+                )
+
+                if result:
+                    success_count += 1
+                    logger.info(f"  ✅ 费用单创建成功")
+                else:
+                    logger.warning(f"  ⚠️  整批失败，改为逐个重试（避免因1个无效MSKU拖累整批）")
+                    batch_label = f"{year_month} 店铺{shop_id}"
+                    ok, _skip, still_failed = await _retry_mskus_one_by_one(
+                        fee_mgmt, list(sub_dim_vals), shop_id, year_month,
+                        dim_fees, fee_type_ids, batch_label
+                    )
+                    success_count += ok
+                    if still_failed:
+                        error_msg = f"费用单逐个重试后仍失败 (年月={year_month}, 店铺ID={shop_id})"
+                        failed_groups.append({
+                            'year_month': year_month,
+                            'shop_id': shop_id,
+                            'batch_idx': None,
+                            'error': error_msg,
+                            'msku_count': len(still_failed),
+                            'fee_items_count': 0,
+                            'dim_values': still_failed,
+                            'dim_types': [1] * len(still_failed)
+                        })
+
                 await asyncio.sleep(REQUEST_DELAY)
-        else:
-            # 费用明细项数量在限制内，直接创建
-            result = await fee_mgmt.create_fee_order(
-                submit_type=2,  # 2=提交
-                dimension=1,  # 1=msku
-                apportion_rule=2,  # 2=按销量
-                is_request_pool=0,  # 0=否
-                remark=f"Auto-{year_month}",
-                fee_items=fee_items
-            )
-            
-            if result:
-                success_count += 1
-                logger.info(f"  ✅ 费用单创建成功")
-            else:
-                error_msg = f"费用单创建失败 (年月={year_month}, 店铺ID={shop_id})"
-                logger.error(f"  ❌ {error_msg}")
-                logger.error(f"  包含 {len(fee_items)} 个费用明细项")
-                # 记录失败但继续处理，不中断整个流程
-                failed_groups.append({
-                    'year_month': year_month,
-                    'shop_id': shop_id,
-                    'batch_idx': None,
-                    'error': error_msg,
-                    'fee_items_count': len(fee_items)
-                })
-                logger.warning(f"  ⚠️  费用单创建失败，但将继续处理后续数据（不中断）")
-            
-            await asyncio.sleep(REQUEST_DELAY)
     
     # 最终统计：验证所有店铺的数据是否都被处理
     processed_shops = set()
@@ -1391,12 +1611,28 @@ async def create_fee_orders_from_profit_report(
     # 报告创建失败的组
     if failed_groups:
         logger.error(f"\n  ❌ 错误：有 {len(failed_groups)} 个组创建失败（已记录但未中断流程）")
-        for fail in failed_groups[:20]:  # 显示前20个
-            if fail['batch_idx']:
-                logger.error(f"    年月={fail['year_month']}, 店铺ID={fail['shop_id']}, 批次={fail['batch_idx']}, 费用项数={fail['fee_items_count']}")
-            else:
-                logger.error(f"    年月={fail['year_month']}, 店铺ID={fail['shop_id']}, 费用项数={fail['fee_items_count']}")
+        for fail in failed_groups:
+            batch_info = f"批次={fail['batch_idx']}, " if fail.get('batch_idx') else ""
+            logger.error(f"    年月={fail['year_month']}, 店铺ID={fail['shop_id']}, {batch_info}MSKU数={fail.get('msku_count', 'N/A')}, 费用项数={fail['fee_items_count']}")
+            dim_values = fail.get('dim_values', [])
+            for dv in dim_values:
+                logger.error(f"      [MSKU] {dv}")
         logger.error(f"  ⚠️  请检查上述失败的组，可能需要手动重试")
+
+        # 汇总所有失败的MSKU（按店铺分组，去重）
+        failed_msku_by_shop: Dict[str, set] = {}
+        for fail in failed_groups:
+            sid = str(fail['shop_id'])
+            if sid not in failed_msku_by_shop:
+                failed_msku_by_shop[sid] = set()
+            for dv in fail.get('dim_values', []):
+                failed_msku_by_shop[sid].add(dv)
+
+        logger.error(f"\n  📋 失败MSKU汇总（共涉及 {len(failed_msku_by_shop)} 个店铺）：")
+        for sid, mskus in sorted(failed_msku_by_shop.items()):
+            logger.error(f"    店铺ID={sid}，共 {len(mskus)} 个MSKU：")
+            for msku in sorted(mskus):
+                logger.error(f"      {msku}")
     
     # 报告被跳过的组
     if skipped_groups:
@@ -1435,7 +1671,9 @@ async def create_fee_orders_from_profit_report(
     return success_count
 
 
-async def main(start_date: str = None, end_date: str = None, daily: bool = False):
+async def main(start_date: str = None, end_date: str = None, daily: bool = False,
+               filter_mskus: List[str] = None, filter_shop_ids: List[str] = None,
+               no_discard: bool = False):
     """
     主函数 - 从数据库读取利润报表并创建费用单（按月汇总）
     
@@ -1443,6 +1681,9 @@ async def main(start_date: str = None, end_date: str = None, daily: bool = False
         start_date: 开始日期，格式：Y-m-d，默认：上个月1号
         end_date: 结束日期，格式：Y-m-d，默认：上个月最后一天
         daily: 是否按天处理（已废弃，现在按月处理），默认：False
+        filter_mskus: 只处理指定的MSKU列表（为None时处理全部）
+        filter_shop_ids: 只处理指定的店铺ID列表（为None时处理全部）
+        no_discard: 是否跳过作废已有费用单的步骤
     """
     from datetime import datetime, date, timedelta
     from calendar import monthrange
@@ -1521,15 +1762,17 @@ async def main(start_date: str = None, end_date: str = None, daily: bool = False
         '汇损_id': 汇损_id
     }
     
-    # 步骤1: 作废已有费用单
-    await discard_existing_fee_orders(
-        fee_mgmt,
-        start_date,
-        end_date,
-        [商品成本附加费_id, 头程成本附加费_id, 头程费用_id, 汇损_id]
-    )
-    
-    await asyncio.sleep(REQUEST_DELAY)
+    # 步骤1: 作废已有费用单（补录模式下跳过）
+    if no_discard:
+        logger.info("步骤1: 跳过作废已有费用单（--no-discard 模式）")
+    else:
+        await discard_existing_fee_orders(
+            fee_mgmt,
+            start_date,
+            end_date,
+            [商品成本附加费_id, 头程成本附加费_id, 头程费用_id, 汇损_id]
+        )
+        await asyncio.sleep(REQUEST_DELAY)
     
     # 步骤2: 从数据库读取利润报表数据（按月汇总）
     logger.info("=" * 80)
@@ -1541,6 +1784,23 @@ async def main(start_date: str = None, end_date: str = None, daily: bool = False
     if not profit_data:
         logger.warning("⚠️  未找到需要创建费用单的数据")
         return
+    
+    # 按 MSKU / 店铺 过滤（补录模式）
+    if filter_mskus or filter_shop_ids:
+        before = len(profit_data)
+        msku_set = set(filter_mskus) if filter_mskus else None
+        shop_set = set(str(s) for s in filter_shop_ids) if filter_shop_ids else None
+        profit_data = [
+            r for r in profit_data
+            if (msku_set is None or r.get('MSKU', '').strip() in msku_set)
+            and (shop_set is None or str(r.get('店铺id', '')) in shop_set)
+        ]
+        logger.info(f"  过滤后剩余 {len(profit_data)}/{before} 条数据"
+                    f"（MSKU过滤: {len(msku_set) if msku_set else '无'}，"
+                    f"店铺过滤: {len(shop_set) if shop_set else '无'}）")
+        if not profit_data:
+            logger.warning("⚠️  过滤后无数据，请检查 --mskus / --shop-ids 参数")
+            return
     
     # 步骤3: 创建费用单
     success_count = await create_fee_orders_from_profit_report(
@@ -1640,8 +1900,17 @@ if __name__ == '__main__':
                        help='（已废弃）现在统一按月汇总处理')
     parser.add_argument('--discard-only', action='store_true',
                        help='仅作废费用单，不创建新费用单')
+    parser.add_argument('--mskus', type=str, default=None,
+                       help='只补录指定MSKU，多个用英文逗号分隔，例：MSKU1,MSKU2')
+    parser.add_argument('--shop-ids', type=str, default=None,
+                       help='只补录指定店铺ID，多个用英文逗号分隔，例：11545,11548')
+    parser.add_argument('--no-discard', action='store_true',
+                       help='跳过作废已有费用单步骤（补录缺失数据时使用）')
     
     args = parser.parse_args()
+    
+    filter_mskus = [m.strip() for m in args.mskus.split(',')] if args.mskus else None
+    filter_shop_ids = [s.strip() for s in args.shop_ids.split(',')] if args.shop_ids else None
     
     try:
         if args.discard_only:
@@ -1676,10 +1945,18 @@ if __name__ == '__main__':
             asyncio.run(discard_fee_orders_by_date_range(start_date, end_date))
         else:
             # 正常模式：创建费用单
-            asyncio.run(main(start_date=args.start_date, end_date=args.end_date, daily=args.daily))
+            asyncio.run(main(
+                start_date=args.start_date,
+                end_date=args.end_date,
+                daily=args.daily,
+                filter_mskus=filter_mskus,
+                filter_shop_ids=filter_shop_ids,
+                no_discard=args.no_discard,
+            ))
     except KeyboardInterrupt:
         logger.info("⚠️  任务被用户中断")
+        sys.exit(1)
     except Exception as e:
         logger.error(f"❌ 任务执行失败: {str(e)}", exc_info=True)
-        raise
+        sys.exit(1)
 

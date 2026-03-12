@@ -153,12 +153,14 @@ def process_box_info(box_data, shipment_id, sid, seller_name="", shipment_info=N
             if not qty:
                 continue
             
-            # 使用sku提取SPU（ZSY503-BE-S → ZSY503）
-            # 如果从MSKU获取，需要去掉前两个字符（ABZSY503 → ZSY503）
-            if sku:
-                spu = sku.split('-')[0]
-            elif raw_msku:
-                spu = raw_msku.split('-')[0][2:] if len(raw_msku.split('-')[0]) > 2 else raw_msku.split('-')[0]
+            # 优先从MSKU提取SPU，需要去掉前两个字符（LAZSY503-BKM-FBA → ZSY503）
+            # 如果没有MSKU，则从SKU提取（也去掉前两个字符）
+            if raw_msku:
+                first_part = raw_msku.split('-')[0]
+                spu = first_part[2:] if len(first_part) > 2 else first_part
+            elif sku:
+                first_part = sku.split('-')[0]
+                spu = first_part[2:] if len(first_part) > 2 else first_part
             else:
                 spu = ""
             fnsku = item.get("fulfillment_network_sku", "")
