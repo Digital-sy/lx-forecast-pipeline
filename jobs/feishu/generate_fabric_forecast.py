@@ -14,6 +14,10 @@
 - 米数每条: 从定制面料参数表获取
 - 库存量/条: 从仓库库存明细匹配面料颜色编号获取可用量
 - 库存量/米: 库存量/条 * 米数每条
+- 待到货量/条: 从仓库库存明细匹配面料颜色编号获取待到货量
+- 待到货量/米: 待到货量/条 * 米数每条
+- 预计总量/条: 库存量/条 + 待到货量/条
+- 预计总量/米: 预计总量/条 * 米数每条
 - 用量信息缺失SPU: 有SPU但面料单件用量为空的记录
 - 更新时间、创建时间
 """
@@ -563,60 +567,67 @@ def get_forecast_order_data() -> Dict[Tuple[str, str], int]:
     return dict(forecast_data)
 
 
-def get_inventory_data() -> Dict[str, int]:
+def get_inventory_data() -> Tuple[Dict[str, int], Dict[str, int]]:
     """
-    从仓库库存明细表获取可用量
+    从仓库库存明细表获取可用量和待到货量
     直接使用SKU作为面料颜色编号进行匹配
-    
+
     Returns:
-        Dict[str, int]: {面料颜色编号(完整SKU): 可用量}
+        Tuple[Dict[str, int], Dict[str, int]]: ({面料颜色编号: 可用量}, {面料颜色编号: 待到货量})
     """
     logger.info("正在从仓库库存明细表获取库存数据...")
-    
+
     inventory_data = defaultdict(int)
-    
+    pending_data = defaultdict(int)
+
     try:
         with db_cursor(dictionary=True) as cursor:
             # 检查表是否存在
             cursor.execute("""
-                SELECT COUNT(*) as cnt FROM information_schema.TABLES 
-                WHERE TABLE_SCHEMA = DATABASE() 
+                SELECT COUNT(*) as cnt FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA = DATABASE()
                 AND TABLE_NAME = '仓库库存明细'
             """)
             result = cursor.fetchone()
             if not result or result.get('cnt', 0) == 0:
                 logger.warning("仓库库存明细表不存在")
-                return dict(inventory_data)
-            
+                return dict(inventory_data), dict(pending_data)
+
             sql = """
-            SELECT 
+            SELECT
                 SKU,
-                SUM(可用量) as 总可用量
+                SUM(可用量) as 总可用量,
+                SUM(待到货量) as 总待到货量
             FROM `仓库库存明细`
-            WHERE SKU IS NOT NULL 
+            WHERE SKU IS NOT NULL
               AND SKU != ''
             GROUP BY SKU
             """
-            
+
             cursor.execute(sql)
             results = cursor.fetchall()
-            
+
             logger.info(f"  从仓库库存明细表读取到 {len(results)} 个SKU")
-            
+
             for row in results:
                 sku = row['SKU'].strip() if row['SKU'] else ''
-                quantity = int(row['总可用量']) if row['总可用量'] else 0
-                
-                if sku and quantity > 0:
+                available_qty = int(row['总可用量']) if row['总可用量'] else 0
+                pending_qty = int(row['总待到货量']) if row['总待到货量'] else 0
+
+                if sku:
                     # 直接使用完整的SKU作为面料颜色编号
                     # 例如: FAB-KNIT-JER-0017-BK
-                    inventory_data[sku] += quantity
-            
+                    if available_qty > 0:
+                        inventory_data[sku] += available_qty
+                    if pending_qty > 0:
+                        pending_data[sku] += pending_qty
+
             logger.info(f"  构建了 {len(inventory_data)} 个面料颜色编号的库存映射")
+            logger.info(f"  构建了 {len(pending_data)} 个面料颜色编号的待到货映射")
     except Exception as e:
         logger.error(f"从仓库库存明细表获取数据失败: {e}", exc_info=True)
-    
-    return dict(inventory_data)
+
+    return dict(inventory_data), dict(pending_data)
 
 
 def calculate_average_usage_for_fabric(
@@ -668,22 +679,22 @@ def generate_fabric_forecast(
     fabric_usage: Dict[Tuple[str, str], Dict[str, Any]],
     forecast_data: Dict[Tuple[str, str], int],
     inventory_data: Dict[str, int],
+    pending_data: Dict[str, int],
     product_name_map: Dict[str, str],
     color_map: Dict[str, str]
 ) -> List[Dict[str, Any]]:
     """
     生成面料预估数据
-    
+
     Args:
         fabric_params: 面料参数
         fabric_usage: 面料用量信息 {(SPU, 面料): {单件用量, 单件损耗}}
         forecast_data: 预计下单数据 {(成品SKU, 统计日期): 预计下单量}
-        inventory_data: 库存数据
+        inventory_data: 库存数据 {面料颜色编号: 可用量}
+        pending_data: 待到货数据 {面料颜色编号: 待到货量}
         product_name_map: 面料颜色编号到品名的映射
         color_map: 颜色缩写到颜色中文名的映射
-        inventory_data: 库存数据
-        product_name_map: 面料颜色编号到品名的映射
-        
+
     Returns:
         List[Dict[str, Any]]: 面料预估数据列表
     """
@@ -849,18 +860,30 @@ def generate_fabric_forecast(
         # 获取库存量/条(用面料颜色编号从仓库库存明细匹配SKU)
         # 直接使用总库存量,不计算平均值
         inventory_rolls = inventory_data.get(fabric_color_code, 0)
-        
+
         # 库存量/米 = 库存量/条 * 米数每条
         inventory_meters = inventory_rolls * meters_per_roll
-        
+
+        # 获取待到货量/条
+        pending_rolls = pending_data.get(fabric_color_code, 0)
+
+        # 待到货量/米 = 待到货量/条 * 米数每条
+        pending_meters = pending_rolls * meters_per_roll
+
         # 预计用量/条 = 预计用量 / 米数每条
         usage_per_roll = 0.0
         if meters_per_roll > 0:
             usage_per_roll = total_usage / meters_per_roll
-        
+
+        # 预计总量/条 = 库存量/条 + 待到货量/条
+        total_rolls = inventory_rolls + pending_rolls
+
+        # 预计总量/米 = 预计总量/条 * 米数每条
+        total_meters = total_rolls * meters_per_roll
+
         # 用量信息缺失SPU
         missing_spu_str = spu if usage_missing else ''
-        
+
         record = {
             'SKU': sku,
             'SPU': spu,
@@ -878,6 +901,10 @@ def generate_fabric_forecast(
             '预计用量/条': round(usage_per_roll, 2),
             '库存量/条': inventory_rolls,
             '库存量/米': round(inventory_meters, 2),
+            '待到货量/条': pending_rolls,
+            '待到货量/米': round(pending_meters, 2),
+            '预计总量/条': total_rolls,
+            '预计总量/米': round(total_meters, 2),
             '用量信息缺失SPU': missing_spu_str,
             '创建时间': current_time,
             '更新时间': current_time
@@ -913,8 +940,12 @@ def create_fabric_forecast_table_if_not_exists() -> None:
                 `预计用量/米` DOUBLE DEFAULT 0 COMMENT '预计下单量*(单件用量*单件损耗之和)',
                 `米数每条` DOUBLE DEFAULT 0 COMMENT '从定制面料参数表获取',
                 `预计用量/条` DOUBLE DEFAULT 0 COMMENT '预计用量/米数每条',
-                `库存量/条` DOUBLE DEFAULT 0 COMMENT '从仓库库存明细匹配面料颜色编号获取(多个SKU使用同一面料时均分)',
+                `库存量/条` DOUBLE DEFAULT 0 COMMENT '从仓库库存明细匹配面料颜色编号获取可用量',
                 `库存量/米` DOUBLE DEFAULT 0 COMMENT '库存量/条*米数每条',
+                `待到货量/条` DOUBLE DEFAULT 0 COMMENT '从仓库库存明细匹配面料颜色编号获取待到货量',
+                `待到货量/米` DOUBLE DEFAULT 0 COMMENT '待到货量/条*米数每条',
+                `预计总量/条` DOUBLE DEFAULT 0 COMMENT '库存量/条+待到货量/条',
+                `预计总量/米` DOUBLE DEFAULT 0 COMMENT '预计总量/条*米数每条',
                 `用量信息缺失SPU` TEXT COMMENT '有SPU但面料单件用量为空的SPU列表,逗号隔开',
                 `创建时间` DATETIME,
                 `更新时间` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -956,10 +987,11 @@ def insert_fabric_forecast_batch(data_list: List[Dict[str, Any]]) -> None:
             sql = """
             INSERT INTO `面料预估表` (
                 SKU, SPU, 面料, 面料品名, 面料编号, 颜色缩写, 颜色, 面料颜色编号, 统计日期, 月份,
-                预计下单件数, `预计用量/米`, 米数每条, `预计用量/条`, `库存量/条`, `库存量/米`, 
+                预计下单件数, `预计用量/米`, 米数每条, `预计用量/条`, `库存量/条`, `库存量/米`,
+                `待到货量/条`, `待到货量/米`, `预计总量/条`, `预计总量/米`,
                 用量信息缺失SPU, 创建时间, 更新时间
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 SPU = VALUES(SPU),
                 面料品名 = VALUES(面料品名),
@@ -974,13 +1006,17 @@ def insert_fabric_forecast_batch(data_list: List[Dict[str, Any]]) -> None:
                 `预计用量/条` = VALUES(`预计用量/条`),
                 `库存量/条` = VALUES(`库存量/条`),
                 `库存量/米` = VALUES(`库存量/米`),
+                `待到货量/条` = VALUES(`待到货量/条`),
+                `待到货量/米` = VALUES(`待到货量/米`),
+                `预计总量/条` = VALUES(`预计总量/条`),
+                `预计总量/米` = VALUES(`预计总量/米`),
                 用量信息缺失SPU = VALUES(用量信息缺失SPU),
                 更新时间 = VALUES(更新时间)
             """
-            
+
             batch_size = 200
             total_inserted = 0
-            
+
             for i in range(0, len(data_list), batch_size):
                 batch = data_list[i:i+batch_size]
                 values = [
@@ -1001,6 +1037,10 @@ def insert_fabric_forecast_batch(data_list: List[Dict[str, Any]]) -> None:
                         row.get('预计用量/条', 0.0),
                         row.get('库存量/条', 0),
                         row.get('库存量/米', 0.0),
+                        row.get('待到货量/条', 0),
+                        row.get('待到货量/米', 0.0),
+                        row.get('预计总量/条', 0),
+                        row.get('预计总量/米', 0.0),
                         row.get('用量信息缺失SPU', ''),
                         row.get('创建时间', ''),
                         row.get('更新时间', '')
@@ -1045,21 +1085,22 @@ def main():
             logger.warning("没有获取到预计下单数据")
             return
         
-        # 4. 获取库存数据
-        inventory_data = get_inventory_data()
-        
+        # 4. 获取库存数据和待到货数据
+        inventory_data, pending_data = get_inventory_data()
+
         # 5. 获取面料品名映射(从产品管理表)
         product_name_map = get_fabric_product_name_mapping()
-        
+
         # 6. 获取颜色映射(从颜色对照表)
         color_map = get_color_mapping()
-        
+
         # 7. 生成面料预估数据
         fabric_forecast_list = generate_fabric_forecast(
             fabric_params,
             fabric_usage,
             forecast_data,
             inventory_data,
+            pending_data,
             product_name_map,
             color_map
         )
@@ -1082,6 +1123,7 @@ def main():
         logger.info(f"面料用量信息: {len(fabric_usage)} 个SPU-面料组合")
         logger.info(f"预计下单SKU: {len(forecast_data)} 个")
         logger.info(f"库存SKU: {len(inventory_data)} 个")
+        logger.info(f"待到货SKU: {len(pending_data)} 个")
         logger.info(f"面料品名映射: {len(product_name_map)} 个")
         logger.info(f"生成面料预估记录: {len(fabric_forecast_list)} 条")
         
