@@ -114,7 +114,7 @@ fi
 
 echo ""
 echo "[2/4] 步骤2: 更新计算字段..."
-$PYTHON -m jobs.Sync_data.update_profit_report_calculated_fields
+$PYTHON -m jobs.Sync_data.update_profit_report_calculated_fields --start-date "$LAST_MONTH_START" --end-date "$TODAY"
 EXIT_CODE_2=$?
 
 if [ $EXIT_CODE_2 -ne 0 ]; then

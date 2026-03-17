@@ -48,15 +48,15 @@ EXCLUDED_SHOPS = {
 def parse_month_label(month_label: str) -> tuple:
     """
     解析月份标签，提取年份和月份
-    
+
     Args:
-        month_label: 月份标签，格式如 '26年1月预计下单量'
-        
+        month_label: 月份标签，格式如 '26年1月预计下单量(运营填写)' 或 '26年1月预计下单量'
+
     Returns:
         tuple: (year, month) 如 (2026, 1)，如果解析失败返回 None
     """
-    # 匹配格式：XX年X月预计下单量 或 XX年XX月预计下单量
-    pattern = r'(\d{2})年(\d{1,2})月预计下单量'
+    # 匹配格式：XX年X月预计下单量(运营填写) 或 XX年X月预计下单量（支持带或不带"(运营填写)"后缀）
+    pattern = r'(\d{2})年(\d{1,2})月预计下单量(?:\(运营填写\))?'
     match = re.match(pattern, month_label)
     
     if match:

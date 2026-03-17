@@ -154,36 +154,36 @@ def get_forecast_sales_labels(current_date: datetime = None) -> List[str]:
 def get_forecast_order_labels(current_date: datetime = None) -> List[str]:
     """
     生成包含本月在内的未来3个月的预计下单量字段标签
-    
+
     Args:
         current_date: 当前日期，如果为None则使用今天
-        
+
     Returns:
-        List[str]: 月份标签列表，格式如 ['26年1月预计下单量', '26年2月预计下单量', ...]
+        List[str]: 月份标签列表，格式如 ['26年1月预计下单量(运营填写)', '26年2月预计下单量(运营填写)', ...]
                    （包含本月，共3个月）
     """
     if current_date is None:
         current_date = datetime.now()
-    
+
     labels = []
     current_year = current_date.year
     current_month = current_date.month
-    
+
     for i in range(3):  # 包含本月在内的未来3个月
         # 计算目标月份（往后推i个月）
         target_month = current_month + i
         target_year = current_year
-        
+
         # 处理跨年情况
         while target_month > 12:
             target_month -= 12
             target_year += 1
-        
+
         # 格式化：取年份后两位 + 月份
         year_short = str(target_year)[-2:]
-        month_label = f"{year_short}年{target_month}月预计下单量"
+        month_label = f"{year_short}年{target_month}月预计下单量(运营填写)"
         labels.append(month_label)
-    
+
     return labels
 
 
@@ -962,29 +962,29 @@ def prepare_feishu_records(shop_data: Dict[str, Dict[str, Any]],
         if forecast_order_labels:
             for label in forecast_order_labels:
                 # 解析月份标签，生成统计日期
-                # 格式：XX年X月预计下单量 -> 2026-01-01
+                # 格式：XX年X月预计下单量(运营填写) -> 2026-01-01
                 default_value = 0
                 if order_forecast_data:
-                    # 解析月份标签
-                    pattern = r'(\d{2})年(\d{1,2})月预计下单量'
+                    # 解析月份标签（支持带或不带"(运营填写)"后缀）
+                    pattern = r'(\d{2})年(\d{1,2})月预计下单量(?:\(运营填写\))?'
                     match = re.match(pattern, label)
                     if match:
                         year_short = int(match.group(1))
                         month = int(match.group(2))
-                        
+
                         # 将两位年份转换为四位年份
                         if year_short < 50:
                             year = 2000 + year_short
                         else:
                             year = 1900 + year_short
-                        
+
                         # 生成统计日期（月份的第一天）
                         stat_date_str = f"{year}-{month:02d}-01"
-                        
+
                         # 从运营预计下单表获取预计下单量
                         key = (sku, stat_date_str)
                         default_value = order_forecast_data.get(key, 0)
-                
+
                 record[label] = default_value
         
         records.append(record)
