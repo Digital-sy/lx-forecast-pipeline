@@ -299,7 +299,91 @@ def get_color_mapping() -> Dict[str, str]:
     except Exception as e:
         logger.error(f"从颜色对照获取数据失败: {e}", exc_info=True)
     
+
     return color_map
+
+
+def normalize_str(val):
+    """统一清洗字符串"""
+    if val is None:
+        return ''
+    return str(val).strip().upper()
+
+
+def get_fabric_color_merge_mapping():
+    """
+    从【面料颜色归并对照】获取映射
+    返回:
+        {(面料编号, 原始颜色缩写): 归并颜色缩写}
+    """
+    logger.info("正在从面料颜色归并对照获取颜色归并映射...")
+
+    merge_map = {}
+
+    try:
+        with db_cursor(dictionary=True) as cursor:
+            cursor.execute("""
+                SELECT COUNT(*) as cnt
+                FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = '面料颜色归并对照'
+            """)
+            result = cursor.fetchone()
+            if not result or result.get('cnt', 0) == 0:
+                logger.warning("面料颜色归并对照不存在")
+                return merge_map
+
+            sql = """
+            SELECT
+                `面料编号`,
+                `原始颜色缩写`,
+                `归并颜色缩写`
+            FROM `面料颜色归并对照`
+            WHERE `面料编号` IS NOT NULL
+              AND `面料编号` != ''
+              AND `原始颜色缩写` IS NOT NULL
+              AND `原始颜色缩写` != ''
+              AND `归并颜色缩写` IS NOT NULL
+              AND `归并颜色缩写` != ''
+              AND `是否启用` = 1
+            """
+
+            cursor.execute(sql)
+            results = cursor.fetchall()
+
+            logger.info(f"  从面料颜色归并对照读取到 {len(results)} 条启用记录")
+
+            for row in results:
+                fabric_code = normalize_str(row.get('面料编号'))
+                raw_color_abbr = normalize_str(row.get('原始颜色缩写'))
+                merged_color_abbr = normalize_str(row.get('归并颜色缩写'))
+
+                if fabric_code and raw_color_abbr and merged_color_abbr:
+                    merge_map[(fabric_code, raw_color_abbr)] = merged_color_abbr
+
+            logger.info(f"  构建了 {len(merge_map)} 个【面料编号+原始颜色】归并映射")
+
+    except Exception as e:
+        logger.error(f"从面料颜色归并对照获取数据失败: {e}", exc_info=True)
+
+    return merge_map
+
+
+def get_merged_color_abbr(fabric_code, raw_color_abbr, fabric_color_merge_map):
+    """
+    根据【面料编号 + 原始颜色缩写】获取归并颜色缩写
+    如果没有配置，则返回原始颜色缩写
+    """
+    fabric_code_norm = normalize_str(fabric_code)
+    raw_color_abbr_norm = normalize_str(raw_color_abbr)
+
+    if not fabric_code_norm or not raw_color_abbr_norm:
+        return raw_color_abbr_norm
+
+    return fabric_color_merge_map.get(
+        (fabric_code_norm, raw_color_abbr_norm),
+        raw_color_abbr_norm
+    )
 
 
 def get_fabric_product_name_mapping() -> Dict[str, str]:
@@ -313,6 +397,11 @@ def get_fabric_product_name_mapping() -> Dict[str, str]:
     logger.info("正在从产品管理表获取面料品名映射...")
     
     product_name_map = {}
+    fabric_color_merge_map = get_fabric_color_merge_mapping()
+    raw_to_merged_code_map = {
+        f"{fabric_code}-{raw_color}": f"{fabric_code}-{merged_color}"
+        for (fabric_code, raw_color), merged_color in fabric_color_merge_map.items()
+    }
     
     try:
         with db_cursor(dictionary=True) as cursor:
@@ -349,10 +438,10 @@ def get_fabric_product_name_mapping() -> Dict[str, str]:
                 product_name = row['品名'].strip() if row['品名'] else ''
                 
                 if sku and product_name:
-                    # 直接使用完整的SKU作为key
-                    # 例如: FAB-KNIT-JER-0017-BK -> 013仿棉拉架-30#深黑
-                    if sku not in product_name_map:
-                        product_name_map[sku] = product_name
+                    merged_sku = raw_to_merged_code_map.get(sku, sku)
+                    # 使用归并后的面料颜色编号作为key
+                    if merged_sku not in product_name_map:
+                        product_name_map[merged_sku] = product_name
             
             logger.info(f"  构建了 {len(product_name_map)} 个面料颜色编号的品名映射")
     except Exception as e:
@@ -579,6 +668,11 @@ def get_inventory_data() -> Tuple[Dict[str, int], Dict[str, int]]:
 
     inventory_data = defaultdict(int)
     pending_data = defaultdict(int)
+    fabric_color_merge_map = get_fabric_color_merge_mapping()
+    raw_to_merged_code_map = {
+        f"{fabric_code}-{raw_color}": f"{fabric_code}-{merged_color}"
+        for (fabric_code, raw_color), merged_color in fabric_color_merge_map.items()
+    }
 
     try:
         with db_cursor(dictionary=True) as cursor:
@@ -615,12 +709,12 @@ def get_inventory_data() -> Tuple[Dict[str, int], Dict[str, int]]:
                 pending_qty = int(row['总待到货量']) if row['总待到货量'] else 0
 
                 if sku:
-                    # 直接使用完整的SKU作为面料颜色编号
-                    # 例如: FAB-KNIT-JER-0017-BK
+                    merged_sku = raw_to_merged_code_map.get(sku, sku)
+                    # 使用归并后的面料颜色编号进行汇总
                     if available_qty > 0:
-                        inventory_data[sku] += available_qty
+                        inventory_data[merged_sku] += available_qty
                     if pending_qty > 0:
-                        pending_data[sku] += pending_qty
+                        pending_data[merged_sku] += pending_qty
 
             logger.info(f"  构建了 {len(inventory_data)} 个面料颜色编号的库存映射")
             logger.info(f"  构建了 {len(pending_data)} 个面料颜色编号的待到货映射")
@@ -700,6 +794,8 @@ def generate_fabric_forecast(
     """
     logger.info("正在生成面料预估数据...")
     
+    fabric_color_merge_map = get_fabric_color_merge_mapping()
+    
     # 用于存储每个SKU+面料+统计日期的数据
     sku_fabric_data = []
     
@@ -749,8 +845,9 @@ def generate_fabric_forecast(
                 skipped_count += 1
                 continue
             
-            # 面料颜色编号 = 定制面料参数表的面料编号-颜色缩写
-            fabric_color_code = f"{fabric_code}-{color_abbr}"
+            # 先按【面料编号 + 原始颜色缩写】进行归并，再生成面料颜色编号
+            merged_color_abbr = get_merged_color_abbr(fabric_code, color_abbr, fabric_color_merge_map)
+            fabric_color_code = f"{fabric_code}-{merged_color_abbr}"
             
             # 获取单件用量和单件损耗
             unit_usage = usage_data.get('单件用量')
@@ -801,7 +898,9 @@ def generate_fabric_forecast(
                 'SPU': spu,
                 '面料': fabric_name,
                 '面料编号': fabric_code,
-                '颜色缩写': color_abbr,
+                '原始颜色缩写': color_abbr,
+                '颜色缩写': merged_color_abbr,
+                '归并颜色缩写': merged_color_abbr,
                 '面料颜色编号': fabric_color_code,
                 '统计日期': stat_date,
                 '预计下单件数': forecast_quantity,
@@ -818,21 +917,27 @@ def generate_fabric_forecast(
         logger.info(f"  使用平均值填充了 {filled_with_avg_count} 个缺失用量信息的SPU+面料组合")
     logger.info(f"  生成了 {len(sku_fabric_data)} 条SKU+面料记录")
     
-    # 构建最终结果
+    # 明细表：不做聚合，逐条输出
+    # 但库存/待到货只能在同一【归并面料颜色编号 + 统计日期】的第一条明细上挂载，避免 BI 汇总时重复累计
     result_list = []
     current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    assigned_inventory_keys = set()
     
     for idx, data in enumerate(sku_fabric_data):
         sku = data['SKU']
         spu = data['SPU']
         fabric_name = data['面料']
         fabric_code = data['面料编号']
-        color_abbr = data['颜色缩写']
+        original_color_abbr = data.get('原始颜色缩写', '')
+        merged_color_abbr = data.get('归并颜色缩写', data['颜色缩写'])
+        color_abbr = merged_color_abbr
+        original_fabric_color_code = f"{fabric_code}-{original_color_abbr}" if original_color_abbr else ''
         fabric_color_code = data['面料颜色编号']
+        merged_fabric_color_code = fabric_color_code
         stat_date_str = data['统计日期']
         forecast_quantity = data['预计下单件数']
         total_usage = data['预计用量/米']
-        usage_missing = data['用量信息缺失']
+        usage_missing = data.get('用量信息缺失', False)
         
         # 面料品名 = 用面料颜色编号匹配产品管理表的SKU得到的品名
         fabric_product_name = product_name_map.get(fabric_color_code, '')
@@ -857,15 +962,19 @@ def generate_fabric_forecast(
         if fabric_name and fabric_name in fabric_params:
             meters_per_roll = fabric_params[fabric_name].get('米数每条', 0.0)
         
-        # 获取库存量/条(用面料颜色编号从仓库库存明细匹配SKU)
-        # 直接使用总库存量,不计算平均值
-        inventory_rolls = inventory_data.get(fabric_color_code, 0)
+        # 获取库存量/条 / 待到货量/条
+        # 明细表中，同一【归并面料颜色编号 + 统计日期】只在第一条明细记录上挂载库存/待到货
+        inventory_key = (fabric_color_code, str(stat_date_str))
+        if inventory_key not in assigned_inventory_keys:
+            inventory_rolls = inventory_data.get(fabric_color_code, 0)
+            pending_rolls = pending_data.get(fabric_color_code, 0)
+            assigned_inventory_keys.add(inventory_key)
+        else:
+            inventory_rolls = 0
+            pending_rolls = 0
 
         # 库存量/米 = 库存量/条 * 米数每条
         inventory_meters = inventory_rolls * meters_per_roll
-
-        # 获取待到货量/条
-        pending_rolls = pending_data.get(fabric_color_code, 0)
 
         # 待到货量/米 = 待到货量/条 * 米数每条
         pending_meters = pending_rolls * meters_per_roll
@@ -890,8 +999,12 @@ def generate_fabric_forecast(
             '面料': fabric_name,
             '面料品名': fabric_product_name,
             '面料编号': fabric_code,
+            '原始颜色缩写': original_color_abbr,
+            '归并颜色缩写': merged_color_abbr,
             '颜色缩写': color_abbr,
             '颜色': color_name,
+            '原始面料颜色编号': original_fabric_color_code,
+            '归并面料颜色编号': merged_fabric_color_code,
             '面料颜色编号': fabric_color_code,
             '统计日期': stat_date_str,
             '月份': month_str,
@@ -931,9 +1044,13 @@ def create_fabric_forecast_table_if_not_exists() -> None:
                 `面料` VARCHAR(500) COMMENT '面料名称',
                 `面料品名` VARCHAR(500) COMMENT '面料-颜色缩写',
                 `面料编号` VARCHAR(500) COMMENT 'SKU去掉最后一个-之后的字符',
-                `颜色缩写` VARCHAR(100) COMMENT 'SKU第一个-和第二个-之间的字符(去掉LONG/SHORT)',
+                `原始颜色缩写` VARCHAR(500) COMMENT '参与归并前的原始颜色缩写,多个时逗号分隔',
+                `归并颜色缩写` VARCHAR(100) COMMENT '参与统计聚合的归并颜色缩写',
+                `颜色缩写` VARCHAR(100) COMMENT '兼容旧字段,等于归并颜色缩写',
                 `颜色` VARCHAR(100) COMMENT '颜色中文名,从颜色对照匹配',
-                `面料颜色编号` VARCHAR(500) COMMENT '面料编号-颜色缩写',
+                `原始面料颜色编号` VARCHAR(1000) COMMENT '参与归并前的原始面料颜色编号,多个时逗号分隔',
+                `归并面料颜色编号` VARCHAR(500) COMMENT '参与统计聚合的归并面料颜色编号',
+                `面料颜色编号` VARCHAR(500) COMMENT '兼容旧字段,等于归并面料颜色编号',
                 `统计日期` DATE COMMENT '统计日期,为当月1号',
                 `月份` VARCHAR(20) COMMENT '月份,格式:25-06',
                 `预计下单件数` INT DEFAULT 0 COMMENT '从运营预计下单表获取',
@@ -954,7 +1071,10 @@ def create_fabric_forecast_table_if_not_exists() -> None:
                 INDEX idx_fabric (`面料`(100)),
                 INDEX idx_fabric_product_name (`面料品名`(100)),
                 INDEX idx_fabric_code (`面料编号`(100)),
+                INDEX idx_original_color_abbr (`原始颜色缩写`(100)),
+                INDEX idx_merged_color_abbr (`归并颜色缩写`(100)),
                 INDEX idx_fabric_color_code (`面料颜色编号`(100)),
+                INDEX idx_merged_fabric_color_code (`归并面料颜色编号`(100)),
                 INDEX idx_stat_date (`统计日期`),
                 INDEX idx_month (`月份`),
                 UNIQUE KEY uk_sku_fabric_date (`SKU`, `面料`(100), `统计日期`)
@@ -986,18 +1106,23 @@ def insert_fabric_forecast_batch(data_list: List[Dict[str, Any]]) -> None:
         with db_cursor(dictionary=False) as cursor:
             sql = """
             INSERT INTO `面料预估表` (
-                SKU, SPU, 面料, 面料品名, 面料编号, 颜色缩写, 颜色, 面料颜色编号, 统计日期, 月份,
+                SKU, SPU, 面料, 面料品名, 面料编号, 原始颜色缩写, 归并颜色缩写, 颜色缩写, 颜色,
+                原始面料颜色编号, 归并面料颜色编号, 面料颜色编号, 统计日期, 月份,
                 预计下单件数, `预计用量/米`, 米数每条, `预计用量/条`, `库存量/条`, `库存量/米`,
                 `待到货量/条`, `待到货量/米`, `预计总量/条`, `预计总量/米`,
                 用量信息缺失SPU, 创建时间, 更新时间
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 SPU = VALUES(SPU),
                 面料品名 = VALUES(面料品名),
                 面料编号 = VALUES(面料编号),
+                原始颜色缩写 = VALUES(原始颜色缩写),
+                归并颜色缩写 = VALUES(归并颜色缩写),
                 颜色缩写 = VALUES(颜色缩写),
                 颜色 = VALUES(颜色),
+                原始面料颜色编号 = VALUES(原始面料颜色编号),
+                归并面料颜色编号 = VALUES(归并面料颜色编号),
                 面料颜色编号 = VALUES(面料颜色编号),
                 月份 = VALUES(月份),
                 预计下单件数 = VALUES(预计下单件数),
@@ -1026,8 +1151,12 @@ def insert_fabric_forecast_batch(data_list: List[Dict[str, Any]]) -> None:
                         row.get('面料', ''),
                         row.get('面料品名', ''),
                         row.get('面料编号', ''),
+                        row.get('原始颜色缩写', ''),
+                        row.get('归并颜色缩写', ''),
                         row.get('颜色缩写', ''),
                         row.get('颜色', ''),
+                        row.get('原始面料颜色编号', ''),
+                        row.get('归并面料颜色编号', ''),
                         row.get('面料颜色编号', ''),
                         row.get('统计日期', ''),
                         row.get('月份', ''),
