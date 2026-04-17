@@ -169,7 +169,7 @@ def get_forecast_order_labels(current_date: datetime = None) -> List[str]:
     current_year = current_date.year
     current_month = current_date.month
 
-    for i in range(3):  # 包含本月在内的未来3个月
+    for i in range(4):  # 包含本月在内的未来4个月
         # 计算目标月份（往后推i个月）
         target_month = current_month + i
         target_year = current_year
