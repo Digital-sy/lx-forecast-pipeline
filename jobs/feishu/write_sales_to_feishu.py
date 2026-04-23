@@ -23,6 +23,7 @@ if str(project_root) not in sys.path:
 from common import settings, get_logger
 from common.database import db_cursor
 from common.feishu import FeishuClient
+from jobs.feishu.forecast_sales_improved import compute_forecast_for_shop  # ← 新增
 
 logger = get_logger('feishu_write_sales')
 
@@ -881,24 +882,17 @@ def prepare_feishu_records(shop_data: Dict[str, Dict[str, Any]],
     """
     if current_date is None:
         current_date = datetime.now()
-    
-    # 计算上个月和上个月的去年同期
-    current_year = current_date.year
-    current_month = current_date.month
-    
-    last_month = current_month - 1
-    last_month_year = current_year
-    if last_month < 1:
-        last_month += 12
-        last_month_year -= 1
-    
-    last_month_yoy_year = last_month_year - 1
-    last_month_yoy_month = last_month
-    
-    # 生成月份标签
-    last_month_label = f"{str(last_month_year)[-2:]}年{last_month}月销量"
-    last_month_yoy_label = f"{str(last_month_yoy_year)[-2:]}年{last_month_yoy_month}月销量"
-    
+
+    # ── 改进版预计销量：一次性算完所有 SKU ──────────────────────────────
+    # 用新算法预先计算本店铺所有 SKU 的趋势因子、预计销量、预测方法
+    forecast_result = {}
+    if forecast_sales_labels:
+        forecast_result = compute_forecast_for_shop(
+            shop_data, forecast_sales_labels, current_date
+        )
+        logger.debug(f"改进版预计销量计算完成，共 {len(forecast_result)} 个SKU")
+    # ────────────────────────────────────────────────────────────────────
+
     records = []
     
     for sku, sku_data in shop_data.items():
@@ -921,42 +915,15 @@ def prepare_feishu_records(shop_data: Dict[str, Dict[str, Any]],
         # 为每个月份字段填充销量，如果没有数据则为0
         for month_label in month_labels:
             record[month_label] = sku_data.get(month_label, 0) or 0
-        
-        # 计算趋势因子：上个月销量 / 上个月去年同期销量
-        last_month_sales = sku_data.get(last_month_label, 0) or 0
-        last_month_yoy_sales = sku_data.get(last_month_yoy_label, 0) or 0
-        
-        if last_month_yoy_sales > 0:
-            trend_factor = last_month_sales / last_month_yoy_sales
-        else:
-            trend_factor = 0.0
-        
-        record['趋势因子'] = round(trend_factor, 2) if trend_factor > 0 else 0.0
-        
-        # 添加预计销量字段（默认值 = 去年同期销量 × 趋势因子）
+
+        # ── 写入改进版预计销量结果 ────────────────────────────────────────
+        sku_forecast = forecast_result.get(sku, {})
+        record['趋势因子'] = sku_forecast.get('趋势因子', 0.0)
+        record['预测方法'] = sku_forecast.get('预测方法', '')
         if forecast_sales_labels:
-            for i, label in enumerate(forecast_sales_labels):
-                # 计算对应的去年同期月份
-                forecast_month = current_month + i
-                forecast_year = current_year
-                while forecast_month > 12:
-                    forecast_month -= 12
-                    forecast_year += 1
-                
-                yoy_month = forecast_month
-                yoy_year = forecast_year - 1
-                yoy_label = f"{str(yoy_year)[-2:]}年{yoy_month}月销量"
-                
-                # 获取去年同期销量
-                yoy_sales = sku_data.get(yoy_label, 0) or 0
-                
-                # 计算预计销量 = 去年同期销量 × 趋势因子
-                if yoy_sales > 0 and trend_factor > 0:
-                    forecast_sales = int(yoy_sales * trend_factor)
-                else:
-                    forecast_sales = 0
-                
-                record[label] = forecast_sales
+            for label in forecast_sales_labels:
+                record[label] = sku_forecast.get(label, 0)
+        # ─────────────────────────────────────────────────────────────────
         
         # 添加预计下单量字段（从运营预计下单表获取默认值）
         if forecast_order_labels:
@@ -1039,7 +1006,10 @@ async def process_shop_data(shop_name: str,
         # 添加预计销量字段（未来4个月）
         for label in forecast_sales_labels:
             field_list.append({'name': label, 'type': 'number'})
-        # 添加预计下单量字段（未来3个月）
+        # ── 新增：预测方法字段（文字说明用了哪一级预测逻辑） ─────────────
+        field_list.append({'name': '预测方法', 'type': 'text'})
+        # ─────────────────────────────────────────────────────────────────
+        # 添加预计下单量字段（未来4个月）
         for label in forecast_order_labels:
             field_list.append({'name': label, 'type': 'number'})
         
@@ -1340,4 +1310,3 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
-
