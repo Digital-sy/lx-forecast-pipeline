@@ -293,6 +293,49 @@ def filter_skus_by_spu_sales(aggregated_data: Dict[str, Dict[str, Dict[str, Any]
     return filtered_data
 
 
+def filter_skus_by_recent_zero_sales(
+    aggregated_data: Dict[str, Dict[str, Dict[str, Any]]],
+    current_date: datetime = None,
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """
+    SKU 级别过滤：近3个月销量全部为0的SKU直接移除。
+
+    注意：这是在 filter_skus_by_spu_sales（SPU级过滤）之后执行的第二道过滤，
+    粒度更细，专门去掉已停售/断货的尾部SKU，避免撑大飞书表格。
+
+    Args:
+        aggregated_data: 已经过SPU级过滤的数据
+        current_date:    基准日期，默认今天
+
+    Returns:
+        Dict: 过滤后的数据
+    """
+    if current_date is None:
+        current_date = datetime.now()
+
+    recent_labels = get_recent_3_months_labels(current_date)
+    logger.info(f"近3月销量过滤：判断月份为 {', '.join(recent_labels)}")
+
+    filtered_data = {}
+    kept = 0
+    removed = 0
+
+    for shop_name, shop_data in aggregated_data.items():
+        filtered_shop = {}
+        for sku, sku_data in shop_data.items():
+            recent_total = sum(sku_data.get(label, 0) or 0 for label in recent_labels)
+            if recent_total > 0:
+                filtered_shop[sku] = sku_data
+                kept += 1
+            else:
+                removed += 1
+        if filtered_shop:
+            filtered_data[shop_name] = filtered_shop
+
+    logger.info(f"近3月销量过滤完成：保留 {kept} 个SKU，移除 {removed} 个近3月销量全为0的SKU")
+    return filtered_data
+
+
 def remove_psc_pattern(sku: str) -> str:
     """
     去除SKU中的"数字+PSC/PCS"模式（例如：4PSC, 1PCS, 10PSC等）
@@ -860,6 +903,84 @@ def aggregate_sales_by_shop_and_sku(data: List[Dict[str, Any]],
     return result
 
 
+def get_fabric_type_by_spu() -> Dict[str, str]:
+    """
+    查询数据库，为每个 SPU 判断面料类型：定制面料 / 现货面料。
+
+    判断逻辑：
+      1. 从「面料核价表」读取所有 (SPU, 面料, 单件用量)
+      2. 从「定制面料参数」读取所有定制面料名称
+      3. 对每个 SPU：
+         - 若所有面料都不在定制面料参数表 → 现货面料
+         - 若有定制面料 → 按单件用量最大的那个面料决定类型
+           （最大用量的面料是定制 → 定制面料，否则 → 现货面料）
+
+    Returns:
+        Dict[str, str]: {SPU: '定制面料' | '现货面料'}
+    """
+    fabric_type_map: Dict[str, str] = {}
+
+    try:
+        with db_cursor() as cursor:
+            # ── Step1：读取定制面料参数表，获取所有定制面料名称 ────────────
+            cursor.execute("""
+                SELECT COUNT(*) as cnt FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA = DATABASE()
+                AND TABLE_NAME = '定制面料参数'
+            """)
+            if not cursor.fetchone().get('cnt', 0):
+                logger.warning("定制面料参数表不存在，所有SKU标记为现货面料")
+                return fabric_type_map
+
+            cursor.execute("SELECT DISTINCT 面料 FROM `定制面料参数` WHERE 面料 IS NOT NULL AND 面料 != ''")
+            custom_fabrics = {row['面料'].strip() for row in cursor.fetchall()}
+            logger.info(f"定制面料参数表中共 {len(custom_fabrics)} 种定制面料")
+
+            # ── Step2：读取面料核价表，获取 SPU→面料→用量 ────────────────
+            cursor.execute("""
+                SELECT COUNT(*) as cnt FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA = DATABASE()
+                AND TABLE_NAME = '面料核价表'
+            """)
+            if not cursor.fetchone().get('cnt', 0):
+                logger.warning("面料核价表不存在，所有SKU标记为现货面料")
+                return fabric_type_map
+
+            cursor.execute("""
+                SELECT SPU, 面料, COALESCE(单件用量, 0) as 单件用量
+                FROM `面料核价表`
+                WHERE SPU IS NOT NULL AND SPU != ''
+                  AND 面料 IS NOT NULL AND 面料 != ''
+            """)
+            rows = cursor.fetchall()
+
+        # ── Step3：按 SPU 聚合，找用量最大的面料 ─────────────────────────
+        # spu_fabrics: {SPU: [(单件用量, 面料名), ...]}
+        from collections import defaultdict
+        spu_fabrics: Dict[str, list] = defaultdict(list)
+        for row in rows:
+            spu = (row.get('SPU') or '').strip()
+            fabric = (row.get('面料') or '').strip()
+            usage = float(row.get('单件用量') or 0)
+            if spu and fabric:
+                spu_fabrics[spu].append((usage, fabric))
+
+        for spu, fabric_list in spu_fabrics.items():
+            # 找用量最大的面料（用量相同取第一个）
+            fabric_list.sort(key=lambda x: x[0], reverse=True)
+            dominant_fabric = fabric_list[0][1]
+            fabric_type_map[spu] = '定制面料' if dominant_fabric in custom_fabrics else '现货面料'
+
+        custom_count = sum(1 for v in fabric_type_map.values() if v == '定制面料')
+        stock_count = len(fabric_type_map) - custom_count
+        logger.info(f"面料类型判断完成：{custom_count} 个SPU为定制面料，{stock_count} 个SPU为现货面料")
+
+    except Exception as e:
+        logger.warning(f"获取面料类型失败: {e}，所有SKU将标记为现货面料")
+
+    return fabric_type_map
+
+
 def prepare_feishu_records(shop_data: Dict[str, Dict[str, Any]], 
                            month_labels: List[str],
                            forecast_sales_labels: List[str] = None,
@@ -891,6 +1012,9 @@ def prepare_feishu_records(shop_data: Dict[str, Dict[str, Any]],
             shop_data, forecast_sales_labels, current_date
         )
         logger.debug(f"改进版预计销量计算完成，共 {len(forecast_result)} 个SKU")
+
+    # ── 面料类型：一次性查完整个 SPU 映射 ───────────────────────────────
+    fabric_type_map = get_fabric_type_by_spu()
     # ────────────────────────────────────────────────────────────────────
 
     records = []
@@ -907,6 +1031,10 @@ def prepare_feishu_records(shop_data: Dict[str, Dict[str, Any]],
         # 添加运营字段（从产品信息表获取，如果没有则默认为空字符串）
         operation = sku_data.get('运营', '')
         record['运营'] = operation if operation else ''
+
+        # ── 面料类型：按 SPU 查映射，查不到默认现货面料 ──────────────────
+        record['面料类型'] = fabric_type_map.get(spu, '现货面料') if spu else '现货面料'
+        # ─────────────────────────────────────────────────────────────────
         
         # 添加总库存字段（从库存预估表获取，如果没有则默认为0）
         total_inventory = sku_data.get('总库存', 0)
@@ -996,6 +1124,7 @@ async def process_shop_data(shop_name: str,
             {'name': 'SKU', 'type': 'text'},
             {'name': 'SPU', 'type': 'text'},
             {'name': '运营', 'type': 'text'},
+            {'name': '面料类型', 'type': 'text'},   # ← 新增
             {'name': '总库存', 'type': 'number'}
         ]
         # 添加历史销量字段
@@ -1252,6 +1381,14 @@ async def main():
     
     if not filtered_by_sales:
         logger.warning("过滤后没有需要处理的数据（所有SPU在所有查询月份的总销量都为0）")
+        return
+
+    # 近3月销量过滤：移除近3个月销量全部为0的SKU
+    logger.info(f"\n正在过滤近3个月销量全为0的SKU...")
+    filtered_by_sales = filter_skus_by_recent_zero_sales(filtered_by_sales, current_date)
+
+    if not filtered_by_sales:
+        logger.warning("近3月过滤后没有需要处理的数据")
         return
     
     # 过滤掉需要排除的店铺
