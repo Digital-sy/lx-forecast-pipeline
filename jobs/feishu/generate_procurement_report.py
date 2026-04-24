@@ -466,6 +466,17 @@ def save_order_suggest(records: List[Dict[str, Any]], month_order: List[str]) ->
         """)
         cursor.execute(f"TRUNCATE TABLE `{TABLE_ORDER_SUGGEST}`")
 
+        # 兜底：确保新增字段存在（表已存在时 CREATE IF NOT EXISTS 不会加列）
+        safe_alters = [
+            f"ALTER TABLE `{TABLE_ORDER_SUGGEST}` ADD COLUMN IF NOT EXISTS `工厂` VARCHAR(200) NOT NULL DEFAULT '' AFTER `店铺`",
+            f"ALTER TABLE `{TABLE_ORDER_SUGGEST}` ADD COLUMN IF NOT EXISTS `运营预计合计` INT NOT NULL DEFAULT 0 AFTER `系统预测合计`",
+        ]
+        for sql_alter in safe_alters:
+            try:
+                cursor.execute(sql_alter)
+            except Exception:
+                pass  # 字段已存在时忽略
+
         if not records:
             return
 
