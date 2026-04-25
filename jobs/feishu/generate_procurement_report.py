@@ -390,7 +390,7 @@ def build_reports(
             '工厂':           factory_map.get((spu, shop), ''),
             '面料类型':       fabric_type,
             '覆盖月数':       n_months,
-            '系统预测合计':   total_4m_forecast,   # 改为4个月全量，与摊平逻辑一致
+            '建议下单合计':   suggested,   # 等于各月建议下单之和，和列头一致
             '运营预计合计':   op_total,
             '库存':           stock,
             '待到货':         pending,
@@ -439,20 +439,20 @@ def save_order_suggest(records: List[Dict[str, Any]], month_order: List[str]) ->
         )
         cursor.execute(f"""
             CREATE TABLE IF NOT EXISTS `{TABLE_ORDER_SUGGEST}` (
-                `id`           INT AUTO_INCREMENT PRIMARY KEY,
-                `SPU`          VARCHAR(200) NOT NULL,
-                `店铺`         VARCHAR(200) NOT NULL,
-                `工厂`         VARCHAR(200) NOT NULL DEFAULT '',
-                `面料类型`     VARCHAR(20)  NOT NULL,
-                `覆盖月数`     TINYINT      NOT NULL,
-                `系统预测合计` INT          NOT NULL DEFAULT 0,
-                `运营预计合计` INT          NOT NULL DEFAULT 0,
-                `库存`         INT          NOT NULL DEFAULT 0,
-                `待到货`       INT          NOT NULL DEFAULT 0,
-                `建议下单量`   INT          NOT NULL DEFAULT 0,
+                `id`             INT AUTO_INCREMENT PRIMARY KEY,
+                `SPU`            VARCHAR(200) NOT NULL,
+                `店铺`           VARCHAR(200) NOT NULL,
+                `工厂`           VARCHAR(200) NOT NULL DEFAULT '',
+                `面料类型`       VARCHAR(20)  NOT NULL,
+                `覆盖月数`       TINYINT      NOT NULL,
+                `建议下单合计`   INT          NOT NULL DEFAULT 0,
+                `运营预计合计`   INT          NOT NULL DEFAULT 0,
+                `库存`           INT          NOT NULL DEFAULT 0,
+                `待到货`         INT          NOT NULL DEFAULT 0,
+                `建议下单量`     INT          NOT NULL DEFAULT 0,
                 {month_cols}
-                `更新时间`     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
-                                           ON UPDATE CURRENT_TIMESTAMP,
+                `更新时间`       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                             ON UPDATE CURRENT_TIMESTAMP,
                 UNIQUE KEY uk_spu_shop (`SPU`, `店铺`),
                 INDEX idx_fabric_type (`面料类型`)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -460,16 +460,19 @@ def save_order_suggest(records: List[Dict[str, Any]], month_order: List[str]) ->
         """)
         cursor.execute(f"TRUNCATE TABLE `{TABLE_ORDER_SUGGEST}`")
 
-        # 兜底：确保新增字段存在（表已存在时 CREATE IF NOT EXISTS 不会加列）
+        # 兜底：确保字段存在（表已存在时 CREATE IF NOT EXISTS 不会加列）
         safe_alters = [
             f"ALTER TABLE `{TABLE_ORDER_SUGGEST}` ADD COLUMN IF NOT EXISTS `工厂` VARCHAR(200) NOT NULL DEFAULT '' AFTER `店铺`",
-            f"ALTER TABLE `{TABLE_ORDER_SUGGEST}` ADD COLUMN IF NOT EXISTS `运营预计合计` INT NOT NULL DEFAULT 0 AFTER `系统预测合计`",
+            f"ALTER TABLE `{TABLE_ORDER_SUGGEST}` ADD COLUMN IF NOT EXISTS `建议下单合计` INT NOT NULL DEFAULT 0 AFTER `覆盖月数`",
+            f"ALTER TABLE `{TABLE_ORDER_SUGGEST}` ADD COLUMN IF NOT EXISTS `运营预计合计` INT NOT NULL DEFAULT 0 AFTER `建议下单合计`",
+            # 兼容旧表：把旧字段系统预测合计改名（若存在）
+            f"ALTER TABLE `{TABLE_ORDER_SUGGEST}` CHANGE COLUMN IF EXISTS `系统预测合计` `建议下单合计` INT NOT NULL DEFAULT 0",
         ]
         for sql_alter in safe_alters:
             try:
                 cursor.execute(sql_alter)
             except Exception:
-                pass  # 字段已存在时忽略
+                pass
 
         if not records:
             return
@@ -481,7 +484,7 @@ def save_order_suggest(records: List[Dict[str, Any]], month_order: List[str]) ->
         sql = f"""
             INSERT INTO `{TABLE_ORDER_SUGGEST}`
                 (`SPU`, `店铺`, `工厂`, `面料类型`, `覆盖月数`,
-                 `系统预测合计`, `运营预计合计`, `库存`, `待到货`, `建议下单量`,
+                 `建议下单合计`, `运营预计合计`, `库存`, `待到货`, `建议下单量`,
                  {month_col_names})
             VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s,%s, {month_placeholders})
         """
@@ -492,7 +495,7 @@ def save_order_suggest(records: List[Dict[str, Any]], month_order: List[str]) ->
                 month_vals += [r.get(f'{m}运营预计', 0), r.get(f'{m}建议下单', 0)]
             rows.append((
                 r['SPU'], r['店铺'], r['工厂'], r['面料类型'], r['覆盖月数'],
-                r['系统预测合计'], r['运营预计合计'], r['库存'], r['待到货'], r['建议下单量'],
+                r['建议下单合计'], r['运营预计合计'], r['库存'], r['待到货'], r['建议下单量'],
                 *month_vals,
             ))
         BATCH = 500
