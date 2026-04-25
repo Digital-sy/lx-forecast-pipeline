@@ -26,34 +26,21 @@ echo "开始时间: $START_TIME" >> "$LOG_FILE"
 send_feishu_error() {
     local step="$1"
     local exit_code="$2"
-    $PYTHON -c "
-import sys
-sys.path.insert(0, '$PROJECT_DIR')
-try:
-    from common.feishu import send_error_message
-    send_error_message(
-        error_type='采购流水线失败',
-        file_name='run_procurement_pipeline.sh',
-        line_number=0,
-        func_name='$step',
-        error_message='步骤失败，退出码: $exit_code，请查看日志 $LOG_FILE'
-    )
-except Exception as e:
-    print(f'飞书告警发送失败: {e}')
-" 2>/dev/null
+    $PYTHON "$PROJECT_DIR/scripts/notify_feishu.py" \
+        --task "采购建议流水线" \
+        --status "failed" \
+        --detail "步骤 $step 失败，退出码: $exit_code，请查看日志 $LOG_FILE" \
+        2>/dev/null || true
 }
 
 send_feishu_success() {
     local elapsed="$1"
-    $PYTHON -c "
-import sys
-sys.path.insert(0, '$PROJECT_DIR')
-try:
-    from common.feishu import send_success_message
-    send_success_message('采购建议流水线', '三步全部完成，耗时 $elapsed 秒，Excel 已更新')
-except Exception as e:
-    print(f'飞书成功通知发送失败: {e}')
-" 2>/dev/null
+    $PYTHON "$PROJECT_DIR/scripts/notify_feishu.py" \
+        --task "采购建议流水线" \
+        --status "success" \
+        --detail "三步全部完成，Excel 已更新" \
+        --elapsed "${elapsed}s" \
+        2>/dev/null || true
 }
 
 # ── Step1：生成预测对比表 ─────────────────────────────────────────────────
