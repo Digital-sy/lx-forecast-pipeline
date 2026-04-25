@@ -133,7 +133,7 @@ def build_sheet1(wb: Workbook, rows, months):
     ws.row_dimensions[3].height = 36
 
     # 固定列（2-3行合并）
-    for ci, h in enumerate(['SPU', '工厂', '面料类型'], 1):
+    for ci, h in enumerate(['SPU', '店铺', '工厂', '面料类型'], 1):
         ws.merge_cells(start_row=2, start_column=ci, end_row=3, end_column=ci)
         c = ws.cell(2, ci, h)
         c.font = hfont()
@@ -142,7 +142,7 @@ def build_sheet1(wb: Workbook, rows, months):
         c.border = bdr
 
     # 月份双层列头
-    col = 4
+    col = 5
     for m in months:
         ws.merge_cells(start_row=2, start_column=col, end_row=2, end_column=col + 1)
         mc = ws.cell(2, col, m)
@@ -188,22 +188,29 @@ def build_sheet1(wb: Workbook, rows, months):
         c.alignment = lft()
         c.border = bdr
 
+        # 店铺
+        c = ws.cell(ri, 2, str(row.get('店铺', '') or ''))
+        c.font = dfont(size=9)
+        c.fill = fl(shade)
+        c.alignment = lft()
+        c.border = bdr
+
         # 工厂
-        c = ws.cell(ri, 2, str(row.get('工厂', '') or ''))
+        c = ws.cell(ri, 3, str(row.get('工厂', '') or ''))
         c.font = dfont(size=9, color='FF666666')
         c.fill = fl(shade)
         c.alignment = lft()
         c.border = bdr
 
         # 面料类型
-        c = ws.cell(ri, 3, ftype)
+        c = ws.cell(ri, 4, ftype)
         c.font = dfont(size=9)
         c.fill = fl(type_bg)
         c.alignment = ctr()
         c.border = bdr
 
         # 月份数据
-        col = 4
+        col = 5
         for m in months:
             op_v = int(row.get(f'{m}运营预计', 0) or 0)
             sy_v = int(row.get(f'{m}建议下单', 0) or 0)
@@ -236,10 +243,11 @@ def build_sheet1(wb: Workbook, rows, months):
             col += 1
 
     # 列宽
-    ws.column_dimensions['A'].width = 16
-    ws.column_dimensions['B'].width = 18
-    ws.column_dimensions['C'].width = 10
-    col = 4
+    ws.column_dimensions['A'].width = 14
+    ws.column_dimensions['B'].width = 12
+    ws.column_dimensions['C'].width = 16
+    ws.column_dimensions['D'].width = 10
+    col = 5
     for _ in months:
         ws.column_dimensions[get_column_letter(col)].width = 9
         ws.column_dimensions[get_column_letter(col + 1)].width = 9
