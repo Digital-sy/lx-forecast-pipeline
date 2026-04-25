@@ -347,43 +347,37 @@ def build_reports(
         stock   = inv['库存']
         pending = inv['待到货']
 
-        # 建议下单量（总量）
-        suggested = max(0, forecast_total - stock - pending)
+        # 全部4个月的预测合计（用于比例摊平和系统预测合计展示）
+        total_4m_forecast = sum(monthly_forecast.get(m, 0) for m in month_order)
 
-        # ── 基于交货期的补货触发模型 ─────────────────────────────────────
+        # 建议下单量总量：基于全部月份预测 vs 库存
+        suggested = max(0, total_4m_forecast - stock - pending)
+
+        # ── 按预测比例摊平到各月 ──────────────────────────────────────────
         # 逻辑：
-        #   第1个月的建议下单 = 当前库存能否撑过N个月的交货期？不够就补
-        #   第2个月的建议下单 = 第N+1个月的需求，减去前N个月消耗后的剩余库存
-        #   第3个月以后       = 超出预测窗口，= 0
+        #   total_order = MAX(0, sum(全部4月预测) - 库存 - 待到货)
+        #   每月建议下单 = total_order × (该月预测 / 4月总预测)
         #
-        # 定制面料（N=3）：
-        #   4月建议 = MAX(0, sum(4+5+6月) - 库存)
-        #   5月建议 = MAX(0, 7月预测 - 剩余库存)
-        #   6月建议 = MAX(0, 8月预测 - ...) → 超出窗口 = 0
-        #
-        # 现货面料（N=2）：
-        #   4月建议 = MAX(0, sum(4+5月) - 库存)
-        #   5月建议 = MAX(0, 6月预测 - 剩余库存)
-        #   6月建议 = MAX(0, 7月预测 - 继续消耗后剩余)
-        #   7月建议 = 0
+        # 优点：
+        #   - 每个月的建议下单量与该月销售预测成比例，天然平滑
+        #   - 避免某月0单、某月突刺的产能堆积问题
+        #   - 生产经理可以线性安排产能
         # ──────────────────────────────────────────────────────────────────
-        available = stock + pending
         monthly_suggest: Dict[str, int] = {}
-
-        # 第1个月：看能否撑过交货期（N个月）
-        coverage_demand = sum(monthly_forecast.get(m, 0) for m in selected_months)
-        monthly_suggest[month_order[0]] = max(0, coverage_demand - available)
-
-        # 交货期内的中间月份（第2到第N月）：建议下单=0（已由第1月订单覆盖）
-        for m in selected_months[1:]:
-            monthly_suggest[m] = 0
-
-        # 交货期之外的月份：每个月多看一个月的需求
-        remaining = max(0, available - coverage_demand)
-        for m in month_order[n_months:]:
-            m_demand = monthly_forecast.get(m, 0)
-            monthly_suggest[m] = max(0, m_demand - remaining)
-            remaining = max(0, remaining - m_demand)
+        if total_4m_forecast > 0 and suggested > 0:
+            allocated = 0
+            for idx, m in enumerate(month_order):
+                m_forecast = monthly_forecast.get(m, 0)
+                if idx < len(month_order) - 1:
+                    m_order = round(suggested * m_forecast / total_4m_forecast)
+                else:
+                    # 最后一个月用差值，修正四舍五入误差
+                    m_order = suggested - allocated
+                monthly_suggest[m] = max(0, m_order)
+                allocated += monthly_suggest[m]
+        else:
+            for m in month_order:
+                monthly_suggest[m] = 0
         # ──────────────────────────────────────────────────────────────────
 
         # 运营预计下单量（各月 + 合计，取覆盖月数内）
@@ -396,7 +390,7 @@ def build_reports(
             '工厂':           factory_map.get((spu, shop), ''),
             '面料类型':       fabric_type,
             '覆盖月数':       n_months,
-            '系统预测合计':   forecast_total,
+            '系统预测合计':   total_4m_forecast,   # 改为4个月全量，与摊平逻辑一致
             '运营预计合计':   op_total,
             '库存':           stock,
             '待到货':         pending,
