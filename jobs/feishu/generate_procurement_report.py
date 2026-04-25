@@ -35,6 +35,11 @@ logger = get_logger('procurement_report')
 COVERAGE_MONTHS_CUSTOM = 3   # 定制面料：3个月
 COVERAGE_MONTHS_STOCK  = 2   # 现货面料：2个月
 
+# ── 月度分摊衰减权重（前重后轻，共4个月）─────────────────────────────────
+# 含义：第1个月权重最高，越往后越低，让建议下单量前置
+# 调整方式：权重比例越悬殊，前后月份差异越大；改为[1,1,1,1]则退化为纯比例分摊
+MONTHLY_DECAY_WEIGHTS = [1.5, 1.2, 0.9, 0.6]
+
 # ── 输出表名 ──────────────────────────────────────────────────────────────
 TABLE_ORDER_SUGGEST = '建议下单量表'
 TABLE_FABRIC_USAGE  = '面料预计用量表'
@@ -353,25 +358,29 @@ def build_reports(
         # 建议下单量总量：基于全部月份预测 vs 库存
         suggested = max(0, total_4m_forecast - stock - pending)
 
-        # ── 按预测比例摊平到各月 ──────────────────────────────────────────
-        # 逻辑：
-        #   total_order = MAX(0, sum(全部4月预测) - 库存 - 待到货)
-        #   每月建议下单 = total_order × (该月预测 / 4月总预测)
-        #
-        # 优点：
-        #   - 每个月的建议下单量与该月销售预测成比例，天然平滑
-        #   - 避免某月0单、某月突刺的产能堆积问题
-        #   - 生产经理可以线性安排产能
+        # ── 衰减权重分摊到各月 ────────────────────────────────────────────
+        # 调整后权重 = 各月预测量 × 位置衰减系数
+        # 月度建议 = 建议总量 × (调整后权重 / 各月权重之和)
+        # 效果：前面月份权重高 → 下单量多，后面月份权重低 → 下单量少
         # ──────────────────────────────────────────────────────────────────
         monthly_suggest: Dict[str, int] = {}
         if total_4m_forecast > 0 and suggested > 0:
+            # 计算各月调整权重
+            adjusted_weights = []
+            for idx, m in enumerate(month_order):
+                decay = MONTHLY_DECAY_WEIGHTS[idx] if idx < len(MONTHLY_DECAY_WEIGHTS) else 0.5
+                adjusted_weights.append(monthly_forecast.get(m, 0) * decay)
+
+            total_weight = sum(adjusted_weights)
             allocated = 0
             for idx, m in enumerate(month_order):
-                m_forecast = monthly_forecast.get(m, 0)
                 if idx < len(month_order) - 1:
-                    m_order = round(suggested * m_forecast / total_4m_forecast)
+                    if total_weight > 0:
+                        m_order = round(suggested * adjusted_weights[idx] / total_weight)
+                    else:
+                        m_order = 0
                 else:
-                    # 最后一个月用差值，修正四舍五入误差
+                    # 最后一个月用差值修正四舍五入误差
                     m_order = suggested - allocated
                 monthly_suggest[m] = max(0, m_order)
                 allocated += monthly_suggest[m]
