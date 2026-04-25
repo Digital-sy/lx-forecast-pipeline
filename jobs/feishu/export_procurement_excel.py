@@ -165,7 +165,7 @@ def build_sheet1(wb: Workbook, rows, months):
         col += 2
 
     # 合计列（2-3行合并）
-    for h in ['系统预测合计', '运营预计合计']:
+    for h in ['建议下单合计', '运营预计合计']:
         ws.merge_cells(start_row=2, start_column=col, end_row=3, end_column=col)
         c = ws.cell(2, col, h)
         c.font = hfont(size=9)
@@ -225,7 +225,7 @@ def build_sheet1(wb: Workbook, rows, months):
             col += 2
 
         # 合计
-        for key in ['系统预测合计', '运营预计合计']:
+        for key in ['建议下单合计', '运营预计合计']:
             v = int(row.get(key, 0) or 0)
             c = ws.cell(ri, col, v if v > 0 else None)
             c.font = dfont(bold=True)
