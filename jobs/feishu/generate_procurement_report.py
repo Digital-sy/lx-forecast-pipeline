@@ -552,15 +552,16 @@ FEISHU_APP_TOKEN    = "JvmNbfUp8atSpTsUH6Icyqk5nqd"
 # 表名固定，table_id 由 ensure_table_and_fields 自动管理
 
 
-async def _get_or_create_table(app_token: str, table_name: str, field_list: list):
+async def _get_or_create_table(app_token: str, table_name: str, field_list: list, remove_extra: bool = False):
     """
     获取或创建飞书多维表，返回已设置好 table_id 的 FeishuClient。
     若 ensure_table_and_fields 返回空 table_id（SDK Bug），用 get_tables() 反查。
+    remove_extra=True 时会删除不在 field_list 里的多余字段（如飞书默认的SKU/SPU/运营）
     """
     from common.feishu import FeishuClient
     client = FeishuClient(app_token=app_token, table_id="")
     table_id = await client.ensure_table_and_fields(
-        table_name, field_list, remove_extra_fields=False
+        table_name, field_list, remove_extra_fields=remove_extra
     )
     if not table_id:
         logger.warning(f"返回空 table_id，尝试按表名反查: {table_name}")
@@ -595,7 +596,7 @@ async def write_order_to_feishu(records: List[Dict[str, Any]], month_order: List
         {'name': '库存',          'type': 'number'},
         {'name': '待到货',        'type': 'number'},
     ]
-    client = await _get_or_create_table(FEISHU_APP_TOKEN, '建议下单量', field_list)
+    client = await _get_or_create_table(FEISHU_APP_TOKEN, '建议下单量', field_list, remove_extra=True)
 
     t_keys = ['T月', 'T+1月', 'T+2月', 'T+3月']
     feishu_records = []
@@ -633,7 +634,7 @@ async def write_fabric_to_feishu(records: List[Dict[str, Any]], current_date: da
         {'name': '单件用量(米)',    'type': 'number', 'precision': 2},
         {'name': '预计用量(米)',    'type': 'number', 'precision': 1},
     ]
-    client = await _get_or_create_table(FEISHU_APP_TOKEN, '面料预计用量', field_list)
+    client = await _get_or_create_table(FEISHU_APP_TOKEN, '面料预计用量', field_list, remove_extra=True)
 
     await client.delete_all_records()
     feishu_records = [
@@ -667,7 +668,7 @@ async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
         {'name': '待到货量/米',  'type': 'number', 'precision': 2},
         {'name': '预计总量/米',  'type': 'number', 'precision': 2},
     ]
-    client = await _get_or_create_table(FEISHU_APP_TOKEN, '面料预估明细', field_list)
+    client = await _get_or_create_table(FEISHU_APP_TOKEN, '面料预估明细', field_list, remove_extra=True)
 
     cutoff = f"{current_date.year}-{current_date.month:02d}-01"
     with db_cursor() as cursor:
