@@ -743,6 +743,8 @@ def main():
     logger.info(f"  定制面料覆盖 {COVERAGE_MONTHS_CUSTOM} 个月 | 现货面料覆盖 {COVERAGE_MONTHS_STOCK} 个月")
     logger.info("=" * 70)
 
+    current_date = datetime.now()
+
     # 1. 系统预测（来自预测对比表，已按SPU+店铺+月聚合）
     forecast_map, month_order = read_system_forecast()
     if not forecast_map:
