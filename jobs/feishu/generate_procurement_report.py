@@ -547,11 +547,93 @@ def save_fabric_usage(records: List[Dict[str, Any]]) -> None:
     logger.info(f"✓ 写入 {len(records)} 条记录到 `{TABLE_FABRIC_USAGE}`")
 
 
+# ── 飞书多维表配置 ────────────────────────────────────────────────────────
+FEISHU_APP_TOKEN        = "JvmNbfUp8atSpTsUH6Icyqk5nqd"
+FEISHU_TABLE_ORDER      = "tblUVgBC7rKo7KMg"   # 建议下单量表（生产）
+FEISHU_TABLE_FABRIC     = "tblA6kFQkFy2A16N"   # 面料预计用量表（面料）
+
+
+async def write_order_to_feishu(records: List[Dict[str, Any]], month_order: List[str]) -> None:
+    """写建议下单量到飞书多维表"""
+    from common.feishu import FeishuClient
+
+    field_list = [
+        {'name': 'SPU',          'type': 'text'},
+        {'name': '店铺',         'type': 'text'},
+        {'name': '工厂',         'type': 'text'},
+        {'name': '面料类型',     'type': 'text'},
+        {'name': '库存',         'type': 'number'},
+        {'name': '待到货',       'type': 'number'},
+        {'name': '建议下单合计', 'type': 'number'},
+        {'name': '运营预计合计', 'type': 'number'},
+    ]
+    for m in month_order:
+        field_list.append({'name': f'{m}建议下单', 'type': 'number'})
+        field_list.append({'name': f'{m}运营预计', 'type': 'number'})
+
+    client = FeishuClient(app_token=FEISHU_APP_TOKEN, table_id=FEISHU_TABLE_ORDER)
+    await client.ensure_table_and_fields('建议下单量', field_list, remove_extra_fields=True)
+
+    feishu_records = []
+    for r in records:
+        row = {
+            'SPU':          r['SPU'],
+            '店铺':         r['店铺'],
+            '工厂':         r['工厂'],
+            '面料类型':     r['面料类型'],
+            '库存':         r['库存'],
+            '待到货':       r['待到货'],
+            '建议下单合计': r['建议下单合计'],
+            '运营预计合计': r['运营预计合计'],
+        }
+        for m in month_order:
+            row[f'{m}建议下单'] = r.get(f'{m}建议下单', 0)
+            row[f'{m}运营预计'] = r.get(f'{m}运营预计', 0)
+        feishu_records.append(row)
+
+    await client.delete_all_records()
+    written = await client.write_records(feishu_records, batch_size=500)
+    logger.info(f"✓ 飞书建议下单量表写入 {written} 条")
+
+
+async def write_fabric_to_feishu(records: List[Dict[str, Any]]) -> None:
+    """写面料预计用量到飞书多维表"""
+    from common.feishu import FeishuClient
+
+    field_list = [
+        {'name': '面料',           'type': 'text'},
+        {'name': 'SPU数量',        'type': 'number'},
+        {'name': '建议下单量合计', 'type': 'number'},
+        {'name': '单件用量(米)',    'type': 'number', 'precision': 2},
+        {'name': '预计用量(米)',    'type': 'number', 'precision': 1},
+    ]
+
+    client = FeishuClient(app_token=FEISHU_APP_TOKEN, table_id=FEISHU_TABLE_FABRIC)
+    await client.ensure_table_and_fields('面料预计用量', field_list, remove_extra_fields=True)
+
+    feishu_records = [
+        {
+            '面料':           r['面料'],
+            'SPU数量':        r['SPU数量'],
+            '建议下单量合计': r['建议下单量合计'],
+            '单件用量(米)':   r['单件用量(米)'],
+            '预计用量(米)':   r['预计用量(米)'],
+        }
+        for r in records
+    ]
+
+    await client.delete_all_records()
+    written = await client.write_records(feishu_records, batch_size=500)
+    logger.info(f"✓ 飞书面料预计用量表写入 {written} 条")
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # 主函数
 # ────────────────────────────────────────────────────────────────────────────
 
 def main():
+    import asyncio
+
     logger.info("=" * 70)
     logger.info("采购建议报告生成")
     logger.info(f"  定制面料覆盖 {COVERAGE_MONTHS_CUSTOM} 个月 | 现货面料覆盖 {COVERAGE_MONTHS_STOCK} 个月")
@@ -581,9 +663,14 @@ def main():
         fabric_info, factory_map, op_forecast_map
     )
 
-    # 7. 写库
+    # 7. 写数据库
     save_order_suggest(order_records, month_order)
     save_fabric_usage(fabric_records)
+
+    # 8. 写飞书多维表
+    logger.info("正在写入飞书多维表...")
+    asyncio.run(write_order_to_feishu(order_records, month_order))
+    asyncio.run(write_fabric_to_feishu(fabric_records))
 
     # 摘要
     custom_rows = [r for r in order_records if r['面料类型'] == '定制面料']
