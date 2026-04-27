@@ -340,18 +340,35 @@ def read_fill_rate_stats(current_date: datetime):
 
 
 def read_fabric_usage_summary():
-    """读取面料用量摘要"""
+    """读取面料用量摘要，含运营预估用量"""
     with db_cursor() as cursor:
+        # 系统预计用量（来自面料预计用量表）
         cursor.execute("""
-            SELECT 面料, SPU数量, 建议下单量合计, `单件用量(米)`, `预计用量(米)`
-            FROM `面料预计用量表`
-            ORDER BY `预计用量(米)` DESC
+            SELECT f.面料, f.SPU数量, f.建议下单量合计,
+                   f.`单件用量(米)`, f.`预计用量(米)` AS 系统预计用量
+            FROM `面料预计用量表` f
+            ORDER BY f.`预计用量(米)` DESC
         """)
         rows = cursor.fetchall()
 
-    total_usage = sum(float(r['预计用量(米)'] or 0) for r in rows)
+        # 运营预估用量：运营预计合计 × 单件用量（从建议下单量表关联面料核价表）
+        cursor.execute("""
+            SELECT k.面料,
+                   SUM(b.运营预计合计) AS 运营预计下单合计,
+                   MAX(k.单件用量)     AS 单件用量
+            FROM `建议下单量表` b
+            JOIN `面料核价表` k ON k.SPU = b.SPU
+            WHERE b.面料类型 = '定制面料'
+            GROUP BY k.面料
+        """)
+        op_map = {
+            r['面料']: int(r['运营预计下单合计'] or 0) * float(r['单件用量'] or 0)
+            for r in cursor.fetchall()
+        }
+
+    total_usage = sum(float(r['系统预计用量'] or 0) for r in rows)
     total_order = sum(int(r['建议下单量合计'] or 0) for r in rows)
-    return rows, total_usage, total_order
+    return rows, total_usage, total_order, op_map
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -363,49 +380,70 @@ def build_production_card(
     overview, by_type, top5,
     month_labels, monthly_suggest, monthly_op,
     monthly_actual: dict,
-    fill_stats: dict,
 ) -> dict:
-    """组装生产经理飞书卡片"""
+    """组装生产卡片"""
     month_label = f"{current_date.year}年{current_date.month}月"
 
-    # 月度分拆（系统建议 vs 运营预计 vs 实际下单）
+    # 各月明细：系统建议 / 运营预计 / 实际已下单
     monthly_lines = []
     for label in month_labels:
         sys_v = monthly_suggest.get(label, 0)
         op_v  = monthly_op.get(label, 0)
         act_v = monthly_actual.get(label, 0)
         monthly_lines.append(
-            f"**{label}**　系统建议 {sys_v:,} 件　"
-            f"运营预计 {op_v:,} 件　"
-            f"实际已下单 {act_v:,} 件"
+            f"**{label}**　系统建议 {sys_v:,}　运营预计 {op_v:,}　实际已下单 {act_v:,}"
         )
     monthly_text = "\n".join(monthly_lines)
 
-    # 按面料类型
-    type_text = "\n".join(
-        f"· {r['面料类型']}：{r['款数']} 款，{int(r['建议下单量'] or 0):,} 件"
-        for r in by_type
-    ) or "暂无数据"
+    # 按面料类型分月
+    type_monthly_lines = []
+    for label in month_labels:
+        sys_col = f"`{label}建议下单`"
+        try:
+            with db_cursor() as cursor:
+                cursor.execute(f"""
+                    SELECT 面料类型, SUM({sys_col}) AS 建议量
+                    FROM `建议下单量表`
+                    GROUP BY 面料类型
+                """)
+                rows = cursor.fetchall()
+            parts = "　".join(
+                f"{r['面料类型']} {int(r['建议量'] or 0):,} 件"
+                for r in rows
+            )
+            type_monthly_lines.append(f"**{label}**　{parts}")
+        except Exception:
+            type_monthly_lines.append(f"**{label}**　暂无数据")
+    type_monthly_text = "\n".join(type_monthly_lines)
 
-    # TOP5
-    top5_text = "\n".join(
-        f"{i}. **{r['SPU']}** · {r['店铺']}"
-        f"（{r['工厂'] or '工厂未记录'}）：{int(r['建议下单量']):,} 件"
-        for i, r in enumerate(top5, 1)
-    ) or "暂无数据"
-
-    # 填报完成率
-    fill_lines = []
-    for operator, data in sorted(fill_stats.items(), key=lambda x: -x[1]['rate']):
-        emoji = "✅" if data['rate'] >= 80 else "⚠️" if data['rate'] >= 50 else "❌"
-        fill_lines.append(
-            f"{emoji} **{operator}**：{data['filled']}/{data['should']} 个SPU（{data['rate']}%）"
-        )
-    fill_text = "\n".join(fill_lines) or "暂无数据"
+    # TOP5 分月展示
+    top5_monthly_lines = []
+    for label in month_labels:
+        sys_col = f"`{label}建议下单`"
+        try:
+            with db_cursor() as cursor:
+                cursor.execute(f"""
+                    SELECT SPU, 店铺, 工厂, {sys_col} AS 建议量
+                    FROM `建议下单量表`
+                    WHERE {sys_col} > 0
+                    ORDER BY {sys_col} DESC
+                    LIMIT 5
+                """)
+                rows = cursor.fetchall()
+            if rows:
+                top5_monthly_lines.append(f"**{label}**")
+                for i, r in enumerate(rows, 1):
+                    top5_monthly_lines.append(
+                        f"  {i}. **{r['SPU']}** · {r['店铺']}"
+                        f"（{r['工厂'] or '未记录'}）：{int(r['建议量'] or 0):,} 件"
+                    )
+        except Exception:
+            top5_monthly_lines.append(f"**{label}**　暂无数据")
+    top5_monthly_text = "\n".join(top5_monthly_lines) or "暂无数据"
 
     return {
         "header": {
-            "title": {"tag": "plain_text", "content": f"📦 {month_label} 采购建议摘要 · 生产经理"},
+            "title": {"tag": "plain_text", "content": f"📦 {month_label} 采购建议 · 生产"},
             "template": "blue"
         },
         "elements": [
@@ -418,11 +456,9 @@ def build_production_card(
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**各月明细**\n{monthly_text}"}},
             {"tag": "hr"},
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"**按面料类型**\n{type_text}"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**按面料类型（分月）**\n{type_monthly_text}"}},
             {"tag": "hr"},
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"**缺口最大 TOP5**\n{top5_text}"}},
-            {"tag": "hr"},
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"**运营填报完成率**\n{fill_text}"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**各月缺口 TOP5**\n{top5_monthly_text}"}},
             {"tag": "note", "elements": [
                 {"tag": "plain_text", "content": "详细数据请查看飞书「建议下单量表」"}
             ]},
@@ -430,43 +466,45 @@ def build_production_card(
     }
 
 
-def build_product_card(
+def build_fabric_card(
     current_date: datetime,
     fabric_rows, total_usage: float, total_order: int,
-    month_labels: list, monthly_suggest: dict,
+    op_map: dict,
 ) -> dict:
-    """组装产品经理飞书卡片"""
+    """
+    组装面料卡片（产品经理）
+    TOP10 面料表格：系统预计用量 / 运营预估用量 / 现有库存（待接入）
+    不分月：面料采购按总量与供应商谈判，无需月度拆分
+    """
     month_label = f"{current_date.year}年{current_date.month}月"
 
-    # 月度建议下单分拆（产品经理关注各月的生产节奏）
-    monthly_lines = []
-    for label in month_labels:
-        val = monthly_suggest.get(label, 0)
-        monthly_lines.append(f"**{label}**　建议下单 {val:,} 件")
-    monthly_text = "\n".join(monthly_lines)
-
-    top5_text = "\n".join(
-        f"· **{r['面料']}**：{float(r['预计用量(米)'] or 0):,.0f} 米"
-        f"（{int(r['建议下单量合计'] or 0):,} 件 × {float(r['单件用量(米)'] or 0):.2f} 米/件）"
-        for r in fabric_rows[:5]
-    ) or "暂无数据"
+    # markdown 表格
+    table_header = "| 面料 | 系统预计(米) | 运营预估(米) | 现有库存 |"
+    table_sep    = "|------|------------|------------|--------|"
+    table_rows = []
+    for r in fabric_rows[:10]:
+        fabric = r['面料']
+        sys_usage = float(r['系统预计用量'] or 0)
+        op_usage  = op_map.get(fabric, 0.0)
+        table_rows.append(
+            f"| {fabric} | {sys_usage:,.0f} | {op_usage:,.0f} | 待接入 |"
+        )
+    table_text = "\n".join([table_header, table_sep] + table_rows)
 
     return {
         "header": {
-            "title": {"tag": "plain_text", "content": f"🧵 {month_label} 定制面料用量预估 · 产品经理"},
+            "title": {"tag": "plain_text", "content": f"🧵 {month_label} 定制面料用量 · 面料"},
             "template": "green"
         },
         "elements": [
             {"tag": "div", "text": {"tag": "lark_md", "content":
                 f"**总览**\n"
-                f"涉及面料种类：{len(fabric_rows)} 种\n"
+                f"定制面料种类：{len(fabric_rows)} 种\n"
                 f"总建议下单量：{total_order:,} 件\n"
-                f"总预计用量：**{total_usage:,.0f} 米**"
+                f"系统预计总用量：**{total_usage:,.0f} 米**"
             }},
             {"tag": "hr"},
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"**各月建议下单**\n{monthly_text}"}},
-            {"tag": "hr"},
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"**用量 TOP5 面料**\n{top5_text}"}},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**TOP10 面料用量**\n{table_text}"}},
             {"tag": "note", "elements": [
                 {"tag": "plain_text", "content": "详细数据请查看飞书「面料预计用量表」"}
             ]},
@@ -488,19 +526,17 @@ def main():
     overview, by_type, top5, month_labels, monthly_suggest, monthly_op = \
         read_order_suggest_summary(current_date)
     monthly_actual, _ = read_actual_order_by_month(current_date)
-    fill_stats = read_fill_rate_stats(current_date)
-    fabric_rows, total_usage, total_order = read_fabric_usage_summary()
+    fabric_rows, total_usage, total_order, op_map = read_fabric_usage_summary()
 
     prod_card = build_production_card(
         current_date, overview, by_type, top5,
         month_labels, monthly_suggest, monthly_op,
-        monthly_actual, fill_stats,
+        monthly_actual,
     )
     send_card(RECEIVER_PRODUCTION, prod_card)
 
-    fabric_card = build_product_card(
-        current_date, fabric_rows, total_usage, total_order,
-        month_labels, monthly_suggest,
+    fabric_card = build_fabric_card(
+        current_date, fabric_rows, total_usage, total_order, op_map,
     )
     send_card(RECEIVER_PRODUCT, fabric_card)
 
