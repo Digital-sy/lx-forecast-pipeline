@@ -257,8 +257,10 @@ def read_fill_rate_stats(current_date: datetime):
                 SELECT p.SPU, p.店铺, p.统计日期, l.负责人 AS 运营
                 FROM `预测对比表` p
                 LEFT JOIN `listing` l
-                    ON l.SKU LIKE CONCAT(p.SPU, '%%')
-                    AND l.店铺 = p.店铺
+                    ON l.SKU COLLATE utf8mb4_unicode_ci
+                       LIKE CONCAT(p.SPU COLLATE utf8mb4_unicode_ci, '%%')
+                    AND l.店铺 COLLATE utf8mb4_unicode_ci
+                        = p.店铺 COLLATE utf8mb4_unicode_ci
                 WHERE p.系统预测销量 > 0
                   AND DATE_FORMAT(p.统计日期, '%%Y-%%m-%%d') IN ({placeholders})
             """, forecast_dates)
