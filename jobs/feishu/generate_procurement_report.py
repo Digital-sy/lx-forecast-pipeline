@@ -552,44 +552,52 @@ FEISHU_APP_TOKEN    = "JvmNbfUp8atSpTsUH6Icyqk5nqd"
 # 表名固定，table_id 由 ensure_table_and_fields 自动管理
 
 
-async def write_order_to_feishu(records: List[Dict[str, Any]], month_order: List[str], current_date: datetime) -> None:
+async def _get_or_create_table(app_token: str, table_name: str, field_list: list):
     """
-    写建议下单量到飞书多维表
-    字段固定为 T/T+1/T+2/T+3，不随月份变化，仪表盘绑定永久有效
+    获取或创建飞书多维表，返回已设置好 table_id 的 FeishuClient。
+    若 ensure_table_and_fields 返回空 table_id（SDK Bug），用 get_tables() 反查。
     """
     from common.feishu import FeishuClient
-
-    stat_month = current_date.strftime('%Y-%m')
-
-    field_list = [
-        {'name': 'SPU',            'type': 'text'},
-        {'name': '店铺',           'type': 'text'},
-        {'name': '工厂',           'type': 'text'},
-        {'name': '面料类型',       'type': 'text'},
-        {'name': '统计月份',       'type': 'text'},
-        {'name': 'T月建议下单',    'type': 'number'},
-        {'name': 'T月运营预计',    'type': 'number'},
-        {'name': 'T+1月建议下单',  'type': 'number'},
-        {'name': 'T+1月运营预计',  'type': 'number'},
-        {'name': 'T+2月建议下单',  'type': 'number'},
-        {'name': 'T+2月运营预计',  'type': 'number'},
-        {'name': 'T+3月建议下单',  'type': 'number'},
-        {'name': 'T+3月运营预计',  'type': 'number'},
-        {'name': '建议下单合计',   'type': 'number'},
-        {'name': '运营预计合计',   'type': 'number'},
-        {'name': '库存',           'type': 'number'},
-        {'name': '待到货',         'type': 'number'},
-    ]
-
-    client = FeishuClient(app_token=FEISHU_APP_TOKEN, table_id="")
+    client = FeishuClient(app_token=app_token, table_id="")
     table_id = await client.ensure_table_and_fields(
-        '建议下单量', field_list, remove_extra_fields=False
+        table_name, field_list, remove_extra_fields=False
     )
+    if not table_id:
+        logger.warning(f"返回空 table_id，尝试按表名反查: {table_name}")
+        tables = await client.get_tables()
+        table_id = tables.get(table_name, '')
+        if not table_id:
+            raise RuntimeError(f"无法获取飞书表 '{table_name}' 的 table_id")
+        logger.info(f"反查成功: {table_name} → {table_id}")
     client.table_id = table_id
+    return client
 
-    # month_order = ['26年4月','26年5月','26年6月','26年7月']，映射到 T/T+1/T+2/T+3
+
+async def write_order_to_feishu(records: List[Dict[str, Any]], month_order: List[str], current_date: datetime) -> None:
+    """写建议下单量到飞书多维表，字段固定为 T/T+1/T+2/T+3"""
+    stat_month = current_date.strftime('%Y-%m')
+    field_list = [
+        {'name': 'SPU',           'type': 'text'},
+        {'name': '店铺',          'type': 'text'},
+        {'name': '工厂',          'type': 'text'},
+        {'name': '面料类型',      'type': 'text'},
+        {'name': '统计月份',      'type': 'text'},
+        {'name': 'T月建议下单',   'type': 'number'},
+        {'name': 'T月运营预计',   'type': 'number'},
+        {'name': 'T+1月建议下单', 'type': 'number'},
+        {'name': 'T+1月运营预计', 'type': 'number'},
+        {'name': 'T+2月建议下单', 'type': 'number'},
+        {'name': 'T+2月运营预计', 'type': 'number'},
+        {'name': 'T+3月建议下单', 'type': 'number'},
+        {'name': 'T+3月运营预计', 'type': 'number'},
+        {'name': '建议下单合计',  'type': 'number'},
+        {'name': '运营预计合计',  'type': 'number'},
+        {'name': '库存',          'type': 'number'},
+        {'name': '待到货',        'type': 'number'},
+    ]
+    client = await _get_or_create_table(FEISHU_APP_TOKEN, '建议下单量', field_list)
+
     t_keys = ['T月', 'T+1月', 'T+2月', 'T+3月']
-
     feishu_records = []
     for r in records:
         row = {
@@ -616,10 +624,7 @@ async def write_order_to_feishu(records: List[Dict[str, Any]], month_order: List
 
 async def write_fabric_to_feishu(records: List[Dict[str, Any]], current_date: datetime) -> None:
     """写面料预计用量汇总到飞书多维表，含统计月份"""
-    from common.feishu import FeishuClient
-
     stat_month = current_date.strftime('%Y-%m')
-
     field_list = [
         {'name': '统计月份',       'type': 'text'},
         {'name': '面料',           'type': 'text'},
@@ -628,18 +633,9 @@ async def write_fabric_to_feishu(records: List[Dict[str, Any]], current_date: da
         {'name': '单件用量(米)',    'type': 'number', 'precision': 2},
         {'name': '预计用量(米)',    'type': 'number', 'precision': 1},
     ]
+    client = await _get_or_create_table(FEISHU_APP_TOKEN, '面料预计用量', field_list)
 
-    client = FeishuClient(app_token=FEISHU_APP_TOKEN, table_id="")
-    table_id = await client.ensure_table_and_fields(
-        '面料预计用量', field_list, remove_extra_fields=False
-    )
-    client.table_id = table_id
-
-    # 删除本月旧数据，保留历史月份（按统计月份删）
-    # 暂用 delete_all + 重写全量（行数少，可接受）
-    # 后续可改为按月份过滤删除
     await client.delete_all_records()
-
     feishu_records = [
         {
             '统计月份':       stat_month,
@@ -651,66 +647,45 @@ async def write_fabric_to_feishu(records: List[Dict[str, Any]], current_date: da
         }
         for r in records
     ]
-
     written = await client.write_records(feishu_records, batch_size=500)
     logger.info(f"✓ 飞书面料预计用量表写入 {written} 条")
 
 
 async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
-    """
-    写面料预估明细到飞书多维表（替代产品部BI看板数据源）
-    只写当月+未来月份数据
-    """
-    from common.feishu import FeishuClient
-
+    """写面料预估明细到飞书多维表（替代产品部BI看板），只写当月+未来"""
     field_list = [
-        {'name': '统计月份',      'type': 'text'},
-        {'name': 'SKU',           'type': 'text'},
-        {'name': 'SPU',           'type': 'text'},
-        {'name': '面料',          'type': 'text'},
-        {'name': '面料品名',      'type': 'text'},
-        {'name': '面料颜色编号',  'type': 'text'},
-        {'name': '颜色',          'type': 'text'},
-        {'name': '预计下单件数',  'type': 'number'},
-        {'name': '预计用量/米',   'type': 'number', 'precision': 2},
-        {'name': '库存量/米',     'type': 'number', 'precision': 2},
-        {'name': '待到货量/米',   'type': 'number', 'precision': 2},
-        {'name': '预计总量/米',   'type': 'number', 'precision': 2},
+        {'name': '统计月份',     'type': 'text'},
+        {'name': 'SKU',          'type': 'text'},
+        {'name': 'SPU',          'type': 'text'},
+        {'name': '面料',         'type': 'text'},
+        {'name': '面料品名',     'type': 'text'},
+        {'name': '面料颜色编号', 'type': 'text'},
+        {'name': '颜色',         'type': 'text'},
+        {'name': '预计下单件数', 'type': 'number'},
+        {'name': '预计用量/米',  'type': 'number', 'precision': 2},
+        {'name': '库存量/米',    'type': 'number', 'precision': 2},
+        {'name': '待到货量/米',  'type': 'number', 'precision': 2},
+        {'name': '预计总量/米',  'type': 'number', 'precision': 2},
     ]
+    client = await _get_or_create_table(FEISHU_APP_TOKEN, '面料预估明细', field_list)
 
-    client = FeishuClient(app_token=FEISHU_APP_TOKEN, table_id="")
-    table_id = await client.ensure_table_and_fields(
-        '面料预估明细', field_list, remove_extra_fields=False
-    )
-    client.table_id = table_id
-
-    # 只取当月及未来月份
-    year = current_date.year
-    month = current_date.month
-    cutoff = f"{year}-{month:02d}-01"
-
+    cutoff = f"{current_date.year}-{current_date.month:02d}-01"
     with db_cursor() as cursor:
         cursor.execute("""
             SELECT SKU, SPU, 面料, 面料品名, 面料颜色编号, 颜色,
-                   统计日期, 月份,
-                   预计下单件数, `预计用量/米`,
+                   统计日期, 预计下单件数, `预计用量/米`,
                    `库存量/米`, `待到货量/米`, `预计总量/米`
             FROM `面料预估表`
             WHERE 统计日期 >= %s
             ORDER BY 统计日期, SKU
         """, (cutoff,))
         rows = cursor.fetchall()
-
     logger.info(f"面料预估明细：共 {len(rows)} 条（{cutoff} 起）")
 
     feishu_records = []
     for r in rows:
-        stat_date = r['统计日期']
-        if hasattr(stat_date, 'strftime'):
-            stat_month = stat_date.strftime('%Y-%m')
-        else:
-            stat_month = str(stat_date)[:7]
-
+        d = r['统计日期']
+        stat_month = d.strftime('%Y-%m') if hasattr(d, 'strftime') else str(d)[:7]
         feishu_records.append({
             '统计月份':     stat_month,
             'SKU':          r['SKU'] or '',
