@@ -548,16 +548,34 @@ def save_fabric_usage(records: List[Dict[str, Any]]) -> None:
 
 
 # ── 飞书多维表配置 ────────────────────────────────────────────────────────
-FEISHU_APP_TOKEN        = "JvmNbfUp8atSpTsUH6Icyqk5nqd"
-FEISHU_TABLE_ORDER      = "tblUVgBC7rKo7KMg"   # 建议下单量表（生产）
-FEISHU_TABLE_FABRIC     = "tblA6kFQkFy2A16N"   # 面料预计用量表（面料）
+FEISHU_APP_TOKEN    = "JvmNbfUp8atSpTsUH6Icyqk5nqd"
+# 表名固定，table_id 由 ensure_table_and_fields 自动管理
 
 
 async def write_order_to_feishu(records: List[Dict[str, Any]], month_order: List[str]) -> None:
-    """写建议下单量到飞书多维表（直接用已有table_id）"""
+    """写建议下单量到飞书多维表（自动建表建字段）"""
     from common.feishu import FeishuClient
 
-    client = FeishuClient(app_token=FEISHU_APP_TOKEN, table_id=FEISHU_TABLE_ORDER)
+    field_list = [
+        {'name': 'SPU',          'type': 'text'},
+        {'name': '店铺',         'type': 'text'},
+        {'name': '工厂',         'type': 'text'},
+        {'name': '面料类型',     'type': 'text'},
+        {'name': '库存',         'type': 'number'},
+        {'name': '待到货',       'type': 'number'},
+        {'name': '建议下单合计', 'type': 'number'},
+        {'name': '运营预计合计', 'type': 'number'},
+    ]
+    for m in month_order:
+        field_list.append({'name': f'{m}建议下单', 'type': 'number'})
+        field_list.append({'name': f'{m}运营预计', 'type': 'number'})
+
+    # table_id 留空，由 ensure_table_and_fields 自动建表并返回真实 ID
+    client = FeishuClient(app_token=FEISHU_APP_TOKEN, table_id="")
+    table_id = await client.ensure_table_and_fields(
+        '建议下单量', field_list, remove_extra_fields=True
+    )
+    client.table_id = table_id
 
     feishu_records = []
     for r in records:
@@ -582,10 +600,22 @@ async def write_order_to_feishu(records: List[Dict[str, Any]], month_order: List
 
 
 async def write_fabric_to_feishu(records: List[Dict[str, Any]]) -> None:
-    """写面料预计用量到飞书多维表（直接用已有table_id）"""
+    """写面料预计用量到飞书多维表（自动建表建字段）"""
     from common.feishu import FeishuClient
 
-    client = FeishuClient(app_token=FEISHU_APP_TOKEN, table_id=FEISHU_TABLE_FABRIC)
+    field_list = [
+        {'name': '面料',           'type': 'text'},
+        {'name': 'SPU数量',        'type': 'number'},
+        {'name': '建议下单量合计', 'type': 'number'},
+        {'name': '单件用量(米)',    'type': 'number', 'precision': 2},
+        {'name': '预计用量(米)',    'type': 'number', 'precision': 1},
+    ]
+
+    client = FeishuClient(app_token=FEISHU_APP_TOKEN, table_id="")
+    table_id = await client.ensure_table_and_fields(
+        '面料预计用量', field_list, remove_extra_fields=True
+    )
+    client.table_id = table_id
 
     feishu_records = [
         {
