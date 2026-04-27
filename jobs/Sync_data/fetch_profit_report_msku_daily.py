@@ -869,7 +869,7 @@ def convert_profit_report_data(records: List[Dict[str, Any]],
     return report_list
 
 
-async def main(start_date: str = None, end_date: str = None):
+async def main(start_date: str = None, end_date: str = None, monthly: bool = False):
     """
     主函数
     
@@ -932,6 +932,55 @@ async def main(start_date: str = None, end_date: str = None):
     # 处理数据库表（先创建表）
     table_name = '利润报表'
     
+    # ── 按月模式：每5天一批拉取 ──────────────────────────────────────────────
+    if monthly:
+        logger.info("📅 按月分批模式：每次拉取5天，分批写入")
+        BATCH_DAYS = 1
+        current = month_start
+        batch_num = 0
+        total_records_monthly = 0
+        table_created = False
+
+        while current <= month_end:
+            batch_end = min(current + timedelta(days=BATCH_DAYS - 1), month_end)
+            batch_num += 1
+            start_str = current.strftime('%Y-%m-%d')
+            end_str   = batch_end.strftime('%Y-%m-%d')
+
+            logger.info(f"📦 第 {batch_num} 批：{start_str} ~ {end_str}")
+
+            records = await fetch_all_profit_reports(
+                op_api, token_resp,
+                start_date=start_str,
+                end_date=end_str,
+                sid_list=None,
+                max_records=None,
+                monthly_query=False,
+                test_msku=None
+            )
+            logger.info(f"  获取 {len(records)} 条数据")
+
+            if records:
+                if not table_created:
+                    create_table_if_needed(table_name, convert_profit_report_data([records[0]])[0])
+                    table_created = True
+
+                c = current
+                while c <= batch_end:
+                    delete_date_data(table_name, c.strftime('%Y-%m-%d'))
+                    c += timedelta(days=1)
+
+                report_data_list = convert_profit_report_data(records, sid_to_name_map)
+                inserted, updated = insert_data_batch(table_name, report_data_list)
+                total_records_monthly += len(report_data_list)
+                logger.info(f"  ✅ 写入完成: 新增~{inserted}条, 更新~{updated}条")
+
+            current = batch_end + timedelta(days=1)
+            await asyncio.sleep(2)
+
+        logger.info(f"✅ 按月分批完成，共写入 {total_records_monthly} 条")
+        return
+
     # 按天循环拉取数据
     current_date = month_start
     total_days = (month_end - month_start).days + 1
@@ -1147,11 +1196,12 @@ if __name__ == '__main__':
                        help='开始日期，格式：Y-m-d，默认：前7天')
     parser.add_argument('--end-date', type=str, default=None,
                        help='结束日期，格式：Y-m-d，默认：今天')
+    parser.add_argument('--monthly', action='store_true', help='按月汇总拉取（一次拉取整个日期范围）')
     
     args = parser.parse_args()
     
     try:
-        asyncio.run(main(start_date=args.start_date, end_date=args.end_date))
+        asyncio.run(main(start_date=args.start_date, end_date=args.end_date, monthly=args.monthly))
     except KeyboardInterrupt:
         logger.warning("\n⚠️  用户中断执行")
         sys.exit(1)

@@ -121,3 +121,23 @@ echo "数据同步任务结束: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "==================================="
 echo "✅ 所有任务执行完成！"
 
+
+# 发送飞书通知
+END_TIME=$(date +%s)
+ELAPSED=$(( END_TIME - ${START_TIME_DATA:-$(date +%s)} ))
+ELAPSED_STR="${ELAPSED}秒"
+
+if [ $EXIT_CODE_1 -eq 0 ] && [ $EXIT_CODE_2 -eq 0 ] && [ $EXIT_CODE_3 -eq 0 ] && [ $EXIT_CODE_4 -eq 0 ] && [ $EXIT_CODE_5 -eq 0 ]; then
+    STATUS="success"
+    DETAIL="**1/5 Listing数据：** ✅ 成功\n**2/5 面料参数：** ✅ 成功\n**3/5 飞书数据：** ✅ 成功\n**4/5 下单对比：** ✅ 成功\n**5/5 面料预估：** ✅ 成功"
+else
+    STATUS="failed"
+    DETAIL="**1/5 Listing数据：** $([ $EXIT_CODE_1 -eq 0 ] && echo '✅ 成功' || echo '❌ 失败')\n**2/5 面料参数：** $([ $EXIT_CODE_2 -eq 0 ] && echo '✅ 成功' || echo '❌ 失败')\n**3/5 飞书数据：** $([ $EXIT_CODE_3 -eq 0 ] && echo '✅ 成功' || echo '❌ 失败')\n**4/5 下单对比：** $([ $EXIT_CODE_4 -eq 0 ] && echo '✅ 成功' || echo '❌ 失败')\n**5/5 面料预估：** $([ $EXIT_CODE_5 -eq 0 ] && echo '✅ 成功' || echo '❌ 失败')"
+fi
+
+PYTHONPATH=/opt/apps/pythondata /opt/apps/pythondata/venv/bin/python3 \
+    /opt/apps/pythondata/scripts/notify_feishu.py \
+    --task "数据同步" \
+    --status "$STATUS" \
+    --detail "$DETAIL" \
+    --elapsed "$ELAPSED_STR"

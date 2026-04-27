@@ -83,3 +83,24 @@ fi
 echo "==================================="
 echo "库存同步任务结束: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "==================================="
+
+# 发送飞书通知
+START_TIME_INV=${START_TIME_INV:-$(date +%s)}
+END_TIME=$(date +%s)
+ELAPSED=$(( END_TIME - START_TIME_INV ))
+ELAPSED_STR="${ELAPSED}秒"
+
+if [ $EXIT_CODE_1 -eq 0 ] && [ $EXIT_CODE_2 -eq 0 ] && [ $EXIT_CODE_3 -eq 0 ]; then
+    STATUS="success"
+    DETAIL="**1/3 采集库存明细：** ✅ 成功\n**2/3 写入飞书多维表：** ✅ 成功\n**3/3 获取货件单号：** ✅ 成功"
+else
+    STATUS="failed"
+    DETAIL="**1/3 采集库存明细：** $([ $EXIT_CODE_1 -eq 0 ] && echo '✅ 成功' || echo '❌ 失败')\n**2/3 写入飞书多维表：** $([ $EXIT_CODE_2 -eq 0 ] && echo '✅ 成功' || echo '❌ 失败')\n**3/3 获取货件单号：** $([ $EXIT_CODE_3 -eq 0 ] && echo '✅ 成功' || echo '❌ 失败')"
+fi
+
+PYTHONPATH=/opt/apps/pythondata /opt/apps/pythondata/venv/bin/python3 \
+    /opt/apps/pythondata/scripts/notify_feishu.py \
+    --task "库存同步" \
+    --status "$STATUS" \
+    --detail "$DETAIL" \
+    --elapsed "$ELAPSED_STR"

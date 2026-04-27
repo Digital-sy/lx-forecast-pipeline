@@ -1489,6 +1489,15 @@ class FeishuClient:
             table_id = await self.create_table(table_name)
         
         # 更新实例的table_id（确保后续操作使用正确的table_id）
+        # 若 create_table 因SDK Bug 返回空ID，用表名反查
+        if not table_id:
+            import logging as _log
+            _log.getLogger(__name__).warning(f'table_id为空，按表名反查: {table_name}')
+            _tables = await self.get_tables()
+            table_id = _tables.get(table_name, '')
+            if not table_id:
+                raise RuntimeError(f'无法获取表 {table_name!r} 的 table_id')
+            _log.getLogger(__name__).info(f'反查成功: {table_name} -> {table_id}')
         self.table_id = table_id
         
         # 获取现有字段
