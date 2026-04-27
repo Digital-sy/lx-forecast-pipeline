@@ -147,13 +147,21 @@ def send_feishu_message(webhook: str, title: str, content: str) -> bool:
 # 数据读取
 # ────────────────────────────────────────────────────────────────────────────
 
-def read_order_suggest_summary():
-    """
-    从建议下单量表读取摘要数据：
-    - 总款数、需补单款数
-    - 定制/现货分类统计
-    - 建议下单量TOP5
-    """
+def read_order_suggest_summary(current_date: datetime):
+    """读取建议下单量摘要，含各月分拆"""
+    year = current_date.year
+    month = current_date.month
+
+    # 生成4个月标签
+    month_labels = []
+    for i in range(4):
+        m = month + i
+        y = year
+        while m > 12:
+            m -= 12
+            y += 1
+        month_labels.append(f"{str(y)[-2:]}年{m}月")
+
     with db_cursor() as cursor:
         # 总览
         cursor.execute("""
@@ -164,6 +172,21 @@ def read_order_suggest_summary():
             FROM `建议下单量表`
         """)
         overview = cursor.fetchone()
+
+        # 各月建议下单合计
+        monthly_suggest = {}
+        monthly_op = {}
+        for label in month_labels:
+            sys_col = f"`{label}建议下单`"
+            op_col  = f"`{label}运营预计`"
+            try:
+                cursor.execute(f"SELECT SUM({sys_col}) AS s, SUM({op_col}) AS o FROM `建议下单量表`")
+                row = cursor.fetchone()
+                monthly_suggest[label] = int(row['s'] or 0)
+                monthly_op[label]      = int(row['o'] or 0)
+            except Exception:
+                monthly_suggest[label] = 0
+                monthly_op[label]      = 0
 
         # 按面料类型
         cursor.execute("""
@@ -186,58 +209,61 @@ def read_order_suggest_summary():
         """)
         top5 = cursor.fetchall()
 
-    return overview, by_type, top5
+    return overview, by_type, top5, month_labels, monthly_suggest, monthly_op
 
 
-def read_actual_order_this_month(current_date: datetime):
+def read_actual_order_by_month(current_date: datetime):
     """
-    从采购单表读取本月实际下单量（按创建时间在本月内，状态≠已作废）
-    返回：{(SPU, 店铺): 实际数量}  以及总量
+    从采购单表读取未来4个月各月实际下单量（按创建时间月份，状态≠已作废）
+    返回：{月份label: 实际下单量}, 总量
     """
     year = current_date.year
     month = current_date.month
-    month_start = f"{year}-{month:02d}-01"
-    if month == 12:
-        month_end = f"{year+1}-01-01"
-    else:
-        month_end = f"{year}-{month+1:02d}-01"
 
-    actual_map = defaultdict(int)
+    monthly_actual = {}
+    total = 0
+
     try:
         with db_cursor() as cursor:
-            cursor.execute("""
-                SELECT SKU, 店铺, SUM(实际数量) AS 总量
-                FROM `采购单`
-                WHERE 状态 != '已作废'
-                  AND 创建时间 >= %s AND 创建时间 < %s
-                  AND SKU IS NOT NULL AND SKU != ''
-                GROUP BY SKU, 店铺
-            """, (month_start, month_end))
-            for row in cursor.fetchall():
-                spu = extract_spu((row['SKU'] or '').strip())
-                shop = (row['店铺'] or '').strip()
-                if spu and shop:
-                    actual_map[(spu, shop)] += int(row['总量'] or 0)
+            for i in range(4):
+                m = month + i
+                y = year
+                while m > 12:
+                    m -= 12
+                    y += 1
+                label = f"{str(y)[-2:]}年{m}月"
+                m_start = f"{y}-{m:02d}-01"
+                m_end   = f"{y}-{m+1:02d}-01" if m < 12 else f"{y+1}-01-01"
+
+                cursor.execute("""
+                    SELECT SUM(实际数量) AS 总量
+                    FROM `采购单`
+                    WHERE 状态 != '已作废'
+                      AND 创建时间 >= %s AND 创建时间 < %s
+                      AND SKU IS NOT NULL AND SKU != ''
+                """, (m_start, m_end))
+                row = cursor.fetchone()
+                val = int(row['总量'] or 0)
+                monthly_actual[label] = val
+                total += val
     except Exception as e:
         logger.warning(f"读取采购单失败: {e}")
 
-    total = sum(actual_map.values())
-    return actual_map, total
+    return monthly_actual, total
 
 
 def read_fill_rate_stats(current_date: datetime):
     """
     填报完成率统计（按运营维度）：
-    - 分母：预测对比表里系统预测 > 0 的 SPU+店铺+月 组合（本月起未来4月）
-    - 分子：运营预计下单表里有记录的 SPU+店铺+月（无论值是多少，有记录=填了）
-    - 判断依据：记录存在 = 填了（包括填0），不存在 = 未填
+    - 分母：预测对比表里系统预测>0 的唯一 SPU+店铺 组合（去重，不按月份重复计）
+    - 分子：运营预计下单表里，该 SPU+店铺 在未来4个月内有任意一条记录 = 已填
+    - 判断依据：有记录=填了（包括填0），无记录=未填
 
     返回：{运营: {'should': N, 'filled': M, 'rate': R}}
     """
     year = current_date.year
     month = current_date.month
 
-    # 生成未来4个月的统计日期
     forecast_dates = []
     for i in range(4):
         m = month + i
@@ -251,10 +277,11 @@ def read_fill_rate_stats(current_date: datetime):
 
     try:
         with db_cursor() as cursor:
-            # 分母：系统预测>0 的 SPU+店铺+月（从预测对比表）
             placeholders = ','.join(['%s'] * len(forecast_dates))
+
+            # 分母：系统预测>0 的唯一 SPU+店铺（去重，不按月份）
             cursor.execute(f"""
-                SELECT p.SPU, p.店铺, p.统计日期, l.负责人 AS 运营
+                SELECT DISTINCT p.SPU, p.店铺, l.负责人 AS 运营
                 FROM `预测对比表` p
                 LEFT JOIN `listing` l
                     ON l.SKU COLLATE utf8mb4_unicode_ci
@@ -266,56 +293,42 @@ def read_fill_rate_stats(current_date: datetime):
             """, forecast_dates)
             should_rows = cursor.fetchall()
 
-            # 分子：运营预计下单表里有记录的 SPU+店铺+月
+            # 分子：运营预计下单表里有任意记录的 SPU+店铺（在未来4个月内，有记录即算填了）
             cursor.execute(f"""
                 SELECT DISTINCT
-                    s.SPU,
-                    o.店铺,
-                    DATE_FORMAT(o.统计日期, '%%Y-%%m-%%d') AS 统计日期
-                FROM `运营预计下单表` o
-                JOIN (
-                    SELECT SKU, SPU FROM `运营预计下单表`
-                    WHERE SPU IS NOT NULL AND SPU != ''
-                ) s ON o.SKU = s.SKU
-                WHERE DATE_FORMAT(o.统计日期, '%%Y-%%m-%%d') IN ({placeholders})
-            """, forecast_dates)
-
-            # 简化：直接按SKU匹配，转成SPU+店铺+月集合
-            cursor.execute(f"""
-                SELECT DISTINCT
-                    SKU, 店铺,
-                    DATE_FORMAT(统计日期, '%%Y-%%m-%%d') AS 月份
+                    SKU, 店铺
                 FROM `运营预计下单表`
                 WHERE DATE_FORMAT(统计日期, '%%Y-%%m-%%d') IN ({placeholders})
             """, forecast_dates)
             filled_raw = cursor.fetchall()
 
-        # 已填集合：(SPU, 店铺, 月份)
+        # 已填集合：(SPU, 店铺)
         filled_set = set()
         for row in filled_raw:
             spu = extract_spu((row['SKU'] or '').strip())
             shop = (row['店铺'] or '').strip()
             if spu and shop:
-                filled_set.add((spu, shop, row['月份']))
+                filled_set.add((spu, shop))
 
-        # 统计每个运营的分母和分子
+        # 统计每个运营的分母和分子（已去重的SPU+店铺）
+        seen = set()
         for row in should_rows:
             spu = (row['SPU'] or '').strip()
             shop = (row['店铺'] or '').strip()
-            date_str = str(row['统计日期'])[:10]
             operator = (row['运营'] or '未知').strip()
-
             if not spu or not shop:
                 continue
-
+            key = (operator, spu, shop)
+            if key in seen:
+                continue
+            seen.add(key)
             stats[operator]['should'] += 1
-            if (spu, shop, date_str) in filled_set:
+            if (spu, shop) in filled_set:
                 stats[operator]['filled'] += 1
 
     except Exception as e:
         logger.warning(f"读取填报完成率失败: {e}")
 
-    # 计算完成率
     result = {}
     for operator, data in stats.items():
         should = data['should']
@@ -348,11 +361,25 @@ def read_fabric_usage_summary():
 def build_production_card(
     current_date: datetime,
     overview, by_type, top5,
-    actual_total: int,
+    month_labels, monthly_suggest, monthly_op,
+    monthly_actual: dict,
     fill_stats: dict,
 ) -> dict:
     """组装生产经理飞书卡片"""
     month_label = f"{current_date.year}年{current_date.month}月"
+
+    # 月度分拆（系统建议 vs 运营预计 vs 实际下单）
+    monthly_lines = []
+    for label in month_labels:
+        sys_v = monthly_suggest.get(label, 0)
+        op_v  = monthly_op.get(label, 0)
+        act_v = monthly_actual.get(label, 0)
+        monthly_lines.append(
+            f"**{label}**　系统建议 {sys_v:,} 件　"
+            f"运营预计 {op_v:,} 件　"
+            f"实际已下单 {act_v:,} 件"
+        )
+    monthly_text = "\n".join(monthly_lines)
 
     # 按面料类型
     type_text = "\n".join(
@@ -386,9 +413,10 @@ def build_production_card(
                 f"**总览**\n"
                 f"总款数：{int(overview['总款数']):,} 款　"
                 f"需补单：{int(overview['需补单款数']):,} 款\n"
-                f"建议下单总量：**{int(overview['建议下单总量'] or 0):,} 件**\n"
-                f"本月实际已下单：{actual_total:,} 件"
+                f"建议下单总量：**{int(overview['建议下单总量'] or 0):,} 件**"
             }},
+            {"tag": "hr"},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**各月明细**\n{monthly_text}"}},
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**按面料类型**\n{type_text}"}},
             {"tag": "hr"},
@@ -405,9 +433,17 @@ def build_production_card(
 def build_product_card(
     current_date: datetime,
     fabric_rows, total_usage: float, total_order: int,
+    month_labels: list, monthly_suggest: dict,
 ) -> dict:
     """组装产品经理飞书卡片"""
     month_label = f"{current_date.year}年{current_date.month}月"
+
+    # 月度建议下单分拆（产品经理关注各月的生产节奏）
+    monthly_lines = []
+    for label in month_labels:
+        val = monthly_suggest.get(label, 0)
+        monthly_lines.append(f"**{label}**　建议下单 {val:,} 件")
+    monthly_text = "\n".join(monthly_lines)
 
     top5_text = "\n".join(
         f"· **{r['面料']}**：{float(r['预计用量(米)'] or 0):,.0f} 米"
@@ -428,6 +464,8 @@ def build_product_card(
                 f"总预计用量：**{total_usage:,.0f} 米**"
             }},
             {"tag": "hr"},
+            {"tag": "div", "text": {"tag": "lark_md", "content": f"**各月建议下单**\n{monthly_text}"}},
+            {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**用量 TOP5 面料**\n{top5_text}"}},
             {"tag": "note", "elements": [
                 {"tag": "plain_text", "content": "详细数据请查看飞书「面料预计用量表」"}
@@ -447,20 +485,22 @@ def main():
 
     current_date = datetime.now()
 
-    # 读取数据
-    overview, by_type, top5 = read_order_suggest_summary()
-    _, actual_total = read_actual_order_this_month(current_date)
+    overview, by_type, top5, month_labels, monthly_suggest, monthly_op = \
+        read_order_suggest_summary(current_date)
+    monthly_actual, _ = read_actual_order_by_month(current_date)
     fill_stats = read_fill_rate_stats(current_date)
     fabric_rows, total_usage, total_order = read_fabric_usage_summary()
 
-    # 组装卡片并发送
     prod_card = build_production_card(
-        current_date, overview, by_type, top5, actual_total, fill_stats
+        current_date, overview, by_type, top5,
+        month_labels, monthly_suggest, monthly_op,
+        monthly_actual, fill_stats,
     )
     send_card(RECEIVER_PRODUCTION, prod_card)
 
     fabric_card = build_product_card(
-        current_date, fabric_rows, total_usage, total_order
+        current_date, fabric_rows, total_usage, total_order,
+        month_labels, monthly_suggest,
     )
     send_card(RECEIVER_PRODUCT, fabric_card)
 
