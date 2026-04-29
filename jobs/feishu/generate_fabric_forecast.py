@@ -705,7 +705,7 @@ def save_fabric_forecast(data_list: List[Dict[str, Any]]) -> None:
             logger.info("  已清空旧数据")
 
             sql = """
-            INSERT INTO `面料预估表`
+            INSERT IGNORE INTO `面料预估表`
                 (`统计类型`, `SKU`, `SPU`, `面料`, `面料编号`, `颜色缩写`, `颜色`,
                  `面料颜色编号`, `统计日期`, `月份`,
                  `运营预计下单量`, `系统预估下单量`,
