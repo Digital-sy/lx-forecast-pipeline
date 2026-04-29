@@ -653,32 +653,46 @@ async def write_fabric_to_feishu(records: List[Dict[str, Any]], current_date: da
 
 
 async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
-    """写面料预估明细到飞书多维表（替代产品部BI看板），只写当月+未来"""
+    """写面料预估明细到飞书多维表（新版），写当月+未来所有数据"""
     field_list = [
-        {'name': '统计月份',     'type': 'text'},
-        {'name': 'SKU',          'type': 'text'},
-        {'name': 'SPU',          'type': 'text'},
-        {'name': '面料',         'type': 'text'},
-        {'name': '面料品名',     'type': 'text'},
-        {'name': '面料颜色编号', 'type': 'text'},
-        {'name': '颜色',         'type': 'text'},
-        {'name': '预计下单件数', 'type': 'number'},
-        {'name': '预计用量/米',  'type': 'number', 'precision': 2},
-        {'name': '库存量/米',    'type': 'number', 'precision': 2},
-        {'name': '待到货量/米',  'type': 'number', 'precision': 2},
-        {'name': '预计总量/米',  'type': 'number', 'precision': 2},
+        {'name': '统计类型',        'type': 'text'},
+        {'name': '面料',            'type': 'text'},
+        {'name': '面料编号',        'type': 'text'},
+        {'name': '颜色缩写',        'type': 'text'},
+        {'name': '颜色',            'type': 'text'},
+        {'name': '面料颜色编号',    'type': 'text'},
+        {'name': '统计月份',        'type': 'text'},
+        {'name': '运营预计下单量',  'type': 'number'},
+        {'name': '系统预估下单量',  'type': 'number'},
+        {'name': '预计用量/米',     'type': 'number', 'precision': 2},
+        {'name': '系统预估用量/米', 'type': 'number', 'precision': 2},
+        {'name': '米数每条',        'type': 'number', 'precision': 2},
+        {'name': '预计用量/条',     'type': 'number', 'precision': 2},
+        {'name': '系统预估用量/条', 'type': 'number', 'precision': 2},
+        {'name': '库存量/条',       'type': 'number', 'precision': 2},
+        {'name': '库存量/米',       'type': 'number', 'precision': 2},
+        {'name': '待到货量/条',     'type': 'number', 'precision': 2},
+        {'name': '待到货量/米',     'type': 'number', 'precision': 2},
+        {'name': '预计总量/条',     'type': 'number', 'precision': 2},
+        {'name': '预计总量/米',     'type': 'number', 'precision': 2},
+        {'name': '用量信息缺失SPU', 'type': 'text'},
     ]
     client = await _get_or_create_table(FEISHU_APP_TOKEN, '面料预估明细', field_list, remove_extra=True)
 
     cutoff = f"{current_date.year}-{current_date.month:02d}-01"
     with db_cursor() as cursor:
         cursor.execute("""
-            SELECT SKU, SPU, 面料, 面料品名, 面料颜色编号, 颜色,
-                   统计日期, 预计下单件数, `预计用量/米`,
-                   `库存量/米`, `待到货量/米`, `预计总量/米`
+            SELECT 统计类型, 面料, 面料编号, 颜色缩写, 颜色, 面料颜色编号,
+                   统计日期,
+                   运营预计下单量, 系统预估下单量,
+                   `预计用量/米`, `系统预估用量/米`, 米数每条,
+                   `预计用量/条`, `系统预估用量/条`,
+                   `库存量/条`, `库存量/米`, `待到货量/条`, `待到货量/米`,
+                   `预计总量/条`, `预计总量/米`,
+                   用量信息缺失SPU
             FROM `面料预估表`
             WHERE 统计日期 >= %s
-            ORDER BY 统计日期, SKU
+            ORDER BY 统计类型, 统计日期, 面料, 颜色缩写
         """, (cutoff,))
         rows = cursor.fetchall()
     logger.info(f"面料预估明细：共 {len(rows)} 条（{cutoff} 起）")
@@ -688,18 +702,27 @@ async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
         d = r['统计日期']
         stat_month = d.strftime('%Y-%m') if hasattr(d, 'strftime') else str(d)[:7]
         feishu_records.append({
-            '统计月份':     stat_month,
-            'SKU':          r['SKU'] or '',
-            'SPU':          r['SPU'] or '',
-            '面料':         r['面料'] or '',
-            '面料品名':     r['面料品名'] or '',
-            '面料颜色编号': r['面料颜色编号'] or '',
-            '颜色':         r['颜色'] or '',
-            '预计下单件数': int(r['预计下单件数'] or 0),
-            '预计用量/米':  float(r['预计用量/米'] or 0),
-            '库存量/米':    float(r['库存量/米'] or 0),
-            '待到货量/米':  float(r['待到货量/米'] or 0),
-            '预计总量/米':  float(r['预计总量/米'] or 0),
+            '统计类型':        r['统计类型'] or '',
+            '面料':            r['面料'] or '',
+            '面料编号':        r['面料编号'] or '',
+            '颜色缩写':        r['颜色缩写'] or '',
+            '颜色':            r['颜色'] or '',
+            '面料颜色编号':    r['面料颜色编号'] or '',
+            '统计月份':        stat_month,
+            '运营预计下单量':  int(r['运营预计下单量'] or 0),
+            '系统预估下单量':  int(r['系统预估下单量'] or 0),
+            '预计用量/米':     float(r['预计用量/米'] or 0),
+            '系统预估用量/米': float(r['系统预估用量/米'] or 0),
+            '米数每条':        float(r['米数每条'] or 0),
+            '预计用量/条':     float(r['预计用量/条'] or 0),
+            '系统预估用量/条': float(r['系统预估用量/条'] or 0),
+            '库存量/条':       float(r['库存量/条'] or 0),
+            '库存量/米':       float(r['库存量/米'] or 0),
+            '待到货量/条':     float(r['待到货量/条'] or 0),
+            '待到货量/米':     float(r['待到货量/米'] or 0),
+            '预计总量/条':     float(r['预计总量/条'] or 0),
+            '预计总量/米':     float(r['预计总量/米'] or 0),
+            '用量信息缺失SPU': r['用量信息缺失SPU'] or '',
         })
 
     await client.delete_all_records()
