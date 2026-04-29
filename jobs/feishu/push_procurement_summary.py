@@ -385,10 +385,10 @@ def build_fabric_card(
         op_usage  = op_map.get(fabric, 0.0)
         stock     = stock_map.get(fabric, 0.0)
         table_rows.append({
-            "面料":     {"tag": "plain_text", "content": fabric},
-            "系统预计": {"tag": "plain_text", "content": f"{sys_usage:,.0f}"},
-            "运营预估": {"tag": "plain_text", "content": f"{op_usage:,.0f}"},
-            "现有库存": {"tag": "plain_text", "content": f"{stock:,.0f}"},
+            "面料":     fabric,
+            "系统预计": f"{sys_usage:,.0f}",
+            "运营预估": f"{op_usage:,.0f}",
+            "现有库存": f"{stock:,.0f}",
         })
 
     table_element = {
