@@ -6,8 +6,9 @@
 发送流程：
   1. 核查飞书多维表数据（表已更新、填写月份正确）
   2. 从数据库获取运营名单及其负责店铺
+     + 自动从人员多维表拉取在职运营的 open_id（无需手动维护）
   3. 推送「发送预览确认卡片」给管理员（刘宗霖），
-     在飞书内回复「确认发送」/ 「取消」来触发或中止
+     在飞书内回复「确认发送」/「取消」来触发或中止
   4. 确认后正式发送通知给各运营，并推送发送结果汇报
 
 用法：
@@ -55,21 +56,18 @@ FEISHU_BASE      = "https://open.feishu.cn/open-apis"
 FEISHU_APP_TOKEN = "A1oCb6elda8Q76s0vNKcHYEznCg"   # 销量预估多维表
 FEISHU_TABLE_URL = "https://dkh9m74cxl.feishu.cn/base/A1oCb6elda8Q76s0vNKcHYEznCg"
 
-# ── 管理员（你自己）──────────────────────────────────────────────────────────────
+# ── 管理员 ─────────────────────────────────────────────────────────────────────
 ADMIN_OPEN_ID = "ou_45d24eddffa044503caf29d6c8a2e003"   # 刘宗霖
 ADMIN_NAME    = "刘宗霖"
 
-# 等待管理员飞书确认的超时（秒），默认 10 分钟
+# ── 人员多维表（自动拉取在职运营 open_id，无需手动维护）────────────────────────
+STAFF_APP_TOKEN = "QYQTb0gWxaRAARsTpMYcvzxAnjh"
+STAFF_TABLE_ID  = "tblby8J4GqbYcqkV"
+
+# 等待管理员飞书确认的超时（秒）
 CONFIRM_TIMEOUT = 600
 
-# ── 运营 open_id 映射（运营姓名 → 飞书 open_id）──────────────────────────────
-# 填写 open_id 后才能向该运营发送私信；缺少的运营会在结果中提示跳过
-OPERATOR_OPENID_MAP: Dict[str, str] = {
-    # "张三": "ou_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-    # "李四": "ou_yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
-}
-
-# ── 不通知的店铺（与 write_sales_to_feishu.py 保持一致）──────────────────────
+# ── 不通知的店铺 ────────────────────────────────────────────────────────────────
 EXCLUDED_SHOPS = {
     "TEMU半托管-A店", "TEMU半托管-C店", "TEMU半托管-M店",
     "TEMU半托管-P店", "TEMU半托管-V店", "TEMU半托管-本土店-R店",
@@ -162,6 +160,7 @@ async def verify_feishu_table_data() -> Tuple[bool, List[str], Dict[str, dict]]:
         try:
             sc = FeishuClient(app_token=FEISHU_APP_TOKEN, table_id=table_id)
             field_map = await sc.get_table_fields()
+            # field_map 结构为 {字段ID: 字段名}，需在 values() 中查找
             missing = [l for l in expected_labels if l not in field_map.values()]
             if missing:
                 print(f"\n  ⚠  [{shop_name}] 缺少字段：{missing}")
@@ -197,8 +196,60 @@ async def verify_feishu_table_data() -> Tuple[bool, List[str], Dict[str, dict]]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Step 2：从数据库获取运营名单
+# Step 2：获取运营名单 + 自动拉取 open_id
 # ══════════════════════════════════════════════════════════════════════════════
+
+def fetch_operator_openid_map() -> Dict[str, str]:
+    """
+    从飞书人员多维表自动拉取在职人员的 open_id。
+    过滤「是否离职=True」的记录，支持翻页。
+    Returns: {姓名: open_id}
+    """
+    import requests
+    try:
+        headers = _h()
+        result = {}
+        page_token = None
+
+        while True:
+            params = {"page_size": 100}
+            if page_token:
+                params["page_token"] = page_token
+
+            resp = requests.get(
+                f"{FEISHU_BASE}/bitable/v1/apps/{STAFF_APP_TOKEN}/tables/{STAFF_TABLE_ID}/records",
+                headers=headers,
+                params=params,
+                timeout=15,
+            ).json()
+
+            if resp.get("code") != 0:
+                logger.warning(f"拉取人员表失败: {resp.get('msg')}")
+                break
+
+            for item in resp.get("data", {}).get("items", []):
+                fields = item.get("fields", {})
+                if fields.get("是否离职"):
+                    continue
+                users = fields.get("人员", [])
+                if not users:
+                    continue
+                name = users[0].get("name", "").strip()
+                oid  = users[0].get("id", "").strip()
+                if name and oid:
+                    result[name] = oid
+
+            if not resp.get("data", {}).get("has_more"):
+                break
+            page_token = resp.get("data", {}).get("page_token")
+
+        print(f"  ✓ 人员表：拉取到 {len(result)} 位在职人员 open_id")
+        return result
+
+    except Exception as e:
+        logger.warning(f"拉取人员 open_id 失败: {e}")
+        return {}
+
 
 def get_operator_shop_map() -> Dict[str, List[str]]:
     """运营 → 负责店铺列表（从产品信息表 / listing 表）"""
@@ -241,11 +292,20 @@ def get_operator_shop_map() -> Dict[str, List[str]]:
     return dict(op_map)
 
 
-def build_send_tasks(op_shop_map: Dict[str, List[str]]) -> List[Dict]:
+def build_send_tasks(
+    op_shop_map: Dict[str, List[str]],
+    openid_map: Dict[str, str],
+) -> List[Dict]:
+    """构建待发送任务列表，open_id 来自人员多维表"""
     tasks = []
     for name, shops in sorted(op_shop_map.items()):
-        open_id = OPERATOR_OPENID_MAP.get(name, "")
-        tasks.append({"name": name, "open_id": open_id, "shops": shops, "has_openid": bool(open_id)})
+        open_id = openid_map.get(name, "")
+        tasks.append({
+            "name": name,
+            "open_id": open_id,
+            "shops": shops,
+            "has_openid": bool(open_id),
+        })
     return tasks
 
 
@@ -259,11 +319,10 @@ def build_admin_confirm_card(
     shop_stats: Dict[str, dict],
 ) -> dict:
     """构建发给管理员的发送前确认卡片（含完整预览）"""
-    now = datetime.now()
+    now    = datetime.now()
     valid  = [t for t in send_tasks if t["has_openid"]]
     no_id  = [t for t in send_tasks if not t["has_openid"]]
 
-    # 发送名单
     list_lines = []
     for t in send_tasks:
         shops_str = "、".join(t["shops"][:3]) + ("…" if len(t["shops"]) > 3 else "")
@@ -274,14 +333,12 @@ def build_admin_confirm_card(
     no_id_warn = ""
     if no_id:
         names = "、".join(t["name"] for t in no_id)
-        no_id_warn = f"\n\n⚠️ **缺 open_id（将跳过）：** {names}\n请在脚本 `OPERATOR_OPENID_MAP` 中补充。"
+        no_id_warn = f"\n\n⚠️ **未找到 open_id（将跳过）：** {names}\n可能已离职或不在人员表中。"
 
-    # 月份
     months_text = "　".join(
         f"`{lbl.replace('预计下单量(运营填写)', '')}`" for lbl in month_labels
     )
 
-    # 填写进度
     stat_lines = []
     for shop, stat in shop_stats.items():
         bar = "█" * int(stat["rate"] * 10) + "░" * (10 - int(stat["rate"] * 10))
@@ -429,7 +486,7 @@ def poll_for_admin_reply(chat_id: str, sent_at: float) -> str:
     """
     import requests
     deadline = sent_at + CONFIRM_TIMEOUT
-    last_ts  = sent_at   # 只看发送卡片之后的消息
+    last_ts  = sent_at
 
     print(f"\n  ⏳ 等待飞书确认（最多 {CONFIRM_TIMEOUT // 60} 分钟）...", flush=True)
     print("     请在飞书对话中回复「确认发送」或「取消」\n", flush=True)
@@ -452,11 +509,11 @@ def poll_for_admin_reply(chat_id: str, sent_at: float) -> str:
             for msg in resp.get("data", {}).get("items", []):
                 create_ts = int(msg.get("create_time", "0")) / 1000
                 if create_ts <= last_ts:
-                    continue   # 跳过旧消息
+                    continue
 
                 sender_id = msg.get("sender", {}).get("id", "")
                 if sender_id != ADMIN_OPEN_ID:
-                    continue   # 只接受管理员的回复
+                    continue
 
                 msg_type = msg.get("msg_type", "")
                 body     = msg.get("body", {}).get("content", "")
@@ -499,7 +556,10 @@ def _patch_confirmed(message_id: str, op_count: int):
             "tag": "div",
             "text": {
                 "tag": "lark_md",
-                "content": f"**{ADMIN_NAME}** 于 **{now}** 确认，正在向 **{op_count}** 位运营发送通知...\n\n发送完成后将推送结果汇报。",
+                "content": (
+                    f"**{ADMIN_NAME}** 于 **{now}** 确认，"
+                    f"正在向 **{op_count}** 位运营发送通知...\n\n发送完成后将推送结果汇报。"
+                ),
             },
         }],
     })
@@ -616,7 +676,7 @@ def execute_send(
         oid  = task["open_id"]
 
         if not oid:
-            print(f"  ⚠  跳过 {name}（无 open_id）")
+            print(f"  ⚠  跳过 {name}（未在人员表找到，可能已离职）")
             skip += 1
             continue
 
@@ -649,7 +709,7 @@ def execute_send(
             print(f"  ✗ 异常   → {name}  {e}")
             fail += 1
 
-        time.sleep(0.3)  # 限流
+        time.sleep(0.3)
 
     return ok, skip, fail
 
@@ -678,10 +738,10 @@ def send_admin_result(ok: int, skip: int, fail: int, month_labels: List[str]):
                         f"**发送月份：** {months_text}\n"
                         f"**完成时间：** {now_str}\n\n"
                         f"✅ 成功 **{ok}** 人\n"
-                        f"⏭ 跳过 **{skip}** 人（缺 open_id）\n"
+                        f"⏭ 跳过 **{skip}** 人（未在人员表找到）\n"
                         f"❌ 失败 **{fail}** 人"
                         + (
-                            "\n\n⚠️ 失败的运营请手动在飞书@通知，或补充 open_id 后重试。"
+                            "\n\n⚠️ 失败的运营请手动在飞书@通知。"
                             if fail > 0 else ""
                         )
                     ),
@@ -699,10 +759,10 @@ def send_admin_result(ok: int, skip: int, fail: int, month_labels: List[str]):
 async def main():
     parser = argparse.ArgumentParser(description="通知运营填写飞书多维表预估下单量")
     parser.add_argument("--dry-run", action="store_true", help="预览模式，不发送")
-    parser.add_argument("--yes", "-y",  action="store_true", help="跳过飞书确认直接发送")
+    parser.add_argument("--yes", "-y", action="store_true", help="跳过飞书确认直接发送")
     args = parser.parse_args()
-    dry_run   = args.dry_run
-    auto_yes  = args.yes
+    dry_run  = args.dry_run
+    auto_yes = args.yes
 
     print()
     print("══════════════════════════════════════════════════════════")
@@ -717,15 +777,18 @@ async def main():
         print("\n✗ 数据核查未通过，终止。请先运行 write_sales_to_feishu.py 再重试。\n")
         sys.exit(1)
 
-    # ── Step 2：获取运营名单 ───────────────────────────────────────────────────
+    # ── Step 2：获取运营名单 + 自动拉取 open_id ───────────────────────────────
     _section("Step 2  获取运营名单")
+    openid_map  = fetch_operator_openid_map()
     op_shop_map = get_operator_shop_map()
-    send_tasks  = build_send_tasks(op_shop_map)
+    send_tasks  = build_send_tasks(op_shop_map, openid_map)
     valid_count = sum(t["has_openid"] for t in send_tasks)
 
     for t in send_tasks:
         icon = "✓" if t["has_openid"] else "⚠"
         print(f"  {icon} {t['name']}  →  {', '.join(t['shops'])}")
+
+    print(f"\n  共 {len(send_tasks)} 位运营，{valid_count} 位有 open_id 可发送")
 
     if not send_tasks:
         print("  ✗ 无运营名单，退出。\n")
@@ -747,7 +810,10 @@ async def main():
 
     else:
         print(f"  正在推送确认卡片给 {ADMIN_NAME}（{ADMIN_OPEN_ID[:12]}...）...", flush=True)
-        data = _send_interactive(ADMIN_OPEN_ID, build_admin_confirm_card(send_tasks, month_labels, shop_stats))
+        data = _send_interactive(
+            ADMIN_OPEN_ID,
+            build_admin_confirm_card(send_tasks, month_labels, shop_stats),
+        )
         if not data:
             print("  ✗ 确认卡片发送失败，退出。")
             sys.exit(1)
