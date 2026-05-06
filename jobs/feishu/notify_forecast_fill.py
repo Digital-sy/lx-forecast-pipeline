@@ -162,7 +162,7 @@ async def verify_feishu_table_data() -> Tuple[bool, List[str], Dict[str, dict]]:
         try:
             sc = FeishuClient(app_token=FEISHU_APP_TOKEN, table_id=table_id)
             field_map = await sc.get_table_fields()
-            missing = [l for l in expected_labels if l not in field_map]
+            missing = [l for l in expected_labels if l not in field_map.values()]
             if missing:
                 print(f"\n  ⚠  [{shop_name}] 缺少字段：{missing}")
                 print("     → 请先运行 write_sales_to_feishu.py 更新表结构")
