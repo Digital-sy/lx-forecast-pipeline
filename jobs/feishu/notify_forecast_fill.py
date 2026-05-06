@@ -538,8 +538,13 @@ def _update_card(message_id: str, card: dict) -> bool:
         headers=_h(),
         json={"content": json.dumps(card, ensure_ascii=False)},
         timeout=15,
-    ).json()
-    return resp.get("code") == 0
+    )
+    try:
+        data = resp.json()
+        return data.get("code") == 0
+    except Exception:
+        # 飞书 patch 接口部分情况返回非标准 JSON，HTTP 200 视为成功
+        return resp.status_code == 200
 
 
 def poll_for_admin_reply(chat_id: str, sent_at: float) -> str:
