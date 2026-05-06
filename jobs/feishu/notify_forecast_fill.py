@@ -173,7 +173,7 @@ async def verify_feishu_table_data() -> Tuple[bool, List[str], Dict[str, dict]]:
             current_label = expected_labels[0]
             filled = sum(
                 1 for r in records
-                if r.get("fields", {}).get(current_label, 0) not in (None, 0, "")
+                if str(r.get("fields", {}).get(current_label, 0) or 0).strip() not in ("", "0", "0.0")
             )
             rate = filled / total if total else 0.0
             shop_stats[shop_name] = {"total": total, "filled": filled, "rate": rate}
