@@ -296,59 +296,70 @@ def get_operator_shop_map() -> Dict[str, List[str]]:
 MIN_MONTHLY_SALES = 100
 
 
-def get_shop_monthly_sales() -> Dict[str, int]:
+def get_operator_monthly_sales() -> Dict[str, int]:
     """
-    从销量统计_msku月度表查询当月各店铺总销量。
-    Returns: {店铺名: 当月总销量}
+    按运营维度统计当月销量：
+    用产品信息表的（运营, SKU, 店铺名）关联销量统计_msku月度表，
+    汇总每位运营名下所有 SKU 的当月销量。
+
+    两张表字符集排序规则不同（utf8mb4_unicode_ci vs utf8mb4_0900_ai_ci），
+    JOIN 字段统一用 CONVERT ... USING utf8mb4 COLLATE utf8mb4_unicode_ci 解决。
+
+    Returns: {运营姓名: 当月总销量}
     """
-    from datetime import datetime
     now = datetime.now()
-    # 取当月第一天，匹配表中统计日期字段
     month_start = now.strftime("%Y-%m-01")
 
-    shop_sales: Dict[str, int] = {}
+    op_sales: Dict[str, int] = {}
     try:
         with db_cursor() as cursor:
             cursor.execute("""
-                SELECT 店铺, SUM(销量) AS 月销量
-                FROM `销量统计_msku月度`
-                WHERE 统计日期 = %s
-                  AND 店铺 IS NOT NULL AND 店铺 != '' AND 店铺 != '无'
-                GROUP BY 店铺
+                SELECT
+                    p.运营,
+                    SUM(s.销量) AS 月销量
+                FROM `产品信息` p
+                INNER JOIN `销量统计_msku月度` s
+                    ON CONVERT(s.SKU   USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                     = CONVERT(p.SKU   USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                    AND CONVERT(s.店铺  USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                     = CONVERT(p.店铺名 USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                WHERE s.统计日期 = %s
+                  AND p.运营 IS NOT NULL AND p.运营 != ''
+                GROUP BY p.运营
             """, (month_start,))
             for row in cursor.fetchall():
-                shop = (row.get("店铺") or "").strip()
+                op = (row.get("运营") or "").strip()
                 sales = int(row.get("月销量") or 0)
-                if shop:
-                    shop_sales[shop] = sales
-        print(f"  ✓ 销量数据：查到 {len(shop_sales)} 个店铺当月销量（{now.strftime('%Y年%m月')}）")
+                if op:
+                    op_sales[op] = sales
+        print(f"  ✓ 销量数据：查到 {len(op_sales)} 位运营当月销量（{now.strftime('%Y年%m月')}）")
     except Exception as e:
-        logger.warning(f"查询当月销量失败: {e}，将跳过销量筛选")
-    return shop_sales
+        logger.warning(f"查询运营当月销量失败: {e}，将跳过销量筛选")
+    return op_sales
 
 
 def build_send_tasks(
     op_shop_map: Dict[str, List[str]],
     openid_map: Dict[str, str],
-    shop_sales: Dict[str, int] = None,
+    op_sales: Dict[str, int] = None,
 ) -> List[Dict]:
     """
     构建待发送任务列表。
     - open_id 来自人员多维表
-    - 当月负责店铺总销量 < MIN_MONTHLY_SALES 的运营跳过（低销量无需填写预估）
+    - 当月名下 SKU 总销量 < MIN_MONTHLY_SALES 的运营跳过
     """
     tasks = []
-    shop_sales = shop_sales or {}
+    op_sales = op_sales or {}
 
     for name, shops in sorted(op_shop_map.items()):
         open_id = openid_map.get(name, "")
 
-        # 汇总该运营所有负责店铺的当月销量
-        total_sales = sum(shop_sales.get(s, 0) for s in shops)
+        # 该运营名下 SKU 当月销量
+        total_sales = op_sales.get(name, 0)
 
         # 销量过低则跳过
-        if shop_sales and total_sales < MIN_MONTHLY_SALES:
-            print(f"  ✗ 跳过 {name}（当月销量 {total_sales} < {MIN_MONTHLY_SALES}）")
+        if op_sales and total_sales < MIN_MONTHLY_SALES:
+            print(f"  ✗ 跳过 {name}（名下SKU当月销量 {total_sales} < {MIN_MONTHLY_SALES}）")
             continue
 
         tasks.append({
@@ -833,13 +844,13 @@ async def main():
     _section("Step 2  获取运营名单")
     openid_map  = fetch_operator_openid_map()
     op_shop_map = get_operator_shop_map()
-    shop_sales  = get_shop_monthly_sales()
-    send_tasks  = build_send_tasks(op_shop_map, openid_map, shop_sales)
+    op_sales    = get_operator_monthly_sales()
+    send_tasks  = build_send_tasks(op_shop_map, openid_map, op_sales)
     valid_count = sum(t["has_openid"] for t in send_tasks)
 
     for t in send_tasks:
         icon = "✓" if t["has_openid"] else "⚠"
-        sales_str = f"  月销量 {t['monthly_sales']}" if shop_sales else ""
+        sales_str = f"  月销量 {t['monthly_sales']}" if op_sales else ""
         print(f"  {icon} {t['name']}  →  {', '.join(t['shops'])}{sales_str}")
 
     print(f"\n  共 {len(send_tasks)} 位运营，{valid_count} 位有 open_id 可发送")
