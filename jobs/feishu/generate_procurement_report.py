@@ -1,21 +1,22 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
 """
-采购建议报告
-生成两张报表写入数据库：
+采购建议报告生成
 
 【报表1】建议下单量表（给生产经理）
-  维度：SPU + 店铺
+  维度：SPU + 店铺 + 月份
   逻辑：建议下单量 = MAX(0, N月预测合计 - 库存 - 待到货)
-       库存 = FBA可售 + FBA在途 + 本地可用量（合并）
-  覆盖月数：定制面料=3个月，现货面料=2个月
 
-【报表2】面料预计用量表（给产品经理，仅定制面料）
+【报表2】面料预计用量汇总（给产品经理）
   维度：面料
   逻辑：预计用量 = Σ(建议下单量 × 单件用量)
+
+【报表3】面料预估明细（给面料跟单）
+  来源：面料预估表（由 generate_fabric_forecast.py 生成）
+  写入飞书多维表「面料预估明细」
 """
 
-import re
+import asyncio
 import sys
 from collections import defaultdict
 from datetime import datetime
@@ -31,256 +32,240 @@ from common.database import db_cursor
 
 logger = get_logger('procurement_report')
 
-# ── 覆盖周期配置 ──────────────────────────────────────────────────────────
-COVERAGE_MONTHS_CUSTOM = 3   # 定制面料：3个月
-COVERAGE_MONTHS_STOCK  = 2   # 现货面料：2个月
-
-# ── 月度分摊衰减权重（前重后轻，共4个月）─────────────────────────────────
+# ── 常量 ─────────────────────────────────────────────────────────────────
 # 含义：第1个月权重最高，越往后越低，让建议下单量前置
-# 调整方式：权重比例越悬殊，前后月份差异越大；改为[1,1,1,1]则退化为纯比例分摊
-MONTHLY_DECAY_WEIGHTS = [1.5, 1.2, 0.9, 0.6]
+COVERAGE_MONTHS_CUSTOM = 3   # 定制面料：覆盖未来3个月
+COVERAGE_MONTHS_STOCK  = 2   # 现货面料：覆盖未来2个月
 
-# ── 输出表名 ──────────────────────────────────────────────────────────────
 TABLE_ORDER_SUGGEST = '建议下单量表'
 TABLE_FABRIC_USAGE  = '面料预计用量表'
 
-
-# ────────────────────────────────────────────────────────────────────────────
-# 工具
-# ────────────────────────────────────────────────────────────────────────────
-
-def remove_psc_pattern(sku: str) -> str:
-    if not sku:
-        return sku
-    sku = re.sub(r'\d+(?:PSC|PCS)', '', sku, flags=re.IGNORECASE)
-    sku = re.sub(r'-+', '-', sku)
-    return sku.strip('-')
-
-
-def extract_spu(sku: str) -> str:
-    if not sku:
-        return ''
-    sku = remove_psc_pattern(sku)
-    idx = sku.find('-')
-    return sku[:idx] if idx > 0 else sku
+# ── 飞书多维表配置 ────────────────────────────────────────────────────────
+FEISHU_APP_TOKEN = "JvmNbfUp8atSpTsUH6Icyqk5nqd"
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Step1：从预测对比表读取系统预测（已按SPU+店铺+月汇总）
+# Step1：读取系统预测数据（来自预测对比表）
 # ────────────────────────────────────────────────────────────────────────────
 
-def read_system_forecast() -> Tuple[
-    Dict[Tuple[str, str], Dict[str, int]],   # {(SPU,shop): {月份: 预测量}}
-    List[str]                                 # 月份顺序列表
-]:
+def read_system_forecast() -> Tuple[Dict[Tuple[str, str], Dict[str, int]], List[str]]:
     """
     从预测对比表读取系统预测销量。
     返回：
-      forecast_map: {(SPU, 店铺): {月份label: 系统预测销量}}
-      month_order:  月份标签列表（按时间升序）
+      forecast_map: {(SPU, 店铺): {月份标签: 系统预测销量}}
+      month_order: 月份标签列表（按时间顺序）
     """
     logger.info("读取系统预测数据（来自预测对比表）...")
 
     forecast_map: Dict[Tuple[str, str], Dict[str, int]] = defaultdict(dict)
     month_set = set()
 
-    with db_cursor() as cursor:
-        cursor.execute("""
-            SELECT SPU, 店铺, 月份, 统计日期, 系统预测销量
-            FROM `预测对比表`
-            ORDER BY 统计日期
-        """)
-        for row in cursor.fetchall():
-            key = (row['SPU'].strip(), row['店铺'].strip())
-            month = row['月份'].strip()
-            forecast_map[key][month] = int(row['系统预测销量'] or 0)
-            month_set.add((str(row['统计日期']), month))
+    try:
+        with db_cursor() as cursor:
+            cursor.execute("""
+                SELECT SPU, 店铺, 月份, 系统预测销量
+                FROM `预测对比表`
+                WHERE SPU IS NOT NULL AND SPU != ''
+                  AND 店铺 IS NOT NULL AND 店铺 != ''
+                  AND 系统预测销量 > 0
+                ORDER BY 统计日期
+            """)
+            for row in cursor.fetchall():
+                spu   = (row['SPU'] or '').strip()
+                shop  = (row['店铺'] or '').strip()
+                month = (row['月份'] or '').strip()
+                qty   = int(row['系统预测销量'] or 0)
+                if spu and shop and month:
+                    forecast_map[(spu, shop)][month] = qty
+                    month_set.add(month)
+    except Exception as e:
+        logger.error(f"读取预测对比表失败: {e}", exc_info=True)
+        return {}, []
 
-    # 按统计日期排序，得到有序月份列表
-    month_order = [m for _, m in sorted(month_set)]
+    # 按月份标签排序（格式 "26年4月"）
+    def month_sort_key(label: str):
+        try:
+            import re
+            m = re.match(r'(\d+)年(\d+)月', label)
+            if m:
+                return int(m.group(1)) * 100 + int(m.group(2))
+        except Exception:
+            pass
+        return 0
 
+    month_order = sorted(month_set, key=month_sort_key)
     logger.info(f"读取完成：{len(forecast_map)} 个SPU+店铺，{len(month_order)} 个月份：{month_order}")
     return dict(forecast_map), month_order
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Step2：读取库存，聚合到SPU+店铺（库存=三项合并，待到货单独列）
+# Step2：读取库存数据
 # ────────────────────────────────────────────────────────────────────────────
 
 def read_inventory() -> Dict[Tuple[str, str], Dict[str, int]]:
-    """
-    读取库存，聚合到 SPU+店铺 维度。
-    库存 = FBA可售 + FBA在途 + 本地可用量（三项合并，生产经理不需要区分）
-    待到货 = 本地待到货（已下单未到仓）
-
-    返回：{(SPU, 店铺): {'库存': int, '待到货': int}}
-    """
+    """读取库存数据（FBA + 本地），返回 {(SPU, 店铺): {库存, 待到货}}"""
     logger.info("读取库存数据...")
 
-    inventory: Dict[Tuple[str, str], Dict[str, int]] = defaultdict(
+    inventory_map: Dict[Tuple[str, str], Dict[str, int]] = defaultdict(
         lambda: {'库存': 0, '待到货': 0}
     )
 
-    # ── FBA可售 + FBA在途 → 并入库存 ─────────────────────────────────────
     try:
         with db_cursor() as cursor:
+            # FBA库存
             cursor.execute("""
-                SELECT SKU, 店铺,
-                       SUM(COALESCE(`总可用库存`, 0)) AS fba_sellable,
-                       SUM(COALESCE(`在途`, 0))       AS fba_transit
-                FROM `FBA库存明细`
-                WHERE SKU IS NOT NULL AND SKU != '' AND SKU != '无'
-                  AND 店铺 IS NOT NULL AND 店铺 != '' AND 店铺 != '无'
-                GROUP BY SKU, 店铺
+                SELECT COUNT(*) as cnt FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='FBA库存明细'
             """)
-            for row in cursor.fetchall():
-                spu = extract_spu((row['SKU'] or '').strip())
-                shop = (row['店铺'] or '').strip()
-                if spu and shop:
-                    key = (spu, shop)
-                    inventory[key]['库存'] += int(row['fba_sellable'] or 0)
-                    inventory[key]['库存'] += int(row['fba_transit']  or 0)
-        logger.info("FBA库存明细读取完成")
-    except Exception as e:
-        logger.warning(f"读取FBA库存明细失败: {e}")
+            if cursor.fetchone().get('cnt', 0):
+                cursor.execute("""
+                    SELECT msku AS SKU, 店铺,
+                           SUM(可售数量) AS 可售,
+                           SUM(在途数量) AS 在途
+                    FROM `FBA库存明细`
+                    WHERE msku IS NOT NULL AND 店铺 IS NOT NULL
+                    GROUP BY msku, 店铺
+                """)
+                for row in cursor.fetchall():
+                    sku  = (row['SKU'] or '').strip()
+                    shop = (row['店铺'] or '').strip()
+                    spu  = _extract_spu(sku)
+                    if spu and shop:
+                        inventory_map[(spu, shop)]['库存']   += int(row['可售'] or 0)
+                        inventory_map[(spu, shop)]['待到货'] += int(row['在途'] or 0)
+            logger.info("FBA库存明细读取完成")
 
-    # ── 本地可用量 → 并入库存；本地待到货 → 待到货 ────────────────────────
-    try:
-        with db_cursor() as cursor:
+            # 库存预估表（本地仓库）
             cursor.execute("""
-                SELECT sku, 店铺, 库存状态,
-                       SUM(COALESCE(数量, 0)) AS 数量合计
-                FROM `库存预估表`
-                WHERE sku IS NOT NULL AND sku != '' AND sku != '无'
-                  AND 库存状态 IN ('本地可用量', '本地待到货')
-                GROUP BY sku, 店铺, 库存状态
+                SELECT COUNT(*) as cnt FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='库存预估表'
             """)
-            for row in cursor.fetchall():
-                spu = extract_spu((row['sku'] or '').strip())
-                shop = (row['店铺'] or '').strip()
-                status = (row['库存状态'] or '').strip()
-                qty = int(row['数量合计'] or 0)
-                if spu:
-                    key = (spu, shop if shop and shop != '无' else '__ALL__')
-                    if status == '本地可用量':
-                        inventory[key]['库存']   += qty
-                    elif status == '本地待到货':
-                        inventory[key]['待到货'] += qty
-        logger.info("库存预估表读取完成")
-    except Exception as e:
-        logger.warning(f"读取库存预估表失败: {e}")
+            if cursor.fetchone().get('cnt', 0):
+                cursor.execute("""
+                    SELECT SKU, 店铺,
+                           SUM(可用量) AS 可用,
+                           SUM(待入库量) AS 待入库
+                    FROM `库存预估表`
+                    WHERE SKU IS NOT NULL AND 店铺 IS NOT NULL
+                    GROUP BY SKU, 店铺
+                """)
+                for row in cursor.fetchall():
+                    sku  = (row['SKU'] or '').strip()
+                    shop = (row['店铺'] or '').strip()
+                    spu  = _extract_spu(sku)
+                    if spu and shop:
+                        inventory_map[(spu, shop)]['库存']   += int(row['可用'] or 0)
+                        inventory_map[(spu, shop)]['待到货'] += int(row['待入库'] or 0)
+            logger.info("库存预估表读取完成")
 
-    return dict(inventory)
+    except Exception as e:
+        logger.error(f"读取库存数据失败: {e}", exc_info=True)
+
+    return dict(inventory_map)
 
 
 def get_inventory(
     inventory_map: Dict[Tuple[str, str], Dict[str, int]],
-    spu: str,
-    shop: str,
+    spu: str, shop: str
 ) -> Dict[str, int]:
-    """获取某SPU+店铺的库存，__ALL__通用库存会叠加进来。"""
-    result = {'库存': 0, '待到货': 0}
-    for key in [(spu, shop), (spu, '__ALL__')]:
-        if key in inventory_map:
-            for k in result:
-                result[k] += inventory_map[key].get(k, 0)
-    return result
+    """获取某 SPU+店铺 的库存，若不存在返回 {库存:0, 待到货:0}"""
+    # 先精确匹配
+    if (spu, shop) in inventory_map:
+        return inventory_map[(spu, shop)]
+    # 跨店铺合并（同 SPU 所有店铺加总）
+    total = {'库存': 0, '待到货': 0}
+    for (s, sh), inv in inventory_map.items():
+        if s == spu:
+            total['库存']   += inv['库存']
+            total['待到货'] += inv['待到货']
+    return total
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Step2b：上次下单工厂（采购单表，取最新一条的供应商）
+# Step3：其他辅助数据
 # ────────────────────────────────────────────────────────────────────────────
 
 def read_last_factory() -> Dict[Tuple[str, str], str]:
-    """
-    从采购单表查每个SPU+店铺最近一次下单的供应商作为工厂。
-    返回：{(SPU, 店铺): 供应商名称}
-    """
+    """上次下单工厂（采购单里最新的供应商）"""
     logger.info("读取上次下单工厂...")
     factory_map: Dict[Tuple[str, str], str] = {}
     try:
         with db_cursor() as cursor:
             cursor.execute("""
-                SELECT SKU, 店铺, 供应商, 创建时间
-                FROM `采购单`
-                WHERE SKU IS NOT NULL AND SKU != '' AND SKU != '无'
-                  AND 店铺 IS NOT NULL AND 店铺 != '' AND 店铺 != '无'
-                  AND 供应商 IS NOT NULL AND 供应商 != ''
-                  AND 状态 != '已作废'
-                ORDER BY 创建时间 DESC
+                SELECT COUNT(*) as cnt FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='采购单'
+            """)
+            if not cursor.fetchone().get('cnt', 0):
+                return factory_map
+            cursor.execute("""
+                SELECT a.msku AS SKU, a.店铺, a.供应商
+                FROM `采购单` a
+                INNER JOIN (
+                    SELECT msku, 店铺, MAX(创建时间) AS max_time
+                    FROM `采购单`
+                    WHERE msku IS NOT NULL AND 店铺 IS NOT NULL
+                    GROUP BY msku, 店铺
+                ) b ON a.msku = b.msku AND a.店铺 = b.店铺 AND a.创建时间 = b.max_time
             """)
             for row in cursor.fetchall():
-                spu = extract_spu((row['SKU'] or '').strip())
+                sku  = (row['SKU'] or '').strip()
                 shop = (row['店铺'] or '').strip()
-                supplier = (row['供应商'] or '').strip()
-                if spu and shop and supplier:
-                    key = (spu, shop)
-                    if key not in factory_map:   # 取最新一条
-                        factory_map[key] = supplier
+                spu  = _extract_spu(sku)
+                if spu and shop:
+                    factory_map[(spu, shop)] = (row['供应商'] or '').strip()
         logger.info(f"工厂信息读取完成：{len(factory_map)} 个SPU+店铺")
     except Exception as e:
-        logger.warning(f"读取工厂信息失败: {e}")
+        logger.warning(f"读取工厂数据失败: {e}")
     return factory_map
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# Step2c：运营预计下单量，按SPU+店铺+月读取（来自预测对比表）
-# ────────────────────────────────────────────────────────────────────────────
-
 def read_op_forecast_by_month() -> Dict[Tuple[str, str], Dict[str, int]]:
-    """
-    从预测对比表读取运营预计下单量，按SPU+店铺+月聚合。
-    返回：{(SPU, 店铺): {月份label: 运营预计下单量}}
-    """
+    """运营预计下单量（按SPU+店铺+月汇总）"""
     logger.info("读取运营预计下单量...")
-    op_map: Dict[Tuple[str, str], Dict[str, int]] = defaultdict(dict)
+    result: Dict[Tuple[str, str], Dict[str, int]] = defaultdict(dict)
     try:
         with db_cursor() as cursor:
             cursor.execute("""
+                SELECT COUNT(*) as cnt FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='预测对比表'
+            """)
+            if not cursor.fetchone().get('cnt', 0):
+                return {}
+            cursor.execute("""
                 SELECT SPU, 店铺, 月份, 运营预计下单量
                 FROM `预测对比表`
-                ORDER BY 统计日期
+                WHERE SPU IS NOT NULL AND 店铺 IS NOT NULL
+                  AND 运营预计下单量 > 0
             """)
             for row in cursor.fetchall():
-                key = ((row['SPU'] or '').strip(), (row['店铺'] or '').strip())
+                spu   = (row['SPU'] or '').strip()
+                shop  = (row['店铺'] or '').strip()
                 month = (row['月份'] or '').strip()
-                qty = int(row['运营预计下单量'] or 0)
-                op_map[key][month] = qty
-        logger.info(f"运营预计下单量读取完成：{len(op_map)} 个SPU+店铺")
+                qty   = int(row['运营预计下单量'] or 0)
+                if spu and shop and month:
+                    result[(spu, shop)][month] = qty
+        logger.info(f"运营预计下单量读取完成：{len(result)} 个SPU+店铺")
     except Exception as e:
         logger.warning(f"读取运营预计下单量失败: {e}")
-    return dict(op_map)
+    return dict(result)
 
-
-# ────────────────────────────────────────────────────────────────────────────
-# Step3：面料类型 + 单件用量（SPU维度）
-# ────────────────────────────────────────────────────────────────────────────
 
 def read_fabric_info() -> Dict[str, Dict[str, Any]]:
-    """
-    读取 面料核价表 + 定制面料参数，
-    返回：{SPU: {
-        'fabric_type': '定制面料'|'现货面料',
-        'fabrics': [(面料, 单件用量), ...]   # 按用量降序
-    }}
-    """
+    """面料类型 + 用量信息"""
     logger.info("读取面料信息...")
-
     fabric_info: Dict[str, Dict[str, Any]] = {}
 
     try:
         with db_cursor() as cursor:
-            # 定制面料名称集合
+            # 定制面料列表
             cursor.execute("""
                 SELECT COUNT(*) as cnt FROM information_schema.TABLES
-                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '定制面料参数'
+                WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='定制面料参数'
             """)
-            if not cursor.fetchone().get('cnt', 0):
-                logger.warning("定制面料参数表不存在")
-                return fabric_info
-
-            cursor.execute("SELECT DISTINCT 面料 FROM `定制面料参数` WHERE 面料 IS NOT NULL AND 面料 != ''")
-            custom_fabrics = {row['面料'].strip() for row in cursor.fetchall()}
+            custom_fabrics = set()
+            if cursor.fetchone().get('cnt', 0):
+                cursor.execute("SELECT 面料 FROM `定制面料参数` WHERE 面料 IS NOT NULL AND 面料!=''")
+                custom_fabrics = {r['面料'].strip() for r in cursor.fetchall()}
 
             # 面料核价表
             cursor.execute("""
@@ -291,9 +276,9 @@ def read_fabric_info() -> Dict[str, Dict[str, Any]]:
             """)
             spu_fabrics: Dict[str, list] = defaultdict(list)
             for row in cursor.fetchall():
-                spu = (row['SPU'] or '').strip()
+                spu    = (row['SPU'] or '').strip()
                 fabric = (row['面料'] or '').strip()
-                usage = float(row['单件用量'] or 0)
+                usage  = float(row['单件用量'] or 0)
                 if spu and fabric:
                     spu_fabrics[spu].append((fabric, usage))
 
@@ -328,9 +313,7 @@ def build_reports(
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     计算每个SPU+店铺的建议下单量，并聚合面料用量。
-
     建议下单量 = MAX(0, N月系统预测合计 - 库存 - 待到货)
-    库存 = FBA可售 + FBA在途 + 本地可用量（已合并）
     """
     logger.info("计算建议下单量...")
 
@@ -347,95 +330,74 @@ def build_reports(
         selected_months = month_order[:n_months]
         forecast_total = sum(monthly_forecast.get(m, 0) for m in selected_months)
 
-        # 库存（合并）+ 待到货
-        inv = get_inventory(inventory_map, spu, shop)
+        inv     = get_inventory(inventory_map, spu, shop)
         stock   = inv['库存']
         pending = inv['待到货']
 
-        # 全部4个月的预测合计（用于比例摊平和系统预测合计展示）
         total_4m_forecast = sum(monthly_forecast.get(m, 0) for m in month_order)
+        suggested = max(0, forecast_total - stock - pending)
 
-        # 建议下单量总量：基于全部月份预测 vs 库存
-        suggested = max(0, total_4m_forecast - stock - pending)
-
-        # ── 衰减权重分摊到各月 ────────────────────────────────────────────
-        # 调整后权重 = 各月预测量 × 位置衰减系数
-        # 月度建议 = 建议总量 × (调整后权重 / 各月权重之和)
-        # 效果：前面月份权重高 → 下单量多，后面月份权重低 → 下单量少
-        # ──────────────────────────────────────────────────────────────────
+        # 各月建议下单：按预测比例分摊
         monthly_suggest: Dict[str, int] = {}
         if total_4m_forecast > 0 and suggested > 0:
-            # 计算各月调整权重
-            adjusted_weights = []
-            for idx, m in enumerate(month_order):
-                decay = MONTHLY_DECAY_WEIGHTS[idx] if idx < len(MONTHLY_DECAY_WEIGHTS) else 0.5
-                adjusted_weights.append(monthly_forecast.get(m, 0) * decay)
-
-            total_weight = sum(adjusted_weights)
-            allocated = 0
-            for idx, m in enumerate(month_order):
-                if idx < len(month_order) - 1:
-                    if total_weight > 0:
-                        m_order = round(suggested * adjusted_weights[idx] / total_weight)
-                    else:
-                        m_order = 0
-                else:
-                    # 最后一个月用差值修正四舍五入误差
-                    m_order = suggested - allocated
-                monthly_suggest[m] = max(0, m_order)
-                allocated += monthly_suggest[m]
+            for m in month_order:
+                ratio = monthly_forecast.get(m, 0) / total_4m_forecast
+                monthly_suggest[m] = int(suggested * ratio)
         else:
             for m in month_order:
                 monthly_suggest[m] = 0
-        # ──────────────────────────────────────────────────────────────────
 
-        # 运营预计下单量（各月 + 合计，取覆盖月数内）
+        # 运营预计下单量（各月）
         op_monthly = op_forecast_map.get((spu, shop), {})
-        op_total = sum(op_monthly.get(m, 0) for m in selected_months)
+        op_total = sum(op_monthly.get(m, 0) for m in month_order)
 
-        record = {
-            'SPU':            spu,
-            '店铺':           shop,
-            '工厂':           factory_map.get((spu, shop), ''),
-            '面料类型':       fabric_type,
-            '覆盖月数':       n_months,
-            '建议下单合计':   suggested,   # 等于各月建议下单之和，和列头一致
-            '运营预计合计':   op_total,
-            '库存':           stock,
-            '待到货':         pending,
-            '建议下单量':     suggested,
+        factory = factory_map.get((spu, shop), '')
+
+        record: Dict[str, Any] = {
+            'SPU':          spu,
+            '店铺':         shop,
+            '工厂':         factory,
+            '面料类型':     fabric_type,
+            '覆盖月数':     n_months,
+            '建议下单合计': suggested,
+            '运营预计合计': op_total,
+            '库存':         stock,
+            '待到货':       pending,
+            '建议下单量':   suggested,
         }
-        # 各月建议下单量 + 运营预计明细
         for m in month_order:
             record[f'{m}建议下单'] = monthly_suggest.get(m, 0)
             record[f'{m}运营预计'] = op_monthly.get(m, 0)
 
         order_records.append(record)
 
+        # 聚合面料用量（只统计定制面料）
         if fabric_type == '定制面料' and suggested > 0:
-            for fabric, usage_per_unit in info.get('fabrics', []):
-                fabric_usage[fabric]['建议下单量合计'] += suggested
-                fabric_usage[fabric]['单件用量'] = usage_per_unit
-                fabric_usage[fabric]['spu_set'].add(spu)
+            for fabric, unit_usage in info.get('fabrics', []):
+                if unit_usage > 0:
+                    fabric_usage[fabric]['建议下单量合计'] += suggested
+                    fabric_usage[fabric]['单件用量'] = unit_usage
+                    fabric_usage[fabric]['spu_set'].add(spu)
 
-    fabric_records: List[Dict[str, Any]] = []
+    logger.info(f"计算完成：{len(order_records)} 个SPU+店铺，{len(fabric_usage)} 种定制面料")
+
+    fabric_records = []
     for fabric, data in sorted(fabric_usage.items(), key=lambda x: -x[1]['建议下单量合计']):
         total_order = data['建议下单量合计']
-        usage = data['单件用量']
+        unit_usage  = data['单件用量']
         fabric_records.append({
             '面料':           fabric,
             'SPU数量':        len(data['spu_set']),
             '建议下单量合计': total_order,
-            '单件用量(米)':   usage,
-            '预计用量(米)':   round(total_order * usage, 2),
+            '单件用量(米)':   unit_usage,
+            '预计用量(米)':   round(total_order * unit_usage, 2),
         })
 
-    logger.info(f"计算完成：{len(order_records)} 个SPU+店铺，{len(fabric_records)} 种定制面料")
     return order_records, fabric_records
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Step5：写入数据库
+# Step5：写数据库
 # ────────────────────────────────────────────────────────────────────────────
 
 def save_order_suggest(records: List[Dict[str, Any]], month_order: List[str]) -> None:
@@ -467,21 +429,35 @@ def save_order_suggest(records: List[Dict[str, Any]], month_order: List[str]) ->
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
               COMMENT='采购建议下单量（生产经理用）';
         """)
+
         cursor.execute(f"TRUNCATE TABLE `{TABLE_ORDER_SUGGEST}`")
 
-        # 兜底：确保字段存在（表已存在时 CREATE IF NOT EXISTS 不会加列）
+        # 兜底：确保固定字段存在
         safe_alters = [
             f"ALTER TABLE `{TABLE_ORDER_SUGGEST}` ADD COLUMN IF NOT EXISTS `工厂` VARCHAR(200) NOT NULL DEFAULT '' AFTER `店铺`",
             f"ALTER TABLE `{TABLE_ORDER_SUGGEST}` ADD COLUMN IF NOT EXISTS `建议下单合计` INT NOT NULL DEFAULT 0 AFTER `覆盖月数`",
             f"ALTER TABLE `{TABLE_ORDER_SUGGEST}` ADD COLUMN IF NOT EXISTS `运营预计合计` INT NOT NULL DEFAULT 0 AFTER `建议下单合计`",
-            # 兼容旧表：把旧字段系统预测合计改名（若存在）
-            f"ALTER TABLE `{TABLE_ORDER_SUGGEST}` CHANGE COLUMN IF EXISTS `系统预测合计` `建议下单合计` INT NOT NULL DEFAULT 0",
         ]
         for sql_alter in safe_alters:
             try:
                 cursor.execute(sql_alter)
             except Exception:
                 pass
+
+        # 动态补月份列（表已存在时 CREATE IF NOT EXISTS 不会新增列）
+        for m in month_order:
+            for col, col_type in [
+                (f'{m}运营预计', 'INT NOT NULL DEFAULT 0'),
+                (f'{m}建议下单', 'INT NOT NULL DEFAULT 0'),
+            ]:
+                try:
+                    cursor.execute(
+                        f"ALTER TABLE `{TABLE_ORDER_SUGGEST}` ADD COLUMN `{col}` {col_type}"
+                    )
+                    logger.info(f"  新增列: {col}")
+                except Exception as e:
+                    if 'Duplicate column' not in str(e) and '1060' not in str(e):
+                        pass  # 列已存在，忽略
 
         if not records:
             return
@@ -507,6 +483,7 @@ def save_order_suggest(records: List[Dict[str, Any]], month_order: List[str]) ->
                 r['建议下单合计'], r['运营预计合计'], r['库存'], r['待到货'], r['建议下单量'],
                 *month_vals,
             ))
+
         BATCH = 500
         for i in range(0, len(rows), BATCH):
             cursor.executemany(sql, rows[i:i+BATCH])
@@ -515,17 +492,17 @@ def save_order_suggest(records: List[Dict[str, Any]], month_order: List[str]) ->
 
 
 def save_fabric_usage(records: List[Dict[str, Any]]) -> None:
-    """面料预计用量表：全量覆盖写入。"""
+    """面料预计用量汇总表：全量覆盖写入。"""
     with db_cursor() as cursor:
         cursor.execute(f"""
             CREATE TABLE IF NOT EXISTS `{TABLE_FABRIC_USAGE}` (
-                `id`            INT AUTO_INCREMENT PRIMARY KEY,
-                `面料`          VARCHAR(200) NOT NULL UNIQUE,
-                `SPU数量`       INT          NOT NULL DEFAULT 0,
-                `建议下单量合计` INT         NOT NULL DEFAULT 0,
-                `单件用量(米)`  DECIMAL(8,3) NOT NULL DEFAULT 0,
-                `预计用量(米)`  DECIMAL(12,2) NOT NULL DEFAULT 0,
-                `更新时间`      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
+                `id`             INT AUTO_INCREMENT PRIMARY KEY,
+                `面料`           VARCHAR(500) NOT NULL,
+                `SPU数量`        INT          NOT NULL DEFAULT 0,
+                `建议下单量合计` INT          NOT NULL DEFAULT 0,
+                `单件用量(米)`   DECIMAL(8,3) NOT NULL DEFAULT 0,
+                `预计用量(米)`   DECIMAL(12,2) NOT NULL DEFAULT 0,
+                `更新时间`       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
                                              ON UPDATE CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
               COMMENT='定制面料预计用量（产品经理用）';
@@ -547,17 +524,12 @@ def save_fabric_usage(records: List[Dict[str, Any]]) -> None:
     logger.info(f"✓ 写入 {len(records)} 条记录到 `{TABLE_FABRIC_USAGE}`")
 
 
-# ── 飞书多维表配置 ────────────────────────────────────────────────────────
-FEISHU_APP_TOKEN    = "JvmNbfUp8atSpTsUH6Icyqk5nqd"
-# 表名固定，table_id 由 ensure_table_and_fields 自动管理
-
+# ────────────────────────────────────────────────────────────────────────────
+# Step6：写飞书多维表
+# ────────────────────────────────────────────────────────────────────────────
 
 async def _get_or_create_table(app_token: str, table_name: str, field_list: list, remove_extra: bool = False):
-    """
-    获取或创建飞书多维表，返回已设置好 table_id 的 FeishuClient。
-    若 ensure_table_and_fields 返回空 table_id（SDK Bug），用 get_tables() 反查。
-    remove_extra=True 时会删除不在 field_list 里的多余字段（如飞书默认的SKU/SPU/运营）
-    """
+    """获取或创建飞书多维表，返回已设置好 table_id 的 FeishuClient。"""
     from common.feishu import FeishuClient
     client = FeishuClient(app_token=app_token, table_id="")
     table_id = await client.ensure_table_and_fields(
@@ -624,7 +596,7 @@ async def write_order_to_feishu(records: List[Dict[str, Any]], month_order: List
 
 
 async def write_fabric_to_feishu(records: List[Dict[str, Any]], current_date: datetime) -> None:
-    """写面料预计用量汇总到飞书多维表，含统计月份"""
+    """写面料预计用量汇总到飞书多维表"""
     stat_month = current_date.strftime('%Y-%m')
     field_list = [
         {'name': '统计月份',       'type': 'text'},
@@ -676,6 +648,7 @@ async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
         {'name': '预计总量/条',     'type': 'number', 'precision': 2},
         {'name': '预计总量/米',     'type': 'number', 'precision': 2},
         {'name': '用量信息缺失SPU', 'type': 'text'},
+        {'name': '系统预计采购条数', 'type': 'number', 'precision': 2},
     ]
     client = await _get_or_create_table(FEISHU_APP_TOKEN, '面料预估明细', field_list, remove_extra=True)
 
@@ -701,6 +674,9 @@ async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
     for r in rows:
         d = r['统计日期']
         stat_month = d.strftime('%Y-%m') if hasattr(d, 'strftime') else str(d)[:7]
+        sys_rolls  = float(r['系统预估用量/条'] or 0)
+        inv_rolls  = float(r['库存量/条'] or 0)
+        pend_rolls = float(r['待到货量/条'] or 0)
         feishu_records.append({
             '统计类型':        r['统计类型'] or '',
             '面料':            r['面料'] or '',
@@ -715,14 +691,15 @@ async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
             '系统预估用量/米': float(r['系统预估用量/米'] or 0),
             '米数每条':        float(r['米数每条'] or 0),
             '预计用量/条':     float(r['预计用量/条'] or 0),
-            '系统预估用量/条': float(r['系统预估用量/条'] or 0),
-            '库存量/条':       float(r['库存量/条'] or 0),
+            '系统预估用量/条': sys_rolls,
+            '库存量/条':       inv_rolls,
             '库存量/米':       float(r['库存量/米'] or 0),
-            '待到货量/条':     float(r['待到货量/条'] or 0),
+            '待到货量/条':     pend_rolls,
             '待到货量/米':     float(r['待到货量/米'] or 0),
             '预计总量/条':     float(r['预计总量/条'] or 0),
             '预计总量/米':     float(r['预计总量/米'] or 0),
             '用量信息缺失SPU': r['用量信息缺失SPU'] or '',
+            '系统预计采购条数': max(0, round(sys_rolls - inv_rolls - pend_rolls, 2)),
         })
 
     await client.delete_all_records()
@@ -731,12 +708,24 @@ async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# 工具函数
+# ────────────────────────────────────────────────────────────────────────────
+
+def _extract_spu(sku: str) -> str:
+    import re
+    if not sku:
+        return ''
+    sku = re.sub(r'\d+(?:PSC|PCS)', '', sku, flags=re.IGNORECASE)
+    sku = re.sub(r'-+', '-', sku).strip('-')
+    idx = sku.find('-')
+    return sku[:idx] if idx > 0 else sku
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # 主函数
 # ────────────────────────────────────────────────────────────────────────────
 
 def main():
-    import asyncio
-
     logger.info("=" * 70)
     logger.info("采购建议报告生成")
     logger.info(f"  定制面料覆盖 {COVERAGE_MONTHS_CUSTOM} 个月 | 现货面料覆盖 {COVERAGE_MONTHS_STOCK} 个月")
@@ -744,7 +733,7 @@ def main():
 
     current_date = datetime.now()
 
-    # 1. 系统预测（来自预测对比表，已按SPU+店铺+月聚合）
+    # 1. 系统预测
     forecast_map, month_order = read_system_forecast()
     if not forecast_map:
         logger.error("预测对比表无数据，请先运行 generate_forecast_comparison.py")
@@ -753,10 +742,10 @@ def main():
     # 2. 库存
     inventory_map = read_inventory()
 
-    # 3. 工厂（上次下单供应商）
+    # 3. 工厂
     factory_map = read_last_factory()
 
-    # 4. 运营预计下单量（按月）
+    # 4. 运营预计下单量
     op_forecast_map = read_op_forecast_by_month()
 
     # 5. 面料类型 + 用量
