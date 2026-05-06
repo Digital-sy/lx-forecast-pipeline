@@ -2,6 +2,7 @@
 # ============================================
 # 采购建议流水线
 # 执行顺序：
+#   0. 同步运营预计下单量（飞书→库）
 #   1. 系统预测 vs 运营预计 对比表（generate_forecast_comparison）
 #   2. 建议下单量 + 面料用量表（generate_procurement_report）
 #   3. 导出 Excel 报告（export_procurement_excel）
@@ -38,10 +39,21 @@ send_feishu_success() {
     $PYTHON "$PROJECT_DIR/scripts/notify_feishu.py" \
         --task "采购建议流水线" \
         --status "success" \
-        --detail "三步全部完成，Excel 已更新" \
+        --detail "四步全部完成，Excel 已更新" \
         --elapsed "${elapsed}s" \
         2>/dev/null || true
 }
+
+# ── Step0：同步运营预计下单量（飞书→库）────────────────────────────────
+echo "[0/3] write_order_forecast_to_feishu..." >> "$LOG_FILE"
+$PYTHON -m jobs.feishu.write_order_forecast_to_feishu >> "$LOG_FILE" 2>&1
+EXIT_CODE=$?
+if [ $EXIT_CODE -ne 0 ]; then
+    echo "✗ Step0 失败 (退出码: $EXIT_CODE)" >> "$LOG_FILE"
+    send_feishu_error "write_order_forecast_to_feishu" "$EXIT_CODE"
+    exit 1
+fi
+echo "✓ Step0 完成" >> "$LOG_FILE"
 
 # ── Step1：生成预测对比表 ─────────────────────────────────────────────────
 echo "[1/3] generate_forecast_comparison..." >> "$LOG_FILE"
