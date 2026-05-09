@@ -575,40 +575,81 @@ def build_production_card(
 
 
 def build_fill_status_card(current_date: datetime, fill_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """组装“填报情况-数据”卡片。"""
-    month_label = f"{current_date.year}年{current_date.month}月"
+    """
+    组装“填报情况-数据”卡片。
 
-    table_rows = []
+    排版：
+    1. 所有月份的店铺总览；
+    2. 只展示当前月份的运营明细。
+    """
+    month_label = f"{current_date.year}年{current_date.month}月"
+    current_month_label = f"{current_date.year}年{current_date.month}月"
+
+    overview_rows = []
+    active_month = ""
+
     for r in fill_rows:
         level = r.get("层级")
-        if level == "month":
-            month_display = f"**{r.get('月份', '')}**"
-            shop_display = ""
-            op_display = ""
-        elif level == "shop":
-            month_display = ""
-            shop_display = r.get("店铺", "")
-            op_display = ""
-        else:
-            month_display = ""
-            shop_display = r.get("店铺", "")
-            op_display = r.get("运营", "")
 
-        table_rows.append({
-            "各月明细": month_display,
-            "店铺": shop_display,
-            "运营": op_display,
+        if level == "month":
+            active_month = r.get("月份", "")
+            overview_rows.append({
+                "月份": active_month,
+                "店铺": "--",
+                "系统建议": fmt_int(r.get("系统建议")),
+                "运营预计": fmt_int(r.get("运营预计")),
+            })
+            continue
+
+        if level == "shop":
+            overview_rows.append({
+                "月份": active_month,
+                "店铺": r.get("店铺", ""),
+                "系统建议": fmt_int(r.get("系统建议")),
+                "运营预计": fmt_int(r.get("运营预计")),
+            })
+
+    detail_rows = []
+    active_month = ""
+
+    for r in fill_rows:
+        level = r.get("层级")
+
+        if level == "month":
+            active_month = r.get("月份", "")
+            continue
+
+        if active_month != current_month_label:
+            continue
+
+        if level != "operator":
+            continue
+
+        detail_rows.append({
+            "店铺": r.get("店铺", "") or "未记录店铺",
+            "运营": r.get("运营", "") or "未记录",
             "系统建议": fmt_int(r.get("系统建议")),
             "运营预计": fmt_int(r.get("运营预计")),
         })
 
+    detail_rows.sort(key=lambda x: (x.get("店铺", ""), x.get("运营", "")))
+
     return {
         "header": {
-            "title": {"tag": "plain_text", "content": f"📋 {month_label} 填报情况 · 数据"},
+            "title": {
+                "tag": "plain_text",
+                "content": f"📋 {month_label} 填报情况 · 数据",
+            },
             "template": "purple",
         },
         "elements": [
-            {"tag": "div", "text": {"tag": "lark_md", "content": "**各月明细 / 店铺 / 运营填报情况**"}},
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": "**所有月份 · 店铺总览**",
+                },
+            },
             {
                 "tag": "table",
                 "page_size": 20,
@@ -622,15 +663,50 @@ def build_fill_status_card(current_date: datetime, fill_rows: List[Dict[str, Any
                     "lines": 1,
                 },
                 "columns": [
-                    {"name": "各月明细", "display_name": "各月明细", "width": "auto", "horizontal_align": "left"},
-                    {"name": "店铺", "display_name": "店铺", "width": "auto", "horizontal_align": "left"},
-                    {"name": "运营", "display_name": "运营", "width": "auto", "horizontal_align": "left"},
-                    {"name": "系统建议", "display_name": "系统建议", "width": "auto", "horizontal_align": "right"},
-                    {"name": "运营预计", "display_name": "运营预计", "width": "auto", "horizontal_align": "right"},
+                    {"name": "月份", "display_name": "月份", "width": "110px", "horizontal_align": "left"},
+                    {"name": "店铺", "display_name": "店铺", "width": "80px", "horizontal_align": "left"},
+                    {"name": "系统建议", "display_name": "系统建议", "width": "90px", "horizontal_align": "right"},
+                    {"name": "运营预计", "display_name": "运营预计", "width": "90px", "horizontal_align": "right"},
                 ],
-                "rows": table_rows,
+                "rows": overview_rows,
             },
-            {"tag": "note", "elements": [{"tag": "plain_text", "content": "说明：月份行为总计，店铺行为店铺汇总，运营行为运营填报明细。"}]},
+            {"tag": "hr"},
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**{current_month_label} · 运营明细**",
+                },
+            },
+            {
+                "tag": "table",
+                "page_size": 20,
+                "row_height": "low",
+                "header_style": {
+                    "text_align": "left",
+                    "text_size": "normal",
+                    "background_color": "grey",
+                    "text_color": "default",
+                    "bold": True,
+                    "lines": 1,
+                },
+                "columns": [
+                    {"name": "店铺", "display_name": "店铺", "width": "80px", "horizontal_align": "left"},
+                    {"name": "运营", "display_name": "运营", "width": "80px", "horizontal_align": "left"},
+                    {"name": "系统建议", "display_name": "系统建议", "width": "90px", "horizontal_align": "right"},
+                    {"name": "运营预计", "display_name": "运营预计", "width": "90px", "horizontal_align": "right"},
+                ],
+                "rows": detail_rows,
+            },
+            {
+                "tag": "note",
+                "elements": [
+                    {
+                        "tag": "plain_text",
+                        "content": "说明：上方为所有月份店铺总览；下方仅展示当前月份运营明细。",
+                    }
+                ],
+            },
         ],
     }
 
