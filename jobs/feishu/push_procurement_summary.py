@@ -351,18 +351,19 @@ def read_fill_status_rows(month_labels: List[str]) -> List[Dict[str, Any]]:
     层级：月份汇总 -> 店铺汇总 -> 运营明细。
     - 系统建议：来自 `建议下单量表` 的各月建议下单列。
     - 运营预计：月份/店铺汇总来自 `建议下单量表`，运营明细来自 `运营预计下单表`。
-    - 实际已下单：月份/店铺来自 `采购单` 创建月份；运营层若采购单无运营字段则不强行拆分，显示 0。
+    - 本卡片不展示实际已下单。
     """
     rows: List[Dict[str, Any]] = []
-    actual_by_shop_month = read_actual_order_by_shop_month(month_labels)
 
     with db_cursor() as cursor:
         for label in month_labels:
             suggest_col = f"`{label}建议下单`"
             op_col = f"`{label}运营预计`"
+
             year, month, _ym, stat_date = month_label_to_year_month(label)
             full_month_label = f"{year}年{month}月"
 
+            # 1. 月份总计
             cursor.execute(
                 f"""
                 SELECT
@@ -372,10 +373,6 @@ def read_fill_status_rows(month_labels: List[str]) -> List[Dict[str, Any]]:
                 """
             )
             total = cursor.fetchone() or {}
-            actual_total = sum(
-                qty for (actual_label, _shop), qty in actual_by_shop_month.items()
-                if actual_label == label
-            )
 
             rows.append({
                 "层级": "month",
@@ -384,9 +381,9 @@ def read_fill_status_rows(month_labels: List[str]) -> List[Dict[str, Any]]:
                 "运营": "",
                 "系统建议": int(total.get("系统建议") or 0),
                 "运营预计": int(total.get("运营预计") or 0),
-                "实际已下单": int(actual_total or 0),
             })
 
+            # 2. 店铺汇总
             cursor.execute(
                 f"""
                 SELECT
@@ -404,6 +401,7 @@ def read_fill_status_rows(month_labels: List[str]) -> List[Dict[str, Any]]:
                 shop = (shop_row.get("店铺") or "").strip()
                 if not shop:
                     continue
+
                 rows.append({
                     "层级": "shop",
                     "月份": "",
@@ -411,42 +409,59 @@ def read_fill_status_rows(month_labels: List[str]) -> List[Dict[str, Any]]:
                     "运营": "",
                     "系统建议": int(shop_row.get("系统建议") or 0),
                     "运营预计": int(shop_row.get("运营预计") or 0),
-                    "实际已下单": int(actual_by_shop_month.get((label, shop), 0) or 0),
                 })
 
-                try:
-                    cursor.execute(
-                        f"""
-                        SELECT
-                            o.运营,
-                            SUM(COALESCE(s.{suggest_col}, 0)) AS 系统建议,
-                            SUM(o.预计下单量) AS 运营预计
-                        FROM `运营预计下单表` o
-                        LEFT JOIN `建议下单量表` s
-                          ON s.SPU = o.SPU
-                         AND s.店铺 = o.店铺
-                        WHERE o.店铺 = %s
-                          AND o.统计日期 = %s
-                        GROUP BY o.运营
-                        ORDER BY o.运营
-                        """,
-                        (shop, stat_date),
-                    )
-                    op_rows = cursor.fetchall()
-                except Exception as e:
-                    logger.warning(f"读取运营明细失败: {label} {shop}: {e}")
-                    op_rows = []
+                # 3. 运营明细：先按运营预计下单表聚合，保证运营行一定出来
+                cursor.execute(
+                    """
+                    SELECT
+                        COALESCE(NULLIF(TRIM(运营), ''), '未记录') AS 运营,
+                        SUM(预计下单量) AS 运营预计
+                    FROM `运营预计下单表`
+                    WHERE TRIM(店铺) COLLATE utf8mb4_unicode_ci = %s COLLATE utf8mb4_unicode_ci
+                      AND DATE(统计日期) = %s
+                    GROUP BY COALESCE(NULLIF(TRIM(运营), ''), '未记录')
+                    ORDER BY 运营
+                    """,
+                    (shop, stat_date),
+                )
+                op_rows = cursor.fetchall()
 
                 for op_row in op_rows:
                     operator = (op_row.get("运营") or "未记录").strip() or "未记录"
+
+                    # 用该运营负责的 DISTINCT SPU+店铺 去建议下单量表取系统建议
+                    # 显式 COLLATE，避免 utf8mb4_0900_ai_ci / utf8mb4_unicode_ci 混用报错
+                    system_suggest = 0
+                    try:
+                        cursor.execute(
+                            f"""
+                            SELECT SUM(COALESCE(s.{suggest_col}, 0)) AS 系统建议
+                            FROM (
+                                SELECT DISTINCT SPU, 店铺
+                                FROM `运营预计下单表`
+                                WHERE TRIM(店铺) COLLATE utf8mb4_unicode_ci = %s COLLATE utf8mb4_unicode_ci
+                                  AND DATE(统计日期) = %s
+                                  AND COALESCE(NULLIF(TRIM(运营), ''), '未记录') COLLATE utf8mb4_unicode_ci = %s COLLATE utf8mb4_unicode_ci
+                            ) o
+                            LEFT JOIN `建议下单量表` s
+                              ON TRIM(s.SPU) COLLATE utf8mb4_unicode_ci = TRIM(o.SPU) COLLATE utf8mb4_unicode_ci
+                             AND TRIM(s.店铺) COLLATE utf8mb4_unicode_ci = TRIM(o.店铺) COLLATE utf8mb4_unicode_ci
+                            """,
+                            (shop, stat_date, operator),
+                        )
+                        system_suggest = int((cursor.fetchone() or {}).get("系统建议") or 0)
+                    except Exception as e:
+                        logger.warning(f"读取运营系统建议失败: {label} {shop} {operator}: {e}")
+                        system_suggest = 0
+
                     rows.append({
                         "层级": "operator",
                         "月份": "",
-                        "店铺": "",
+                        "店铺": shop,
                         "运营": operator,
-                        "系统建议": int(op_row.get("系统建议") or 0),
+                        "系统建议": system_suggest,
                         "运营预计": int(op_row.get("运营预计") or 0),
-                        "实际已下单": 0,
                     })
 
     return rows
@@ -572,12 +587,12 @@ def build_fill_status_card(current_date: datetime, fill_rows: List[Dict[str, Any
             op_display = ""
         elif level == "shop":
             month_display = ""
-            shop_display = f"　{r.get('店铺', '')}"
+            shop_display = r.get("店铺", "")
             op_display = ""
         else:
             month_display = ""
-            shop_display = ""
-            op_display = f"　　{r.get('运营', '')}"
+            shop_display = r.get("店铺", "")
+            op_display = r.get("运营", "")
 
         table_rows.append({
             "各月明细": month_display,
@@ -585,7 +600,6 @@ def build_fill_status_card(current_date: datetime, fill_rows: List[Dict[str, Any
             "运营": op_display,
             "系统建议": fmt_int(r.get("系统建议")),
             "运营预计": fmt_int(r.get("运营预计")),
-            "实际已下单": fmt_int(r.get("实际已下单")),
         })
 
     return {
@@ -613,19 +627,10 @@ def build_fill_status_card(current_date: datetime, fill_rows: List[Dict[str, Any
                     {"name": "运营", "display_name": "运营", "width": "auto", "horizontal_align": "left"},
                     {"name": "系统建议", "display_name": "系统建议", "width": "auto", "horizontal_align": "right"},
                     {"name": "运营预计", "display_name": "运营预计", "width": "auto", "horizontal_align": "right"},
-                    {"name": "实际已下单", "display_name": "实际已下单", "width": "auto", "horizontal_align": "right"},
                 ],
                 "rows": table_rows,
             },
-            {
-                "tag": "note",
-                "elements": [
-                    {
-                        "tag": "plain_text",
-                        "content": "说明：月份行为总计，店铺行为店铺汇总，运营行为运营填报明细；运营层实际已下单需采购单具备运营字段后才能精确拆分。",
-                    }
-                ],
-            },
+            {"tag": "note", "elements": [{"tag": "plain_text", "content": "说明：月份行为总计，店铺行为店铺汇总，运营行为运营填报明细。"}]},
         ],
     }
 
