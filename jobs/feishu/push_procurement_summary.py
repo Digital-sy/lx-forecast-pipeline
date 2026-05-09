@@ -93,6 +93,10 @@ def send_card(user_id: str, card: Dict[str, Any]) -> bool:
             },
             timeout=15,
         )
+        if resp.status_code >= 400:
+            logger.error(f"飞书发送失败状态码: {resp.status_code}")
+            logger.error(f"飞书发送失败响应体: {resp.text}")
+
         resp.raise_for_status()
         data = resp.json()
         if data.get("code") != 0:
@@ -625,11 +629,18 @@ def build_fill_status_card(current_date: datetime, fill_rows: List[Dict[str, Any
 
     排版：
     1. 所有月份的店铺总览；
-    2. 只展示当前月份的运营明细。
+    2. 运营明细使用当前月份起连续三个月横向窄列展示。
     """
     month_label = f"{current_date.year}年{current_date.month}月"
-    current_month_label = f"{current_date.year}年{current_date.month}月"
     data_updated_at = read_fill_status_data_updated_at()
+
+    detail_month_labels = make_month_labels(current_date, 3)
+    detail_month_full_labels = []
+    detail_month_names = []
+    for label in detail_month_labels:
+        y, m, _ym, _stat = month_label_to_year_month(label)
+        detail_month_full_labels.append(f"{y}年{m}月")
+        detail_month_names.append(f"{m}月")
 
     overview_rows = []
     active_month = ""
@@ -655,7 +666,7 @@ def build_fill_status_card(current_date: datetime, fill_rows: List[Dict[str, Any
                 "运营预计": fmt_int(r.get("运营预计")),
             })
 
-    detail_rows = []
+    detail_map: Dict[Tuple[str, str], Dict[str, Any]] = {}
     active_month = ""
 
     for r in fill_rows:
@@ -665,19 +676,28 @@ def build_fill_status_card(current_date: datetime, fill_rows: List[Dict[str, Any
             active_month = r.get("月份", "")
             continue
 
-        if active_month != current_month_label:
-            continue
-
         if level != "operator":
             continue
 
-        detail_rows.append({
-            "店铺": r.get("店铺", "") or "未记录店铺",
-            "运营": r.get("运营", "") or "未记录",
-            "系统建议": fmt_int(r.get("系统建议")),
-            "运营预计": fmt_int(r.get("运营预计")),
-        })
+        if active_month not in detail_month_full_labels:
+            continue
 
+        shop = r.get("店铺", "") or "未记录店铺"
+        operator = r.get("运营", "") or "未记录"
+        key = (shop, operator)
+
+        if key not in detail_map:
+            row = {"店铺": shop, "运营": operator}
+            for idx in range(3):
+                row[f"m{idx}_系统建议"] = "0"
+                row[f"m{idx}_运营预计"] = "0"
+            detail_map[key] = row
+
+        matched_idx = detail_month_full_labels.index(active_month)
+        detail_map[key][f"m{matched_idx}_系统建议"] = fmt_int(r.get("系统建议"))
+        detail_map[key][f"m{matched_idx}_运营预计"] = fmt_int(r.get("运营预计"))
+
+    detail_rows = list(detail_map.values())
     detail_rows.sort(key=lambda x: (x.get("店铺", ""), x.get("运营", "")))
 
     return {
@@ -716,10 +736,10 @@ def build_fill_status_card(current_date: datetime, fill_rows: List[Dict[str, Any
                     "lines": 1,
                 },
                 "columns": [
-                    {"name": "月份", "display_name": "月份", "width": "110px", "horizontal_align": "left"},
-                    {"name": "店铺", "display_name": "店铺", "width": "80px", "horizontal_align": "left"},
-                    {"name": "系统建议", "display_name": "系统建议", "width": "90px", "horizontal_align": "right"},
-                    {"name": "运营预计", "display_name": "运营预计", "width": "90px", "horizontal_align": "right"},
+                    {"name": "月份", "display_name": "月份", "width": "auto", "horizontal_align": "left"},
+                    {"name": "店铺", "display_name": "店铺", "width": "auto", "horizontal_align": "left"},
+                    {"name": "系统建议", "display_name": "系统", "width": "auto", "horizontal_align": "right"},
+                    {"name": "运营预计", "display_name": "运营", "width": "auto", "horizontal_align": "right"},
                 ],
                 "rows": overview_rows,
             },
@@ -728,7 +748,7 @@ def build_fill_status_card(current_date: datetime, fill_rows: List[Dict[str, Any
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": f"**{current_month_label} · 运营明细**",
+                    "content": f"**{detail_month_names[0]}起 · 运营明细**（系=系统建议，运=运营预计）",
                 },
             },
             {
@@ -744,10 +764,14 @@ def build_fill_status_card(current_date: datetime, fill_rows: List[Dict[str, Any
                     "lines": 1,
                 },
                 "columns": [
-                    {"name": "店铺", "display_name": "店铺", "width": "80px", "horizontal_align": "left"},
-                    {"name": "运营", "display_name": "运营", "width": "80px", "horizontal_align": "left"},
-                    {"name": "系统建议", "display_name": "系统建议", "width": "90px", "horizontal_align": "right"},
-                    {"name": "运营预计", "display_name": "运营预计", "width": "90px", "horizontal_align": "right"},
+                    {"name": "店铺", "display_name": "店铺", "width": "auto", "horizontal_align": "left"},
+                    {"name": "运营", "display_name": "运营", "width": "auto", "horizontal_align": "left"},
+                    {"name": "m0_系统建议", "display_name": f"{detail_month_names[0].replace('月', '')}系", "width": "auto", "horizontal_align": "right"},
+                    {"name": "m0_运营预计", "display_name": f"{detail_month_names[0].replace('月', '')}运", "width": "auto", "horizontal_align": "right"},
+                    {"name": "m1_系统建议", "display_name": f"{detail_month_names[1].replace('月', '')}系", "width": "auto", "horizontal_align": "right"},
+                    {"name": "m1_运营预计", "display_name": f"{detail_month_names[1].replace('月', '')}运", "width": "auto", "horizontal_align": "right"},
+                    {"name": "m2_系统建议", "display_name": f"{detail_month_names[2].replace('月', '')}系", "width": "auto", "horizontal_align": "right"},
+                    {"name": "m2_运营预计", "display_name": f"{detail_month_names[2].replace('月', '')}运", "width": "auto", "horizontal_align": "right"},
                 ],
                 "rows": detail_rows,
             },
@@ -756,7 +780,7 @@ def build_fill_status_card(current_date: datetime, fill_rows: List[Dict[str, Any
                 "elements": [
                     {
                         "tag": "plain_text",
-                        "content": "说明：上方为所有月份店铺总览；下方仅展示当前月份运营明细。",
+                        "content": "说明：上方为所有月份店铺总览；下方为当前月份起连续三个月的运营明细。"
                     }
                 ],
             },
