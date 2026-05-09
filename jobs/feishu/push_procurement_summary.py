@@ -2,13 +2,14 @@
 # -*- coding: utf-8 -*-
 """
 采购建议月度摘要推送
-每月8日8:00自动运行，推送给生产经理和产品经理
+每月8日8:00自动运行，推送给生产负责人和产品/面料负责人。
 
 推送内容：
-  生产经理：建议下单量摘要 + 实际下单量 + 运营填报完成率
-  产品经理：定制面料预计用量摘要
+  1. 生产负责人：采购建议摘要
+  2. 生产负责人：填报情况-数据（月份 -> 店铺 -> 运营）
+  3. 产品/面料负责人：定制面料预计用量摘要
 
-Crontab 配置（在服务器上执行 crontab -e 添加）：
+Crontab 示例：
   0 8 8 * * /opt/apps/pythondata/venv/bin/python -m jobs.feishu.push_procurement_summary >> /opt/apps/pythondata/logs/push_procurement_summary.log 2>&1
 """
 
@@ -17,10 +18,10 @@ import os
 import re
 import sys
 import time
-import logging
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 project_root = Path(__file__).resolve().parent.parent.parent
 if str(project_root) not in sys.path:
@@ -29,33 +30,36 @@ if str(project_root) not in sys.path:
 from common import get_logger
 from common.database import db_cursor
 
-logger = get_logger('push_procurement_summary')
+logger = get_logger("push_procurement_summary")
 
-# ── 飞书 App 配置（复用 pythondata .env 里已有的） ────────────────────────
 try:
     from common.config import settings
-    FEISHU_APP_ID     = settings.FEISHU_APP_ID
+    FEISHU_APP_ID = settings.FEISHU_APP_ID
     FEISHU_APP_SECRET = settings.FEISHU_APP_SECRET
 except Exception:
-    FEISHU_APP_ID     = os.getenv('FEISHU_APP_ID', '')
-    FEISHU_APP_SECRET = os.getenv('FEISHU_APP_SECRET', '')
+    FEISHU_APP_ID = os.getenv("FEISHU_APP_ID", "")
+    FEISHU_APP_SECRET = os.getenv("FEISHU_APP_SECRET", "")
 
 FEISHU_BASE = "https://open.feishu.cn/open-apis"
 
-# ── 收件人（open_id） ─────────────────────────────────────────────────────
-RECEIVER_PRODUCTION = "ou_45d24eddffa044503caf29d6c8a2e003"  # 生产经理
-RECEIVER_PRODUCT    = "ou_45d24eddffa044503caf29d6c8a2e003"  # 产品经理
+# 收件人 open_id；当前两个都指向刘宗霖，如后续拆分负责人，只改这里。
+RECEIVER_PRODUCTION = "ou_45d24eddffa044503caf29d6c8a2e003"  # 生产负责人
+RECEIVER_PRODUCT = "ou_45d24eddffa044503caf29d6c8a2e003"     # 产品/面料负责人
 
+_token = ""
+_token_expires_at = 0.0
 
-# ── Token 缓存 ────────────────────────────────────────────────────────────
-_token: str = ""
-_token_expires_at: float = 0.0
 
 def _get_token() -> str:
     global _token, _token_expires_at
     if _token and time.time() < _token_expires_at:
         return _token
+
+    if not FEISHU_APP_ID or not FEISHU_APP_SECRET:
+        raise RuntimeError("FEISHU_APP_ID / FEISHU_APP_SECRET 未配置")
+
     import requests
+
     resp = requests.post(
         f"{FEISHU_BASE}/auth/v3/tenant_access_token/internal",
         json={"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET},
@@ -63,17 +67,20 @@ def _get_token() -> str:
     ).json()
     if resp.get("code") != 0:
         raise RuntimeError(f"获取飞书 token 失败: {resp.get('msg')}")
+
     _token = resp["tenant_access_token"]
     _token_expires_at = time.time() + resp.get("expire", 7200) - 300
     return _token
 
-def _get_headers() -> dict:
+
+def _get_headers() -> Dict[str, str]:
     return {"Authorization": f"Bearer {_get_token()}", "Content-Type": "application/json"}
 
 
-def send_card(user_id: str, card: dict) -> bool:
-    """向指定飞书用户发送消息卡片（open_id）"""
+def send_card(user_id: str, card: Dict[str, Any]) -> bool:
+    """向指定飞书用户发送消息卡片（open_id）。"""
     import requests
+
     try:
         resp = requests.post(
             f"{FEISHU_BASE}/im/v1/messages",
@@ -94,240 +101,422 @@ def send_card(user_id: str, card: dict) -> bool:
         logger.info(f"✓ 卡片发送成功 → {user_id}")
         return True
     except Exception as e:
-        logger.error(f"发送卡片请求失败: {e}")
+        logger.error(f"发送卡片请求失败: {e}", exc_info=True)
         return False
 
 
 def extract_spu(sku: str) -> str:
+    """从 SKU/MSKU 提取 SPU，兼容 4PSC/1PCS 等组合装标记。"""
     if not sku:
-        return ''
-    sku = re.sub(r'\d+(?:PSC|PCS)', '', sku, flags=re.IGNORECASE)
-    sku = re.sub(r'-+', '-', sku).strip('-')
-    idx = sku.find('-')
+        return ""
+    sku = re.sub(r"\d+(?:PSC|PCS)", "", sku, flags=re.IGNORECASE)
+    sku = re.sub(r"-+", "-", sku).strip("-")
+    idx = sku.find("-")
     return sku[:idx] if idx > 0 else sku
+
+
+def month_sort_key(label: str) -> int:
+    m = re.match(r"(\d{2})年(\d{1,2})月", label or "")
+    if not m:
+        return 0
+    return (2000 + int(m.group(1))) * 100 + int(m.group(2))
+
+
+def month_label_to_year_month(label: str) -> Tuple[int, int, str, str]:
+    """26年5月 -> (2026, 5, 2026-05, 2026-05-01)。"""
+    m = re.match(r"(\d{2})年(\d{1,2})月", label or "")
+    if not m:
+        raise ValueError(f"无法解析月份标签: {label}")
+    year = 2000 + int(m.group(1))
+    month = int(m.group(2))
+    return year, month, f"{year}-{month:02d}", f"{year}-{month:02d}-01"
+
+
+def make_month_labels(current_date: datetime, months: int = 4) -> List[str]:
+    labels = []
+    for i in range(months):
+        y = current_date.year
+        m = current_date.month + i
+        while m > 12:
+            m -= 12
+            y += 1
+        labels.append(f"{str(y)[-2:]}年{m}月")
+    return labels
+
+
+def fmt_int(value: Any) -> str:
+    try:
+        return f"{int(float(value or 0)):,}"
+    except Exception:
+        return "0"
+
+
+def table_exists(cursor, table_name: str) -> bool:
+    cursor.execute(
+        """
+        SELECT COUNT(*) AS cnt
+        FROM information_schema.TABLES
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = %s
+        """,
+        (table_name,),
+    )
+    return bool((cursor.fetchone() or {}).get("cnt", 0))
 
 
 # ────────────────────────────────────────────────────────────────────────────
 # 数据读取
 # ────────────────────────────────────────────────────────────────────────────
 
-def read_order_suggest_summary(current_date: datetime):
-    """读取建议下单量摘要，含各月分拆"""
-    year = current_date.year
-    month = current_date.month
 
-    # 生成4个月标签
-    month_labels = []
-    for i in range(4):
-        m = month + i
-        y = year
-        while m > 12:
-            m -= 12
-            y += 1
-        month_labels.append(f"{str(y)[-2:]}年{m}月")
+def read_order_suggest_summary(current_date: datetime):
+    """读取建议下单量摘要，含各月系统建议/运营预计。"""
+    month_labels = make_month_labels(current_date, 4)
 
     with db_cursor() as cursor:
-        # 总览
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT
                 COUNT(*) AS 总款数,
                 SUM(CASE WHEN 建议下单量 > 0 THEN 1 ELSE 0 END) AS 需补单款数,
                 SUM(建议下单量) AS 建议下单总量
             FROM `建议下单量表`
-        """)
-        overview = cursor.fetchone()
+            """
+        )
+        overview = cursor.fetchone() or {"总款数": 0, "需补单款数": 0, "建议下单总量": 0}
 
-        # 各月建议下单合计
-        monthly_suggest = {}
-        monthly_op = {}
+        monthly_suggest: Dict[str, int] = {}
+        monthly_op: Dict[str, int] = {}
         for label in month_labels:
-            col = f"`{label}建议下单`"
+            suggest_col = f"`{label}建议下单`"
             op_col = f"`{label}运营预计`"
             try:
-                cursor.execute(f"SELECT SUM({col}) AS v FROM `建议下单量表`")
-                r = cursor.fetchone()
-                monthly_suggest[label] = int(r['v'] or 0)
-            except Exception:
+                cursor.execute(f"SELECT SUM({suggest_col}) AS v FROM `建议下单量表`")
+                monthly_suggest[label] = int((cursor.fetchone() or {}).get("v") or 0)
+            except Exception as e:
+                logger.warning(f"读取 {label}建议下单 失败: {e}")
                 monthly_suggest[label] = 0
+
             try:
                 cursor.execute(f"SELECT SUM({op_col}) AS v FROM `建议下单量表`")
-                r = cursor.fetchone()
-                monthly_op[label] = int(r['v'] or 0)
-            except Exception:
+                monthly_op[label] = int((cursor.fetchone() or {}).get("v") or 0)
+            except Exception as e:
+                logger.warning(f"读取 {label}运营预计 失败: {e}")
                 monthly_op[label] = 0
 
-        # 按面料类型
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT 面料类型, SUM(建议下单量) AS 建议量
             FROM `建议下单量表`
             GROUP BY 面料类型
-        """)
+            """
+        )
         by_type = cursor.fetchall()
 
-        # TOP5
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT SPU, 店铺, 工厂, 建议下单量
             FROM `建议下单量表`
             WHERE 建议下单量 > 0
             ORDER BY 建议下单量 DESC
             LIMIT 5
-        """)
+            """
+        )
         top5 = cursor.fetchall()
 
     return overview, by_type, top5, month_labels, monthly_suggest, monthly_op
 
 
 def read_actual_order_by_month(current_date: datetime):
-    """读取实际采购下单量（按月汇总）"""
-    year = current_date.year
-    month = current_date.month
-
-    month_labels = []
-    month_dates = []
-    for i in range(4):
-        m = month + i
-        y = year
-        while m > 12:
-            m -= 12
-            y += 1
-        month_labels.append(f"{str(y)[-2:]}年{m}月")
-        month_dates.append(f"{y}-{m:02d}")
-
+    """读取实际采购下单量（按采购单创建月份汇总）。"""
+    month_labels = make_month_labels(current_date, 4)
+    month_dates = [month_label_to_year_month(label)[2] for label in month_labels]
     monthly_actual = {label: 0 for label in month_labels}
 
     try:
         with db_cursor() as cursor:
-            cursor.execute("""
-                SELECT COUNT(*) as cnt FROM information_schema.TABLES
-                WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='采购单'
-            """)
-            if not cursor.fetchone().get('cnt', 0):
+            if not table_exists(cursor, "采购单"):
                 return monthly_actual, month_labels
-
-            cursor.execute("""
-                SELECT DATE_FORMAT(创建时间, '%Y-%m') AS 月份, SUM(实际数量) AS 总量
+            cursor.execute(
+                """
+                SELECT DATE_FORMAT(创建时间, '%%Y-%%m') AS 月份, SUM(实际数量) AS 总量
                 FROM `采购单`
                 WHERE 实际数量 > 0
-                GROUP BY DATE_FORMAT(创建时间, '%Y-%m')
-            """)
+                GROUP BY DATE_FORMAT(创建时间, '%%Y-%%m')
+                """
+            )
             for row in cursor.fetchall():
-                ym = row['月份']
-                qty = int(row['总量'] or 0)
+                ym = row.get("月份")
+                qty = int(row.get("总量") or 0)
                 for label, date_prefix in zip(month_labels, month_dates):
                     if ym == date_prefix:
                         monthly_actual[label] += qty
     except Exception as e:
-        logger.warning(f"读取实际采购数据失败: {e}")
+        logger.warning(f"读取实际采购数据失败: {e}", exc_info=True)
 
     return monthly_actual, month_labels
 
 
+def read_actual_order_by_shop_month(month_labels: Iterable[str]) -> Dict[Tuple[str, str], int]:
+    """读取实际采购下单量：{(月份标签, 店铺): 实际数量}。"""
+    result: Dict[Tuple[str, str], int] = defaultdict(int)
+    ym_to_label = {}
+    for label in month_labels:
+        _, _, ym, _ = month_label_to_year_month(label)
+        ym_to_label[ym] = label
+
+    if not ym_to_label:
+        return result
+
+    placeholders = ",".join(["%s"] * len(ym_to_label))
+    try:
+        with db_cursor() as cursor:
+            if not table_exists(cursor, "采购单"):
+                return result
+            cursor.execute(
+                f"""
+                SELECT DATE_FORMAT(创建时间, '%%Y-%%m') AS 月份,
+                       店铺,
+                       SUM(实际数量) AS 实际已下单
+                FROM `采购单`
+                WHERE 实际数量 > 0
+                  AND DATE_FORMAT(创建时间, '%%Y-%%m') IN ({placeholders})
+                GROUP BY DATE_FORMAT(创建时间, '%%Y-%%m'), 店铺
+                """,
+                tuple(ym_to_label.keys()),
+            )
+            for row in cursor.fetchall():
+                label = ym_to_label.get(row.get("月份"))
+                shop = (row.get("店铺") or "").strip()
+                if label and shop:
+                    result[(label, shop)] += int(row.get("实际已下单") or 0)
+    except Exception as e:
+        logger.warning(f"读取店铺实际采购数据失败: {e}", exc_info=True)
+    return result
+
+
 def read_fabric_usage_summary():
-    """读取面料用量摘要，含运营预估用量和现有库存"""
+    """读取面料用量摘要，含运营预估用量和现有库存。"""
     with db_cursor() as cursor:
-        # 系统预计用量
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT 面料, SPU数量, 建议下单量合计,
                    `单件用量(米)`, `预计用量(米)` AS 系统预计用量
             FROM `面料预计用量表`
             ORDER BY `预计用量(米)` DESC
-        """)
+            """
+        )
         rows = cursor.fetchall()
 
-        # 运营预估用量：运营预计合计 × 单件用量
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT k.面料,
                    SUM(b.运营预计合计) AS 运营预计下单合计,
-                   MAX(k.单件用量)     AS 单件用量
+                   MAX(k.单件用量) AS 单件用量
             FROM `建议下单量表` b
             JOIN `面料核价表` k ON k.SPU = b.SPU
             WHERE b.面料类型 = '定制面料'
             GROUP BY k.面料
-        """)
+            """
+        )
         op_map = {
-            r['面料']: int(r['运营预计下单合计'] or 0) * float(r['单件用量'] or 0)
+            r["面料"]: int(r["运营预计下单合计"] or 0) * float(r["单件用量"] or 0)
             for r in cursor.fetchall()
         }
 
-        # 现有库存：库存量/米 + 待到货量/米，按面料名聚合（取最新统计日期）
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT 面料,
-                   SUM(`库存量/米`)   AS 库存米,
+                   SUM(`库存量/米`) AS 库存米,
                    SUM(`待到货量/米`) AS 待到货米
             FROM `面料预估表`
-            WHERE 统计日期 = (
-                SELECT MAX(统计日期) FROM `面料预估表`
-            )
+            WHERE 统计日期 = (SELECT MAX(统计日期) FROM `面料预估表`)
             GROUP BY 面料
-        """)
+            """
+        )
         stock_map = {
-            r['面料']: float(r['库存米'] or 0) + float(r['待到货米'] or 0)
+            r["面料"]: float(r["库存米"] or 0) + float(r["待到货米"] or 0)
             for r in cursor.fetchall()
         }
 
-    total_usage = sum(float(r['系统预计用量'] or 0) for r in rows)
-    total_order = sum(int(r['建议下单量合计'] or 0) for r in rows)
+    total_usage = sum(float(r["系统预计用量"] or 0) for r in rows)
+    total_order = sum(int(r["建议下单量合计"] or 0) for r in rows)
     return rows, total_usage, total_order, op_map, stock_map
+
+
+def read_fill_status_rows(month_labels: List[str]) -> List[Dict[str, Any]]:
+    """
+    读取“填报情况-数据”卡片数据。
+
+    层级：月份汇总 -> 店铺汇总 -> 运营明细。
+    - 系统建议：来自 `建议下单量表` 的各月建议下单列。
+    - 运营预计：月份/店铺汇总来自 `建议下单量表`，运营明细来自 `运营预计下单表`。
+    - 实际已下单：月份/店铺来自 `采购单` 创建月份；运营层若采购单无运营字段则不强行拆分，显示 0。
+    """
+    rows: List[Dict[str, Any]] = []
+    actual_by_shop_month = read_actual_order_by_shop_month(month_labels)
+
+    with db_cursor() as cursor:
+        for label in month_labels:
+            suggest_col = f"`{label}建议下单`"
+            op_col = f"`{label}运营预计`"
+            year, month, _ym, stat_date = month_label_to_year_month(label)
+            full_month_label = f"{year}年{month}月"
+
+            cursor.execute(
+                f"""
+                SELECT
+                    SUM({suggest_col}) AS 系统建议,
+                    SUM({op_col}) AS 运营预计
+                FROM `建议下单量表`
+                """
+            )
+            total = cursor.fetchone() or {}
+            actual_total = sum(
+                qty for (actual_label, _shop), qty in actual_by_shop_month.items()
+                if actual_label == label
+            )
+
+            rows.append({
+                "层级": "month",
+                "月份": full_month_label,
+                "店铺": "",
+                "运营": "",
+                "系统建议": int(total.get("系统建议") or 0),
+                "运营预计": int(total.get("运营预计") or 0),
+                "实际已下单": int(actual_total or 0),
+            })
+
+            cursor.execute(
+                f"""
+                SELECT
+                    店铺,
+                    SUM({suggest_col}) AS 系统建议,
+                    SUM({op_col}) AS 运营预计
+                FROM `建议下单量表`
+                GROUP BY 店铺
+                ORDER BY 店铺
+                """
+            )
+            shop_rows = cursor.fetchall()
+
+            for shop_row in shop_rows:
+                shop = (shop_row.get("店铺") or "").strip()
+                if not shop:
+                    continue
+                rows.append({
+                    "层级": "shop",
+                    "月份": "",
+                    "店铺": shop,
+                    "运营": "",
+                    "系统建议": int(shop_row.get("系统建议") or 0),
+                    "运营预计": int(shop_row.get("运营预计") or 0),
+                    "实际已下单": int(actual_by_shop_month.get((label, shop), 0) or 0),
+                })
+
+                try:
+                    cursor.execute(
+                        f"""
+                        SELECT
+                            o.运营,
+                            SUM(COALESCE(s.{suggest_col}, 0)) AS 系统建议,
+                            SUM(o.预计下单量) AS 运营预计
+                        FROM `运营预计下单表` o
+                        LEFT JOIN `建议下单量表` s
+                          ON s.SPU = o.SPU
+                         AND s.店铺 = o.店铺
+                        WHERE o.店铺 = %s
+                          AND o.统计日期 = %s
+                        GROUP BY o.运营
+                        ORDER BY o.运营
+                        """,
+                        (shop, stat_date),
+                    )
+                    op_rows = cursor.fetchall()
+                except Exception as e:
+                    logger.warning(f"读取运营明细失败: {label} {shop}: {e}")
+                    op_rows = []
+
+                for op_row in op_rows:
+                    operator = (op_row.get("运营") or "未记录").strip() or "未记录"
+                    rows.append({
+                        "层级": "operator",
+                        "月份": "",
+                        "店铺": "",
+                        "运营": operator,
+                        "系统建议": int(op_row.get("系统建议") or 0),
+                        "运营预计": int(op_row.get("运营预计") or 0),
+                        "实际已下单": 0,
+                    })
+
+    return rows
 
 
 # ────────────────────────────────────────────────────────────────────────────
 # 消息组装
 # ────────────────────────────────────────────────────────────────────────────
 
+
 def build_production_card(
     current_date: datetime,
-    overview, by_type, top5,
-    month_labels, monthly_suggest, monthly_op,
-    monthly_actual: dict,
-) -> dict:
-    """组装生产卡片"""
+    overview,
+    by_type,
+    top5,
+    month_labels,
+    monthly_suggest,
+    monthly_op,
+    monthly_actual: Dict[str, int],
+) -> Dict[str, Any]:
+    """组装生产负责人采购建议摘要卡片。"""
     month_label = f"{current_date.year}年{current_date.month}月"
 
-    # 各月明细：系统建议 / 运营预计 / 实际已下单
     monthly_lines = []
     for label in month_labels:
-        sys_v = monthly_suggest.get(label, 0)
-        op_v  = monthly_op.get(label, 0)
-        act_v = monthly_actual.get(label, 0)
         monthly_lines.append(
-            f"**{label}**　系统建议 {sys_v:,}　运营预计 {op_v:,}　实际已下单 {act_v:,}"
+            f"**{label}**　系统建议 {monthly_suggest.get(label, 0):,}　"
+            f"运营预计 {monthly_op.get(label, 0):,}　"
+            f"实际已下单 {monthly_actual.get(label, 0):,}"
         )
     monthly_text = "\n".join(monthly_lines)
 
-    # 按面料类型分月
     type_monthly_lines = []
     for label in month_labels:
-        sys_col = f"`{label}建议下单`"
+        suggest_col = f"`{label}建议下单`"
         try:
             with db_cursor() as cursor:
-                cursor.execute(f"""
-                    SELECT 面料类型, SUM({sys_col}) AS 建议量
+                cursor.execute(
+                    f"""
+                    SELECT 面料类型, SUM({suggest_col}) AS 建议量
                     FROM `建议下单量表`
                     GROUP BY 面料类型
-                """)
+                    ORDER BY 面料类型
+                    """
+                )
                 rows = cursor.fetchall()
             parts = "　".join(
                 f"{r['面料类型']} {int(r['建议量'] or 0):,} 件"
                 for r in rows
             )
             type_monthly_lines.append(f"**{label}**　{parts}")
-        except Exception:
+        except Exception as e:
+            logger.warning(f"读取按面料类型分月失败: {label}: {e}")
             type_monthly_lines.append(f"**{label}**　暂无数据")
     type_monthly_text = "\n".join(type_monthly_lines)
 
-    # TOP5 分月展示
     top5_monthly_lines = []
     for label in month_labels:
-        sys_col = f"`{label}建议下单`"
+        suggest_col = f"`{label}建议下单`"
         try:
             with db_cursor() as cursor:
-                cursor.execute(f"""
-                    SELECT SPU, 店铺, 工厂, {sys_col} AS 建议量
+                cursor.execute(
+                    f"""
+                    SELECT SPU, 店铺, 工厂, {suggest_col} AS 建议量
                     FROM `建议下单量表`
-                    WHERE {sys_col} > 0
-                    ORDER BY {sys_col} DESC
+                    WHERE {suggest_col} > 0
+                    ORDER BY {suggest_col} DESC
                     LIMIT 5
-                """)
+                    """
+                )
                 rows = cursor.fetchall()
             if rows:
                 top5_monthly_lines.append(f"**{label}**")
@@ -336,56 +525,130 @@ def build_production_card(
                         f"  {i}. **{r['SPU']}** · {r['店铺']}"
                         f"（{r['工厂'] or '未记录'}）：{int(r['建议量'] or 0):,} 件"
                     )
-        except Exception:
+        except Exception as e:
+            logger.warning(f"读取各月缺口 TOP5 失败: {label}: {e}")
             top5_monthly_lines.append(f"**{label}**　暂无数据")
     top5_monthly_text = "\n".join(top5_monthly_lines) or "暂无数据"
 
     return {
         "header": {
             "title": {"tag": "plain_text", "content": f"📦 {month_label} 采购建议 · 生产"},
-            "template": "blue"
+            "template": "blue",
         },
         "elements": [
-            {"tag": "div", "text": {"tag": "lark_md", "content":
-                f"**总览**\n"
-                f"总款数：{int(overview['总款数']):,} 款　"
-                f"需补单：{int(overview['需补单款数']):,} 款\n"
-                f"建议下单总量：**{int(overview['建议下单总量'] or 0):,} 件**"
-            }},
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": (
+                        f"**总览**\n"
+                        f"总款数：{int(overview['总款数'] or 0):,} 款　"
+                        f"需补单：{int(overview['需补单款数'] or 0):,} 款\n"
+                        f"建议下单总量：**{int(overview['建议下单总量'] or 0):,} 件**"
+                    ),
+                },
+            },
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**各月明细**\n{monthly_text}"}},
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**按面料类型（分月）**\n{type_monthly_text}"}},
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": f"**各月缺口 TOP5**\n{top5_monthly_text}"}},
-            {"tag": "note", "elements": [
-                {"tag": "plain_text", "content": "详细数据请查看飞书「建议下单量表」"}
-            ]},
-        ]
+            {"tag": "note", "elements": [{"tag": "plain_text", "content": "详细数据请查看飞书「建议下单量表」"}]},
+        ],
+    }
+
+
+def build_fill_status_card(current_date: datetime, fill_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """组装“填报情况-数据”卡片。"""
+    month_label = f"{current_date.year}年{current_date.month}月"
+
+    table_rows = []
+    for r in fill_rows:
+        level = r.get("层级")
+        if level == "month":
+            month_display = f"**{r.get('月份', '')}**"
+            shop_display = ""
+            op_display = ""
+        elif level == "shop":
+            month_display = ""
+            shop_display = f"　{r.get('店铺', '')}"
+            op_display = ""
+        else:
+            month_display = ""
+            shop_display = ""
+            op_display = f"　　{r.get('运营', '')}"
+
+        table_rows.append({
+            "各月明细": month_display,
+            "店铺": shop_display,
+            "运营": op_display,
+            "系统建议": fmt_int(r.get("系统建议")),
+            "运营预计": fmt_int(r.get("运营预计")),
+            "实际已下单": fmt_int(r.get("实际已下单")),
+        })
+
+    return {
+        "header": {
+            "title": {"tag": "plain_text", "content": f"📋 {month_label} 填报情况 · 数据"},
+            "template": "purple",
+        },
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": "**各月明细 / 店铺 / 运营填报情况**"}},
+            {
+                "tag": "table",
+                "page_size": 20,
+                "row_height": "low",
+                "header_style": {
+                    "text_align": "left",
+                    "text_size": "normal",
+                    "background_color": "grey",
+                    "text_color": "default",
+                    "bold": True,
+                    "lines": 1,
+                },
+                "columns": [
+                    {"name": "各月明细", "display_name": "各月明细", "width": "auto", "horizontal_align": "left"},
+                    {"name": "店铺", "display_name": "店铺", "width": "auto", "horizontal_align": "left"},
+                    {"name": "运营", "display_name": "运营", "width": "auto", "horizontal_align": "left"},
+                    {"name": "系统建议", "display_name": "系统建议", "width": "auto", "horizontal_align": "right"},
+                    {"name": "运营预计", "display_name": "运营预计", "width": "auto", "horizontal_align": "right"},
+                    {"name": "实际已下单", "display_name": "实际已下单", "width": "auto", "horizontal_align": "right"},
+                ],
+                "rows": table_rows,
+            },
+            {
+                "tag": "note",
+                "elements": [
+                    {
+                        "tag": "plain_text",
+                        "content": "说明：月份行为总计，店铺行为店铺汇总，运营行为运营填报明细；运营层实际已下单需采购单具备运营字段后才能精确拆分。",
+                    }
+                ],
+            },
+        ],
     }
 
 
 def build_fabric_card(
     current_date: datetime,
-    fabric_rows, total_usage: float, total_order: int,
-    op_map: dict, stock_map: dict,
-) -> dict:
-    """
-    组装面料卡片
-    TOP10 面料表格：系统预计用量 / 运营预估用量 / 现有库存（含待到货）
-    使用飞书原生 table 元素，视觉更清晰
-    """
+    fabric_rows,
+    total_usage: float,
+    total_order: int,
+    op_map: Dict[str, float],
+    stock_map: Dict[str, float],
+) -> Dict[str, Any]:
+    """组装产品/面料负责人卡片。"""
     month_label = f"{current_date.year}年{current_date.month}月"
 
-    # 构建飞书原生 table 行数据
     table_rows = []
     for r in fabric_rows[:10]:
-        fabric    = r['面料']
-        sys_usage = float(r['系统预计用量'] or 0)
-        op_usage  = op_map.get(fabric, 0.0)
-        stock     = stock_map.get(fabric, 0.0)
+        fabric = r["面料"]
+        sys_usage = float(r["系统预计用量"] or 0)
+        op_usage = op_map.get(fabric, 0.0)
+        stock = stock_map.get(fabric, 0.0)
         table_rows.append({
-            "面料":     fabric,
+            "面料": fabric,
             "系统预计": f"{sys_usage:,.0f}",
             "运营预估": f"{op_usage:,.0f}",
             "现有库存": f"{stock:,.0f}",
@@ -404,7 +667,7 @@ def build_fabric_card(
             "lines": 1,
         },
         "columns": [
-            {"name": "面料",     "display_name": "面料",        "width": "auto", "horizontal_align": "left"},
+            {"name": "面料", "display_name": "面料", "width": "auto", "horizontal_align": "left"},
             {"name": "系统预计", "display_name": "系统预计(米)", "width": "auto", "horizontal_align": "right"},
             {"name": "运营预估", "display_name": "运营预估(米)", "width": "auto", "horizontal_align": "right"},
             {"name": "现有库存", "display_name": "现有库存(米)", "width": "auto", "horizontal_align": "right"},
@@ -415,22 +678,31 @@ def build_fabric_card(
     return {
         "header": {
             "title": {"tag": "plain_text", "content": f"🧵 {month_label} 定制面料用量 · 面料"},
-            "template": "green"
+            "template": "green",
         },
         "elements": [
-            {"tag": "div", "text": {"tag": "lark_md", "content":
-                f"**总览**\n"
-                f"定制面料种类：{len(fabric_rows)} 种\n"
-                f"总建议下单量：{total_order:,} 件\n"
-                f"系统预计总用量：**{total_usage:,.0f} 米**"
-            }},
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": (
+                        f"**总览**\n"
+                        f"定制面料种类：{len(fabric_rows)} 种\n"
+                        f"总建议下单量：{total_order:,} 件\n"
+                        f"系统预计总用量：**{total_usage:,.0f} 米**"
+                    ),
+                },
+            },
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": "**TOP10 面料用量**（单位：米）"}},
             table_element,
-            {"tag": "note", "elements": [
-                {"tag": "plain_text", "content": "现有库存 = 库存量/米 + 待到货量/米　详细数据请查看飞书「面料预计用量表」"}
-            ]},
-        ]
+            {
+                "tag": "note",
+                "elements": [
+                    {"tag": "plain_text", "content": "现有库存 = 库存量/米 + 待到货量/米　详细数据请查看飞书「面料预计用量表」"}
+                ],
+            },
+        ],
     }
 
 
@@ -438,33 +710,40 @@ def build_fabric_card(
 # 主函数
 # ────────────────────────────────────────────────────────────────────────────
 
-def main():
+
+def main() -> None:
     logger.info("=" * 60)
     logger.info("采购建议月度摘要推送")
     logger.info("=" * 60)
 
     current_date = datetime.now()
 
-    overview, by_type, top5, month_labels, monthly_suggest, monthly_op = \
-        read_order_suggest_summary(current_date)
+    overview, by_type, top5, month_labels, monthly_suggest, monthly_op = read_order_suggest_summary(current_date)
     monthly_actual, _ = read_actual_order_by_month(current_date)
     fabric_rows, total_usage, total_order, op_map, stock_map = read_fabric_usage_summary()
 
     prod_card = build_production_card(
-        current_date, overview, by_type, top5,
-        month_labels, monthly_suggest, monthly_op,
+        current_date,
+        overview,
+        by_type,
+        top5,
+        month_labels,
+        monthly_suggest,
+        monthly_op,
         monthly_actual,
     )
     send_card(RECEIVER_PRODUCTION, prod_card)
 
-    fabric_card = build_fabric_card(
-        current_date, fabric_rows, total_usage, total_order, op_map, stock_map,
-    )
+    fill_rows = read_fill_status_rows(month_labels)
+    fill_card = build_fill_status_card(current_date, fill_rows)
+    send_card(RECEIVER_PRODUCTION, fill_card)
+
+    fabric_card = build_fabric_card(current_date, fabric_rows, total_usage, total_order, op_map, stock_map)
     send_card(RECEIVER_PRODUCT, fabric_card)
 
     logger.info("推送完成")
     logger.info("=" * 60)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
