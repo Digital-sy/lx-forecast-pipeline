@@ -164,6 +164,51 @@ def table_exists(cursor, table_name: str) -> bool:
     return bool((cursor.fetchone() or {}).get("cnt", 0))
 
 
+def read_fill_status_data_updated_at() -> str:
+    """
+    读取填报情况卡片引用数据的真实最近更新时间。
+
+    严格规则：
+    - 只读取 `运营预计下单表`.`飞书同步时间`；
+    - 如果字段不存在或没有值，返回“未记录”；
+    - 不允许退化为卡片生成时间。
+    """
+    try:
+        with db_cursor() as cursor:
+            if not table_exists(cursor, "运营预计下单表"):
+                logger.warning("运营预计下单表不存在，填报情况数据更新时间返回“未记录”")
+                return "未记录"
+
+            cursor.execute("""
+                SELECT COUNT(*) AS cnt
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = '运营预计下单表'
+                  AND COLUMN_NAME = '飞书同步时间'
+            """)
+            exists = (cursor.fetchone() or {}).get("cnt", 0)
+
+            if not exists:
+                logger.warning("运营预计下单表缺少字段“飞书同步时间”，填报情况数据更新时间返回“未记录”")
+                return "未记录"
+
+            cursor.execute("""
+                SELECT MAX(`飞书同步时间`) AS latest_sync_time
+                FROM `运营预计下单表`
+            """)
+            latest = (cursor.fetchone() or {}).get("latest_sync_time")
+
+            if not latest:
+                logger.warning("运营预计下单表.飞书同步时间没有有效值，填报情况数据更新时间返回“未记录”")
+                return "未记录"
+
+            return latest.strftime("%Y-%m-%d %H:%M:%S") if hasattr(latest, "strftime") else str(latest)
+
+    except Exception as e:
+        logger.warning(f"读取填报情况数据更新时间失败: {e}", exc_info=True)
+        return "未记录"
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # 数据读取
 # ────────────────────────────────────────────────────────────────────────────
@@ -584,6 +629,7 @@ def build_fill_status_card(current_date: datetime, fill_rows: List[Dict[str, Any
     """
     month_label = f"{current_date.year}年{current_date.month}月"
     current_month_label = f"{current_date.year}年{current_date.month}月"
+    data_updated_at = read_fill_status_data_updated_at()
 
     overview_rows = []
     active_month = ""
@@ -643,6 +689,13 @@ def build_fill_status_card(current_date: datetime, fill_rows: List[Dict[str, Any
             "template": "purple",
         },
         "elements": [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**数据更新时间：** {data_updated_at}",
+                },
+            },
             {
                 "tag": "div",
                 "text": {
