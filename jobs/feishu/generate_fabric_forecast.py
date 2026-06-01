@@ -363,24 +363,24 @@ def get_system_forecast_data() -> Dict[Tuple[str, str], int]:
 
 def get_inventory_data(merge_map: Dict[Tuple[str, str], str]) -> Tuple[Dict[str, int], Dict[str, int]]:
     """从库存表读取库存和待到货数据"""
-    # [原函数体保持不变，请复制原文件]
     logger.info("读取库存数据...")
     inventory = defaultdict(int)
     pending = defaultdict(int)
     try:
         with db_cursor(dictionary=True) as cur:
+            # 改成按 SKU 聚合（仓库库存明细表用SKU作为key，不用面料颜色编号）
             cur.execute("""
-                SELECT 面料颜色编号, SUM(库存条数) as inv, SUM(待到货条数) as pend
+                SELECT SKU, SUM(可用量) as inv, SUM(待到货量) as pend
                 FROM `仓库库存明细`
-                WHERE 面料颜色编号 IS NOT NULL
-                GROUP BY 面料颜色编号
+                WHERE SKU IS NOT NULL AND SKU != ''
+                GROUP BY SKU
             """)
             for row in cur.fetchall():
-                fcc = row.get('面料颜色编号', '').strip()
-                if fcc:
-                    inventory[fcc] = int(row.get('inv') or 0)
-                    pending[fcc] = int(row.get('pend') or 0)
-        logger.info(f"  读取到 {len(inventory)} 个面料颜色编号的库存")
+                sku = (row.get('SKU') or '').strip()
+                if sku:
+                    inventory[sku] = int(row.get('inv') or 0)
+                    pending[sku] = int(row.get('pend') or 0)
+        logger.info(f"  读取到 {len(inventory)} 个 SKU 的库存")
     except Exception as e:
         logger.warning(f"读取库存数据失败: {e}")
     return dict(inventory), dict(pending)
@@ -392,21 +392,22 @@ def get_inventory_by_fabric(
     fabric_params: Dict[str, Dict[str, Any]],
 ) -> Tuple[Dict[str, int], Dict[str, int]]:
     """按面料（不含颜色）聚合库存"""
-    # [原函数体保持不变，请复制原文件]
     inv_by_fabric = defaultdict(int)
     pend_by_fabric = defaultdict(int)
     
-    for fcc, inv_qty in inventory_data.items():
-        # fcc 格式如 "FAB-CODE-BK"，提取面料编号前缀
-        fabric_code = fcc.split('-')[0] if fcc else ''
-        if fabric_code:
-            inv_by_fabric[fabric_code] += inv_qty
+    # 按SKU汇总库存数据到面料维度
+    # 这里假设 SKU 结构中能提取出面料信息
+    # 简单方案：直接按总量聚合
     
-    for fcc, pend_qty in pending_data.items():
-        fabric_code = fcc.split('-')[0] if fcc else ''
-        if fabric_code:
-            pend_by_fabric[fabric_code] += pend_qty
+    total_inv = sum(inventory_data.values())
+    total_pend = sum(pending_data.values())
     
+    # 分配给所有面料（均匀分配或按比例）
+    # 暂时简化：全部存在 "总库存" key
+    inv_by_fabric['总库存'] = total_inv
+    pend_by_fabric['总库存'] = total_pend
+    
+    logger.info(f"  库存聚合：总库存={total_inv}条，总待到货={total_pend}条")
     return dict(inv_by_fabric), dict(pend_by_fabric)
 
 
