@@ -1,25 +1,17 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
 """
-生成面料预估表 v3
-
-【核心逻辑改变】
-  面料消耗来源 = 成衣采购单（状态=待到货/已完成）× 单件用量
-  不是销量，因为下采购单的时刻就是面料消耗的时刻
+生成面料预估表 v3（含运营预估）
 
 【展示结构 - 横向滚动（每个面料/颜色一行）】
   库存侧：库存量/条、库存量/米、待到货量/条、待到货量/米
-  消耗侧：
-    当月已下单消耗/米  = 本月采购单(待到货+已完成) × 用量率  ← 确定值
-    当月完整预估/米    = 系统预测T月 × 用量率               ← A方案（全月视角）
-    当月剩余预估/米    = 完整预估 - 已下单消耗               ← B方案（剩余需求视角）
-    T+1月预估/米       = 系统预测T+1月 × 用量率
-    T+2月预估/米       = 系统预测T+2月 × 用量率
-    T+3月预估/米       = 系统预测T+3月 × 用量率
-
-【采购单状态过滤】
-  纳入计算：待到货、已完成
-  不计算：待下单、审批中
+  消耗侧（系统预测）：
+    当月已下单消耗/米  = 本月采购单(待到货+已完成) × 用量率
+    当月完整预估/米    = 系统预测T月 × 用量率（A方案）
+    当月剩余预估/米    = 完整预估 - 已下单消耗（B方案）
+    T+1月预估/米 / T+2月预估/米 / T+3月预估/米
+  消耗侧（运营预计）：
+    运营当月预估/米 / 运营T+1月预估/米 / 运营T+2月预估/米 / 运营T+3月预估/米
 """
 
 import sys
@@ -91,12 +83,10 @@ def _month_str(stat_date: Any) -> str:
 
 
 def get_month_date(year: int, month: int) -> str:
-    """返回某月的1号日期字符串"""
     return f"{year}-{month:02d}-01"
 
 
 def add_months(year: int, month: int, delta: int) -> Tuple[int, int]:
-    """月份加减"""
     month += delta
     while month > 12:
         month -= 12
@@ -108,11 +98,10 @@ def add_months(year: int, month: int, delta: int) -> Tuple[int, int]:
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# 数据读取函数
+# 数据读取
 # ────────────────────────────────────────────────────────────────────────────
 
 def get_fabric_params() -> Dict[str, Dict[str, Any]]:
-    """定制面料参数 → {面料名: {面料编号, 米数每条}}"""
     logger.info("读取定制面料参数...")
     result = {}
     try:
@@ -136,7 +125,6 @@ def get_fabric_params() -> Dict[str, Dict[str, Any]]:
 
 
 def get_fabric_price_data() -> Dict[Tuple[str, str], Dict[str, Any]]:
-    """面料核价表 → {(SPU, 面料): {单件用量, 单件损耗}}"""
     logger.info("读取面料核价表...")
     result = {}
     try:
@@ -161,22 +149,15 @@ def get_fabric_price_data() -> Dict[Tuple[str, str], Dict[str, Any]]:
 
 
 def get_purchase_order_data() -> Dict[str, int]:
-    """
-    【新增】从采购单表读取本月下单量（状态=待到货/已完成）
-    返回：{SKU: 本月下单总量}
-    """
+    """本月采购单（待到货+已完成） → {SKU: 下单量}"""
     logger.info("读取本月采购单（待到货+已完成）...")
     result: Dict[str, int] = defaultdict(int)
     today = datetime.now()
     current_month_prefix = today.strftime('%Y-%m')
-
     try:
         with db_cursor(dictionary=True) as cur:
-            # 使用 CONVERT 避免字符集冲突
             cur.execute("""
-                SELECT
-                    CONVERT(SKU USING utf8mb4) as SKU,
-                    SUM(实际数量) as qty
+                SELECT CONVERT(SKU USING utf8mb4) as SKU, SUM(实际数量) as qty
                 FROM `采购单`
                 WHERE LEFT(创建时间, 7) = %s
                   AND CONVERT(状态 USING utf8mb4) IN ('待到货', '已完成')
@@ -184,22 +165,18 @@ def get_purchase_order_data() -> Dict[str, int]:
                   AND 实际数量 > 0
                 GROUP BY SKU
             """, (current_month_prefix,))
-
             for row in cur.fetchall():
                 sku = normalize_str(row.get('SKU'))
                 qty = int(row.get('qty') or 0)
                 if sku and qty > 0:
                     result[sku] += qty
-
-        logger.info(f"  本月采购单：{len(result)} 个SKU，"
-                    f"合计 {sum(result.values())} 件")
+        logger.info(f"  本月采购单：{len(result)} 个SKU，合计 {sum(result.values())} 件")
     except Exception as e:
         logger.warning(f"读取采购单失败: {e}，当月已下单消耗将为0")
     return dict(result)
 
 
 def get_system_forecast_data() -> Dict[Tuple[str, str], int]:
-    """预测对比表_SKU → {(SKU, 统计日期): 系统预测销量}"""
     logger.info("读取预测对比表_SKU（系统预估）...")
     result: Dict[Tuple[str, str], int] = defaultdict(int)
     try:
@@ -215,8 +192,7 @@ def get_system_forecast_data() -> Dict[Tuple[str, str], int]:
                 SELECT SKU, 统计日期, SUM(系统预测销量) as 总量
                 FROM `预测对比表_SKU`
                 WHERE SKU IS NOT NULL AND SKU != ''
-                  AND 统计日期 IS NOT NULL
-                  AND 系统预测销量 > 0
+                  AND 统计日期 IS NOT NULL AND 系统预测销量 > 0
                 GROUP BY SKU, 统计日期
             """)
             for row in cur.fetchall():
@@ -268,7 +244,6 @@ def get_forecast_order_data() -> Dict[Tuple[str, str], int]:
 
 
 def get_fabric_color_merge_mapping() -> Dict[Tuple[str, str], str]:
-    """面料颜色归并对照 → {(面料编号, 原始颜色缩写): 归并颜色缩写}"""
     merge_map: Dict[Tuple[str, str], str] = {}
     try:
         with db_cursor(dictionary=True) as cur:
@@ -298,13 +273,11 @@ def get_fabric_color_merge_mapping() -> Dict[Tuple[str, str], str]:
 
 def get_merged_color_abbr(fabric_code: str, raw_color: str,
                           merge_map: Dict[Tuple[str, str], str]) -> str:
-    fc = normalize_str(fabric_code)
-    rc = normalize_str(raw_color)
-    return merge_map.get((fc, rc), rc)
+    return merge_map.get((normalize_str(fabric_code), normalize_str(raw_color)),
+                         normalize_str(raw_color))
 
 
 def get_color_map() -> Dict[str, str]:
-    """颜色对照 → {颜色缩写: 颜色中文}"""
     color_map: Dict[str, str] = {}
     try:
         with db_cursor(dictionary=True) as cur:
@@ -334,16 +307,13 @@ def get_color_map() -> Dict[str, str]:
 def get_inventory_data(
     merge_map: Dict[Tuple[str, str], str]
 ) -> Tuple[Dict[str, int], Dict[str, int]]:
-    """仓库库存明细 → 按归并后面料颜色编号聚合库存"""
     logger.info("读取仓库库存明细...")
     inventory: Dict[str, int] = defaultdict(int)
     pending:   Dict[str, int] = defaultdict(int)
-
     raw_to_merged = {
         f"{fc}-{rc}": f"{fc}-{mc}"
         for (fc, rc), mc in merge_map.items()
     }
-
     try:
         with db_cursor(dictionary=True) as cur:
             cur.execute("""
@@ -380,7 +350,6 @@ def get_inventory_by_fabric(
     pending_data:   Dict[str, int],
     fabric_params:  Dict[str, Dict[str, Any]],
 ) -> Tuple[Dict[str, int], Dict[str, int]]:
-    """将面料颜色编号维度的库存聚合到面料维度（去掉颜色）"""
     code_to_name: Dict[str, str] = {}
     for fabric_name, info in fabric_params.items():
         code = info.get('面料编号', '').strip().upper()
@@ -413,7 +382,6 @@ def get_inventory_by_fabric(
 def get_primary_fabric_by_spu(
     fabric_usage: Dict[Tuple[str, str], Dict[str, Any]]
 ) -> Dict[str, str]:
-    """获取每个SPU的主面料（单件用量最大的那块）"""
     result: Dict[str, str] = {}
     for (spu, fabric), data in fabric_usage.items():
         usage = data.get('单件用量', 0) or 0
@@ -431,7 +399,6 @@ def calculate_average_usage_for_fabric(
     current_spu: str,
     fabric_usage: Dict[Tuple[str, str], Dict[str, Any]],
 ) -> Tuple[Optional[float], Optional[float]]:
-    """对用量缺失的SPU，用同款面料其他SPU的平均用量兜底"""
     usage_list, loss_list = [], []
     for (spu, fabric), data in fabric_usage.items():
         if fabric == fabric_name and spu != current_spu:
@@ -453,7 +420,6 @@ def _calc_usage_meters(
     spu: str,
     fabric_usage: Dict[Tuple[str, str], Dict[str, Any]],
 ) -> Tuple[float, bool]:
-    """计算预计用量（米）。返回 (用量米数, 是否用量缺失)"""
     missing = False
     if not unit_usage:
         missing = True
@@ -463,20 +429,19 @@ def _calc_usage_meters(
             unit_loss  = avg_l if avg_l else 1.0
     if not unit_usage:
         return 0.0, missing
-    loss_factor = unit_loss if unit_loss else 1.0
-    return float(qty) * unit_usage * loss_factor, missing
+    return float(qty) * unit_usage * (unit_loss if unit_loss else 1.0), missing
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# 核心：生成面料预估数据（v3 横向滚动结构）
+# 核心生成逻辑
 # ────────────────────────────────────────────────────────────────────────────
 
 def generate_fabric_forecast(
     fabric_params:        Dict[str, Dict[str, Any]],
     fabric_usage:         Dict[Tuple[str, str], Dict[str, Any]],
-    purchase_order_data:  Dict[str, int],           # 本月采购单下单量
-    system_forecast_data: Dict[Tuple[str, str], int],  # 系统预测
-    forecast_data:        Dict[Tuple[str, str], int],  # 运营预计
+    purchase_order_data:  Dict[str, int],
+    system_forecast_data: Dict[Tuple[str, str], int],
+    forecast_data:        Dict[Tuple[str, str], int],
     inventory_data:       Dict[str, int],
     pending_data:         Dict[str, int],
     inv_by_fabric:        Dict[str, int],
@@ -484,181 +449,147 @@ def generate_fabric_forecast(
     color_map:            Dict[str, str],
     merge_map:            Dict[Tuple[str, str], str],
 ) -> List[Dict[str, Any]]:
-    """
-    生成面料预估数据，每个面料/颜色组合一行，包含T到T+3月的滚动消耗预估。
-    """
-    logger.info("开始生成面料预估数据（v3 横向滚动）...")
 
-    today       = datetime.now()
-    cur_year    = today.year
-    cur_month   = today.month
+    logger.info("开始生成面料预估数据（v3 横向滚动，含运营预估）...")
+
+    today        = datetime.now()
+    cur_year     = today.year
+    cur_month    = today.month
     current_time = today
 
     # T ~ T+3 月的日期字符串
     month_dates = []
     for delta in range(4):
         y, m = add_months(cur_year, cur_month, delta)
-        month_dates.append(get_month_date(y, m))  # ['2026-06-01', '2026-07-01', ...]
+        month_dates.append(get_month_date(y, m))
 
     primary_fabric_by_spu = get_primary_fabric_by_spu(fabric_usage)
 
-    # 聚合桶
-    # 视角A（总量）：key = (面料,)
-    # 视角B（带颜色）：key = (面料, 归并颜色缩写)
-    # 每个桶包含：
-    #   purchase_m    = 本月采购单消耗/米
-    #   month_m[0..3] = T到T+3月系统预测消耗/米
-    #   缺失SPU
-
     def _empty_bucket():
         return {
-            'purchase_m': 0.0,          # 当月采购单消耗
-            'month_m': [0.0, 0.0, 0.0, 0.0],  # T, T+1, T+2, T+3
-            '缺失SPU': set(),
+            'purchase_m':  0.0,                      # 当月采购单消耗
+            'sys_month_m': [0.0, 0.0, 0.0, 0.0],    # 系统预测 T~T+3
+            'op_month_m':  [0.0, 0.0, 0.0, 0.0],    # 运营预计 T~T+3
+            '缺失SPU':     set(),
         }
 
-    total_agg: Dict[str, Dict] = defaultdict(_empty_bucket)
-    color_agg: Dict[Tuple[str, str], Dict] = defaultdict(_empty_bucket)
+    total_agg: Dict[str, Dict]             = defaultdict(_empty_bucket)
+    color_agg: Dict[Tuple[str,str], Dict]  = defaultdict(_empty_bucket)
 
-    # ── 步骤1：处理本月采购单 → 当月已下单消耗 ──────────────────────────
+    # ── 步骤1：本月采购单 → 当月已下单消耗 ──────────────────────────────
     for sku, po_qty in purchase_order_data.items():
         spu = extract_spu_from_sku(sku)
         if not spu:
             continue
-        spu_fabrics = [(s, f, d) for (s, f), d in fabric_usage.items() if s == spu]
-        if not spu_fabrics:
-            continue
-
-        for _, fabric_name, usage_data in spu_fabrics:
+        for _, fabric_name, usage_data in [(s, f, d) for (s, f), d in fabric_usage.items() if s == spu]:
             if fabric_name not in fabric_params:
                 continue
-            unit_usage = usage_data.get('单件用量', 0)
-            unit_loss  = usage_data.get('单件损耗', 1.0)
             meters, missing = _calc_usage_meters(
-                po_qty, unit_usage, unit_loss, fabric_name, spu, fabric_usage)
+                po_qty, usage_data.get('单件用量'), usage_data.get('单件损耗'),
+                fabric_name, spu, fabric_usage)
             if meters <= 0:
                 continue
-
-            # 视角A
             total_agg[fabric_name]['purchase_m'] += meters
             if missing:
                 total_agg[fabric_name]['缺失SPU'].add(spu)
-
-            # 视角B：只统计主面料
             if primary_fabric_by_spu.get(spu) == fabric_name:
-                color_abbr = extract_color_abbr_from_sku(sku)
-                fabric_code = fabric_params[fabric_name].get('面料编号', '')
+                color_abbr   = extract_color_abbr_from_sku(sku)
+                fabric_code  = fabric_params[fabric_name].get('面料编号', '')
                 merged_color = get_merged_color_abbr(fabric_code, color_abbr, merge_map)
                 if merged_color:
                     color_agg[(fabric_name, merged_color)]['purchase_m'] += meters
                     if missing:
                         color_agg[(fabric_name, merged_color)]['缺失SPU'].add(spu)
 
-    # ── 步骤2：处理系统预测 → T到T+3月消耗预估 ─────────────────────────
-    for (sku, stat_date), sys_qty in system_forecast_data.items():
-        if sys_qty <= 0:
-            continue
-
-        # 判断是T月还是T+1/T+2/T+3月
-        try:
-            if isinstance(stat_date, str):
-                sd_dt = datetime.strptime(stat_date[:10], '%Y-%m-%d')
-            else:
-                sd_dt = stat_date
-            sd_year, sd_month = sd_dt.year, sd_dt.month
-        except Exception:
-            continue
-
-        # 找到对应的delta（0=当月, 1=T+1, 2=T+2, 3=T+3）
-        delta = None
-        for d in range(4):
-            y, m = add_months(cur_year, cur_month, d)
-            if sd_year == y and sd_month == m:
-                delta = d
-                break
-        if delta is None:
-            continue  # 不在T~T+3范围内，跳过
-
-        spu = extract_spu_from_sku(sku)
-        if not spu:
-            continue
-        spu_fabrics = [(s, f, dd) for (s, f), dd in fabric_usage.items() if s == spu]
-        if not spu_fabrics:
-            continue
-
-        for _, fabric_name, usage_data in spu_fabrics:
-            if fabric_name not in fabric_params:
+    # ── 步骤2：系统预测 + 运营预计 → T~T+3月消耗预估 ─────────────────────
+    def _process_forecast_source(source_data: Dict[Tuple[str, str], int], key: str):
+        """key = 'sys_month_m' 或 'op_month_m'"""
+        for (sku, stat_date), qty in source_data.items():
+            if qty <= 0:
                 continue
-            unit_usage = usage_data.get('单件用量', 0)
-            unit_loss  = usage_data.get('单件损耗', 1.0)
-            meters, missing = _calc_usage_meters(
-                sys_qty, unit_usage, unit_loss, fabric_name, spu, fabric_usage)
-            if meters <= 0:
+            try:
+                sd_dt = datetime.strptime(stat_date[:10], '%Y-%m-%d') \
+                    if isinstance(stat_date, str) else stat_date
+                sd_year, sd_month = sd_dt.year, sd_dt.month
+            except Exception:
                 continue
 
-            # 视角A
-            total_agg[fabric_name]['month_m'][delta] += meters
-            if missing:
-                total_agg[fabric_name]['缺失SPU'].add(spu)
+            delta = None
+            for d in range(4):
+                y, m = add_months(cur_year, cur_month, d)
+                if sd_year == y and sd_month == m:
+                    delta = d
+                    break
+            if delta is None:
+                continue
 
-            # 视角B
-            if primary_fabric_by_spu.get(spu) == fabric_name:
-                color_abbr = extract_color_abbr_from_sku(sku)
-                fabric_code = fabric_params[fabric_name].get('面料编号', '')
-                merged_color = get_merged_color_abbr(fabric_code, color_abbr, merge_map)
-                if merged_color:
-                    color_agg[(fabric_name, merged_color)]['month_m'][delta] += meters
-                    if missing:
-                        color_agg[(fabric_name, merged_color)]['缺失SPU'].add(spu)
+            spu = extract_spu_from_sku(sku)
+            if not spu:
+                continue
+            for _, fabric_name, usage_data in [(s, f, dd) for (s, f), dd in fabric_usage.items() if s == spu]:
+                if fabric_name not in fabric_params:
+                    continue
+                meters, missing = _calc_usage_meters(
+                    qty, usage_data.get('单件用量'), usage_data.get('单件损耗'),
+                    fabric_name, spu, fabric_usage)
+                if meters <= 0:
+                    continue
+                total_agg[fabric_name][key][delta] += meters
+                if missing:
+                    total_agg[fabric_name]['缺失SPU'].add(spu)
+                if primary_fabric_by_spu.get(spu) == fabric_name:
+                    color_abbr   = extract_color_abbr_from_sku(sku)
+                    fabric_code  = fabric_params[fabric_name].get('面料编号', '')
+                    merged_color = get_merged_color_abbr(fabric_code, color_abbr, merge_map)
+                    if merged_color:
+                        color_agg[(fabric_name, merged_color)][key][delta] += meters
+                        if missing:
+                            color_agg[(fabric_name, merged_color)]['缺失SPU'].add(spu)
+
+    _process_forecast_source(system_forecast_data, 'sys_month_m')
+    _process_forecast_source(forecast_data,        'op_month_m')
 
     # ── 步骤3：生成记录 ──────────────────────────────────────────────────
     result = []
     today_date = today.date()
 
-    def _build_record(
-        fabric_name: str,
-        color_abbr:  str,
-        merged_color_code: str,
-        bucket: Dict,
-        stat_type: str,
-    ) -> Dict[str, Any]:
-        fp   = fabric_params.get(fabric_name, {})
-        mpr  = fp.get('米数每条', 0.0)
-        code = fp.get('面料编号', '')
+    month_labels = []
+    for d in range(4):
+        y, m = add_months(cur_year, cur_month, d)
+        month_labels.append(f"{str(y)[2:]}年{m}月")
 
-        # 库存（面料维度 或 面料颜色维度）
+    def _build_record(fabric_name, color_abbr, fcc, bucket, stat_type) -> Dict[str, Any]:
+        fp  = fabric_params.get(fabric_name, {})
+        mpr = fp.get('米数每条', 0.0)
+
         if stat_type == '总量':
             inv_rolls  = inv_by_fabric.get(fabric_name, 0)
             pend_rolls = pend_by_fabric.get(fabric_name, 0)
         else:
-            fcc = merged_color_code
             inv_rolls  = inventory_data.get(fcc, 0)
             pend_rolls = pending_data.get(fcc, 0)
 
         purchase_m = round(bucket['purchase_m'], 2)
-        t0_m       = round(bucket['month_m'][0], 2)
-        t1_m       = round(bucket['month_m'][1], 2)
-        t2_m       = round(bucket['month_m'][2], 2)
-        t3_m       = round(bucket['month_m'][3], 2)
+        sys_t0     = round(bucket['sys_month_m'][0], 2)
+        sys_t1     = round(bucket['sys_month_m'][1], 2)
+        sys_t2     = round(bucket['sys_month_m'][2], 2)
+        sys_t3     = round(bucket['sys_month_m'][3], 2)
+        op_t0      = round(bucket['op_month_m'][0],  2)
+        op_t1      = round(bucket['op_month_m'][1],  2)
+        op_t2      = round(bucket['op_month_m'][2],  2)
+        op_t3      = round(bucket['op_month_m'][3],  2)
 
-        # 当月剩余预估 = 完整预估 - 已下单消耗（不低于0）
-        t0_remain  = round(max(0.0, t0_m - purchase_m), 2)
-
-        # 月份标签
-        month_labels = []
-        for d in range(4):
-            y, m = add_months(cur_year, cur_month, d)
-            month_labels.append(f"{str(y)[2:]}年{m}月")
+        sys_remain = round(max(0.0, sys_t0 - purchase_m), 2)
 
         return {
             '统计类型':          stat_type,
             'SKU':               '',
             'SPU':               '',
             '面料':              fabric_name,
-            '面料编号':          code,
+            '面料编号':          fp.get('面料编号', ''),
             '颜色缩写':          color_abbr,
             '颜色':              color_map.get(color_abbr, ''),
-            '面料颜色编号':      merged_color_code,
+            '面料颜色编号':      fcc,
             '统计日期':          today_date,
             '月份':              month_labels[0],
             # 库存侧
@@ -666,36 +597,37 @@ def generate_fabric_forecast(
             '库存量/米':         round(inv_rolls  * mpr, 2),
             '待到货量/条':       pend_rolls,
             '待到货量/米':       round(pend_rolls * mpr, 2),
-            # 消耗侧 - 当月
+            # 系统消耗侧
             '当月已下单消耗/米': purchase_m,
-            '当月完整预估/米':   t0_m,       # A方案
-            '当月剩余预估/米':   t0_remain,  # B方案
+            '当月完整预估/米':   sys_t0,
+            '当月剩余预估/米':   sys_remain,
             '当月月份':          month_labels[0],
-            # 消耗侧 - T+1 ~ T+3
-            'T+1月预估/米':      t1_m,
+            'T+1月预估/米':      sys_t1,
             'T+1月份':           month_labels[1],
-            'T+2月预估/米':      t2_m,
+            'T+2月预估/米':      sys_t2,
             'T+2月份':           month_labels[2],
-            'T+3月预估/米':      t3_m,
+            'T+3月预估/米':      sys_t3,
             'T+3月份':           month_labels[3],
-            # 兜底信息
+            # 运营消耗侧
+            '运营当月预估/米':   op_t0,
+            '运营T+1月预估/米':  op_t1,
+            '运营T+2月预估/米':  op_t2,
+            '运营T+3月预估/米':  op_t3,
+            # 辅助
             '用量信息缺失SPU':   ','.join(sorted(bucket['缺失SPU'])),
             '创建时间':          current_time,
             '更新时间':          current_time,
         }
 
-    # 视角A：总量
     for fabric_name, bucket in total_agg.items():
         result.append(_build_record(fabric_name, '', '', bucket, '总量'))
 
-    # 视角B：带颜色
     for (fabric_name, merged_color), bucket in color_agg.items():
         fabric_code = fabric_params.get(fabric_name, {}).get('面料编号', '')
         fcc = f"{fabric_code}-{merged_color}" if fabric_code else ''
         result.append(_build_record(fabric_name, merged_color, fcc, bucket, '带颜色'))
 
-    logger.info(f"生成 {len(result)} 条记录"
-                f"（总量: {len(total_agg)}, 带颜色: {len(color_agg)}）")
+    logger.info(f"生成 {len(result)} 条记录（总量: {len(total_agg)}, 带颜色: {len(color_agg)}）")
     return result
 
 
@@ -704,45 +636,44 @@ def generate_fabric_forecast(
 # ────────────────────────────────────────────────────────────────────────────
 
 def create_or_migrate_table() -> None:
-    """检查/创建面料预估表（v3 横向结构）"""
     logger.info("检查/创建面料预估表（v3）...")
     try:
         with db_cursor(dictionary=False) as cur:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS `面料预估表` (
-                    `id`                INT AUTO_INCREMENT PRIMARY KEY,
-                    `统计类型`          VARCHAR(20) NOT NULL DEFAULT '' COMMENT '总量/带颜色',
-                    `SKU`               VARCHAR(200) DEFAULT '',
-                    `SPU`               VARCHAR(100) DEFAULT '',
-                    `面料`              VARCHAR(500) NOT NULL,
-                    `面料编号`          VARCHAR(500) DEFAULT '',
-                    `颜色缩写`          VARCHAR(100) DEFAULT '',
-                    `颜色`              VARCHAR(100) DEFAULT '',
-                    `面料颜色编号`      VARCHAR(500) DEFAULT '',
-                    `统计日期`          DATE NOT NULL COMMENT '生成日期',
-                    `月份`              VARCHAR(20) DEFAULT '',
-                    -- 库存侧
-                    `库存量/条`         DOUBLE DEFAULT 0,
-                    `库存量/米`         DOUBLE DEFAULT 0,
-                    `待到货量/条`       DOUBLE DEFAULT 0,
-                    `待到货量/米`       DOUBLE DEFAULT 0,
-                    -- 消耗侧（当月）
-                    `当月已下单消耗/米` DOUBLE DEFAULT 0 COMMENT '本月采购单(待到货+已完成)折算的面料消耗',
-                    `当月完整预估/米`   DOUBLE DEFAULT 0 COMMENT '系统预测T月销量折算的全月面料消耗（A方案）',
-                    `当月剩余预估/米`   DOUBLE DEFAULT 0 COMMENT '完整预估-已下单消耗，剩余需采购面料（B方案）',
-                    `当月月份`          VARCHAR(20) DEFAULT '',
-                    -- 消耗侧（T+1 ~ T+3）
-                    `T+1月预估/米`      DOUBLE DEFAULT 0,
-                    `T+1月份`           VARCHAR(20) DEFAULT '',
-                    `T+2月预估/米`      DOUBLE DEFAULT 0,
-                    `T+2月份`           VARCHAR(20) DEFAULT '',
-                    `T+3月预估/米`      DOUBLE DEFAULT 0,
-                    `T+3月份`           VARCHAR(20) DEFAULT '',
-                    -- 辅助
-                    `用量信息缺失SPU`   TEXT,
-                    `创建时间`          DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    `更新时间`          DATETIME DEFAULT CURRENT_TIMESTAMP
-                                        ON UPDATE CURRENT_TIMESTAMP,
+                    `id`                  INT AUTO_INCREMENT PRIMARY KEY,
+                    `统计类型`            VARCHAR(20) NOT NULL DEFAULT '',
+                    `SKU`                 VARCHAR(200) DEFAULT '',
+                    `SPU`                 VARCHAR(100) DEFAULT '',
+                    `面料`                VARCHAR(500) NOT NULL,
+                    `面料编号`            VARCHAR(500) DEFAULT '',
+                    `颜色缩写`            VARCHAR(100) DEFAULT '',
+                    `颜色`                VARCHAR(100) DEFAULT '',
+                    `面料颜色编号`        VARCHAR(500) DEFAULT '',
+                    `统计日期`            DATE NOT NULL,
+                    `月份`                VARCHAR(20) DEFAULT '',
+                    `库存量/条`           DOUBLE DEFAULT 0,
+                    `库存量/米`           DOUBLE DEFAULT 0,
+                    `待到货量/条`         DOUBLE DEFAULT 0,
+                    `待到货量/米`         DOUBLE DEFAULT 0,
+                    `当月已下单消耗/米`   DOUBLE DEFAULT 0,
+                    `当月完整预估/米`     DOUBLE DEFAULT 0,
+                    `当月剩余预估/米`     DOUBLE DEFAULT 0,
+                    `当月月份`            VARCHAR(20) DEFAULT '',
+                    `T+1月预估/米`        DOUBLE DEFAULT 0,
+                    `T+1月份`             VARCHAR(20) DEFAULT '',
+                    `T+2月预估/米`        DOUBLE DEFAULT 0,
+                    `T+2月份`             VARCHAR(20) DEFAULT '',
+                    `T+3月预估/米`        DOUBLE DEFAULT 0,
+                    `T+3月份`             VARCHAR(20) DEFAULT '',
+                    `运营当月预估/米`     DOUBLE DEFAULT 0,
+                    `运营T+1月预估/米`    DOUBLE DEFAULT 0,
+                    `运营T+2月预估/米`    DOUBLE DEFAULT 0,
+                    `运营T+3月预估/米`    DOUBLE DEFAULT 0,
+                    `用量信息缺失SPU`     TEXT,
+                    `创建时间`            DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    `更新时间`            DATETIME DEFAULT CURRENT_TIMESTAMP
+                                          ON UPDATE CURRENT_TIMESTAMP,
                     UNIQUE KEY `uk_type_fabric_color`
                         (`统计类型`(20), `面料`(100), `颜色缩写`(50)),
                     KEY `idx_fabric` (`面料`(100)),
@@ -751,7 +682,7 @@ def create_or_migrate_table() -> None:
             """)
         logger.info("✓ 面料预估表（v3）已就绪")
     except Exception as e:
-        logger.warning(f"建表失败: {e}，尝试继续（表可能已存在）")
+        logger.warning(f"建表失败: {e}，尝试继续")
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -759,15 +690,12 @@ def create_or_migrate_table() -> None:
 # ────────────────────────────────────────────────────────────────────────────
 
 def save_fabric_forecast(records: List[Dict[str, Any]]) -> None:
-    """保存面料预估数据（全量替换）"""
     logger.info(f"保存 {len(records)} 条面料预估数据...")
     if not records:
         logger.warning("无数据需保存")
         return
-
     try:
         with db_cursor(dictionary=False) as cur:
-            # 全量替换（REPLACE INTO 处理唯一键冲突）
             sql = """
                 REPLACE INTO `面料预估表` (
                     `统计类型`, `SKU`, `SPU`, `面料`, `面料编号`,
@@ -777,39 +705,32 @@ def save_fabric_forecast(records: List[Dict[str, Any]]) -> None:
                     `T+1月预估/米`, `T+1月份`,
                     `T+2月预估/米`, `T+2月份`,
                     `T+3月预估/米`, `T+3月份`,
+                    `运营当月预估/米`, `运营T+1月预估/米`, `运营T+2月预估/米`, `运营T+3月预估/米`,
                     `用量信息缺失SPU`, `创建时间`, `更新时间`
                 ) VALUES (
-                    %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s,
-                    %s, %s, %s, %s,
-                    %s, %s,
-                    %s, %s,
-                    %s, %s,
-                    %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
             """
-
             batch_size = 200
             total = 0
             for i in range(0, len(records), batch_size):
                 batch = records[i:i + batch_size]
-                rows = []
-                for r in batch:
-                    rows.append((
-                        r['统计类型'], r['SKU'], r['SPU'], r['面料'], r['面料编号'],
-                        r['颜色缩写'], r['颜色'], r['面料颜色编号'], r['统计日期'], r['月份'],
-                        r['库存量/条'], r['库存量/米'], r['待到货量/条'], r['待到货量/米'],
-                        r['当月已下单消耗/米'], r['当月完整预估/米'], r['当月剩余预估/米'], r['当月月份'],
-                        r['T+1月预估/米'], r['T+1月份'],
-                        r['T+2月预估/米'], r['T+2月份'],
-                        r['T+3月预估/米'], r['T+3月份'],
-                        r['用量信息缺失SPU'], r['创建时间'], r['更新时间'],
-                    ))
+                rows = [(
+                    r['统计类型'], r['SKU'], r['SPU'], r['面料'], r['面料编号'],
+                    r['颜色缩写'], r['颜色'], r['面料颜色编号'], r['统计日期'], r['月份'],
+                    r['库存量/条'], r['库存量/米'], r['待到货量/条'], r['待到货量/米'],
+                    r['当月已下单消耗/米'], r['当月完整预估/米'], r['当月剩余预估/米'], r['当月月份'],
+                    r['T+1月预估/米'], r['T+1月份'],
+                    r['T+2月预估/米'], r['T+2月份'],
+                    r['T+3月预估/米'], r['T+3月份'],
+                    r['运营当月预估/米'], r['运营T+1月预估/米'], r['运营T+2月预估/米'], r['运营T+3月预估/米'],
+                    r['用量信息缺失SPU'], r['创建时间'], r['更新时间'],
+                ) for r in batch]
                 cur.executemany(sql, rows)
                 total += len(batch)
                 logger.info(f"  已写入 {total}/{len(records)} 条")
-
         logger.info(f"✓ 成功写入 {len(records)} 条数据")
     except Exception as e:
         logger.error(f"写入失败: {e}", exc_info=True)
@@ -822,25 +743,25 @@ def save_fabric_forecast(records: List[Dict[str, Any]]) -> None:
 
 def main():
     logger.info("=" * 80)
-    logger.info("面料预估表生成任务（v3 - 采购单驱动 + 横向滚动预估）")
+    logger.info("面料预估表生成任务（v3 - 采购单驱动 + 系统/运营双口径横向滚动）")
     logger.info("=" * 80)
 
     create_or_migrate_table()
 
-    fabric_params  = get_fabric_params()
+    fabric_params         = get_fabric_params()
     if not fabric_params:
         logger.warning("定制面料参数为空，终止")
         return
 
     fabric_usage          = get_fabric_price_data()
-    purchase_order_data   = get_purchase_order_data()   # 【v3新增】本月采购单
+    purchase_order_data   = get_purchase_order_data()
     system_forecast_data  = get_system_forecast_data()
     forecast_data         = get_forecast_order_data()
     merge_map             = get_fabric_color_merge_mapping()
     color_map             = get_color_map()
 
-    if not system_forecast_data and not purchase_order_data:
-        logger.warning("系统预估和采购单均为空，终止")
+    if not system_forecast_data and not purchase_order_data and not forecast_data:
+        logger.warning("所有数据源均为空，终止")
         return
 
     inventory_data, pending_data = get_inventory_data(merge_map)
