@@ -120,8 +120,8 @@ def read_inventory() -> Dict[Tuple[str, str], Dict[str, int]]:
             if cursor.fetchone().get('cnt', 0):
                 cursor.execute("""
                     SELECT msku AS SKU, 店铺,
-                           SUM(可售数量) AS 可售,
-                           SUM(在途数量) AS 在途
+                           SUM(FBA可售) AS 可售,
+                           SUM(在途) AS 在途
                     FROM `FBA库存明细`
                     WHERE msku IS NOT NULL AND 店铺 IS NOT NULL
                     GROUP BY msku, 店铺
