@@ -110,21 +110,21 @@ def read_inventory() -> Dict[Tuple[str, str], Dict[str, int]]:
         lambda: {'库存': 0, '待到货': 0}
     )
 
+    # ── FBA库存（独立try，失败不影响本地）────────────────────────────────
     try:
         with db_cursor() as cursor:
-            # FBA库存
             cursor.execute("""
                 SELECT COUNT(*) as cnt FROM information_schema.TABLES
                 WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='FBA库存明细'
             """)
             if cursor.fetchone().get('cnt', 0):
                 cursor.execute("""
-                    SELECT sku AS SKU, 店铺,
+                    SELECT SKU, 店铺,
                            SUM(FBA可售) AS 可售,
-                           SUM(在途) AS 在途
+                           SUM(在途)    AS 在途
                     FROM `FBA库存明细`
-                    WHERE sku IS NOT NULL AND 店铺 IS NOT NULL
-                    GROUP BY msku, 店铺
+                    WHERE SKU IS NOT NULL AND 店铺 IS NOT NULL
+                    GROUP BY SKU, 店铺
                 """)
                 for row in cursor.fetchall():
                     sku  = (row['SKU'] or '').strip()
@@ -133,9 +133,15 @@ def read_inventory() -> Dict[Tuple[str, str], Dict[str, int]]:
                     if spu and shop:
                         inventory_map[(spu, shop)]['库存']   += int(row['可售'] or 0)
                         inventory_map[(spu, shop)]['待到货'] += int(row['在途'] or 0)
-            logger.info("FBA库存明细读取完成")
+        logger.info(f"FBA库存读取完成：{len(inventory_map)} 个SPU+店铺")
+    except Exception as e:
+        logger.warning(f"FBA库存读取失败: {e}")
 
-            # 库存预估表（本地仓库）
+    # ── 本地库存（独立try，失败不影响FBA）────────────────────────────────
+    # 库存预估表是竖表结构：(SKU, 店铺, 库存状态, 数量)
+    # 库存状态取值：本地可用量、本地待到货
+    try:
+        with db_cursor() as cursor:
             cursor.execute("""
                 SELECT COUNT(*) as cnt FROM information_schema.TABLES
                 WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='库存预估表'
@@ -143,8 +149,8 @@ def read_inventory() -> Dict[Tuple[str, str], Dict[str, int]]:
             if cursor.fetchone().get('cnt', 0):
                 cursor.execute("""
                     SELECT SKU, 店铺,
-                           SUM(可用量) AS 可用,
-                           SUM(待入库量) AS 待入库
+                           SUM(CASE WHEN 库存状态 = '本地可用量' THEN 数量 ELSE 0 END) AS 可用,
+                           SUM(CASE WHEN 库存状态 = '本地待到货' THEN 数量 ELSE 0 END) AS 待入库
                     FROM `库存预估表`
                     WHERE SKU IS NOT NULL AND 店铺 IS NOT NULL
                     GROUP BY SKU, 店铺
@@ -154,15 +160,14 @@ def read_inventory() -> Dict[Tuple[str, str], Dict[str, int]]:
                     shop = (row['店铺'] or '').strip()
                     spu  = _extract_spu(sku)
                     if spu and shop:
-                        inventory_map[(spu, shop)]['库存']   += int(row['可用'] or 0)
+                        inventory_map[(spu, shop)]['库存']   += int(row['可用']    or 0)
                         inventory_map[(spu, shop)]['待到货'] += int(row['待入库'] or 0)
-            logger.info("库存预估表读取完成")
-
+        logger.info(f"本地库存读取完成")
     except Exception as e:
-        logger.error(f"读取库存数据失败: {e}", exc_info=True)
+        logger.warning(f"本地库存读取失败: {e}")
 
+    logger.info(f"库存合计：{len(inventory_map)} 个SPU+店铺有库存数据")
     return dict(inventory_map)
-
 
 def get_inventory(
     inventory_map: Dict[Tuple[str, str], Dict[str, int]],
