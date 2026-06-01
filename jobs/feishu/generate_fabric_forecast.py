@@ -836,7 +836,7 @@ def save_fabric_forecast(records: List[Dict[str, Any]]) -> None:
             today = datetime.now()
             current_month_start = today.replace(day=1)
             cursor.execute(
-                "DELETE FROM `面料预估表` WHERE 统计日期 >= %s",
+                "DELETE FROM `面料预估表` WHERE 统计日期 < %s",
                 (current_month_start.strftime('%Y-%m-%d'),)
             )
             logger.info(f"  清空本月及以后的旧数据")
