@@ -213,6 +213,51 @@ def get_system_forecast_data() -> Dict[Tuple[str, str], int]:
     return dict(result)
 
 
+def get_suggest_order_data() -> Dict[Tuple[str, str], int]:
+    """
+    从建议下单量表读取 T+1~T+3 月的建议下单量（已扣除库存和在途）。
+    合并所有店铺，返回：{(SPU, 月份标签 如'26年7月'): 建议下单量合计}
+    """
+    logger.info("读取建议下单量表（T~T+3月，含当月）...")
+    result: Dict[Tuple[str, str], int] = defaultdict(int)
+    today = datetime.now()
+
+    try:
+        with db_cursor(dictionary=True) as cur:
+            cur.execute("""
+                SELECT COUNT(*) as cnt FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='建议下单量表'
+            """)
+            if not cur.fetchone().get('cnt', 0):
+                logger.warning("建议下单量表不存在，将继续用系统预测")
+                return {}
+
+            for delta in range(0, 4):   # T~T+3，包含当月
+                y, m = add_months(today.year, today.month, delta)
+                label = f"{str(y)[2:]}年{m}月"
+                col   = f"`{label}建议下单`"
+                try:
+                    cur.execute(f"""
+                        SELECT SPU, SUM({col}) as qty
+                        FROM `建议下单量表`
+                        WHERE SPU IS NOT NULL AND SPU != ''
+                        GROUP BY SPU
+                    """)
+                    for row in cur.fetchall():
+                        spu = normalize_str(row.get('SPU'))
+                        qty = int(row.get('qty') or 0)
+                        if spu and qty > 0:
+                            result[(spu, label)] += qty
+                except Exception as e:
+                    logger.warning(f"  读取 {label} 建议下单失败（列可能不存在）: {e}")
+
+        logger.info(f"  建议下单量：{len(result)} 个 SPU+月份组合")
+    except Exception as e:
+        logger.warning(f"读取建议下单量表失败: {e}")
+
+    return dict(result)
+
+
 def get_forecast_order_data() -> Dict[Tuple[str, str], int]:
     """运营预计下单表 → {(SKU, 统计日期): 运营预计下单量}"""
     logger.info("读取运营预计下单表...")
@@ -441,6 +486,7 @@ def generate_fabric_forecast(
     fabric_usage:         Dict[Tuple[str, str], Dict[str, Any]],
     purchase_order_data:  Dict[str, int],
     system_forecast_data: Dict[Tuple[str, str], int],
+    suggest_order_data:   Dict[Tuple[str, str], int],     # 建议下单量 {(SPU,月份标签): qty}
     forecast_data:        Dict[Tuple[str, str], int],
     inventory_data:       Dict[str, int],
     pending_data:         Dict[str, int],
@@ -449,32 +495,82 @@ def generate_fabric_forecast(
     color_map:            Dict[str, str],
     merge_map:            Dict[Tuple[str, str], str],
 ) -> List[Dict[str, Any]]:
-
-    logger.info("开始生成面料预估数据（v3 横向滚动，含运营预估）...")
+    """
+    面料预估核心逻辑（v4）：
+      当月(T)   → 采购单实际下单量（已实现，确定值）
+      T+1~T+3  → 建议下单量（已扣除库存和在途，更准确）
+                  按系统预测的 SKU 颜色比例拆分到颜色维度
+                  若无建议下单量则兜底用系统预测
+    """
+    logger.info("开始生成面料预估数据（v4 建议下单量驱动T+1~T+3，采购单驱动当月）...")
 
     today        = datetime.now()
     cur_year     = today.year
     cur_month    = today.month
     current_time = today
 
-    # T ~ T+3 月的日期字符串
-    month_dates = []
-    for delta in range(4):
-        y, m = add_months(cur_year, cur_month, delta)
-        month_dates.append(get_month_date(y, m))
-
     primary_fabric_by_spu = get_primary_fabric_by_spu(fabric_usage)
+
+    # ── 预计算：每个 SPU+月份 的系统预测总量（用于颜色比例计算）────────────
+    # {(SPU, delta): 系统预测总量}
+    spu_sys_total: Dict[Tuple[str, int], int] = defaultdict(int)
+    # {(SKU, delta): 系统预测量}
+    sku_sys_qty:   Dict[Tuple[str, int], int] = {}
+
+    for (sku, stat_date), qty in system_forecast_data.items():
+        if qty <= 0:
+            continue
+        try:
+            sd_dt = datetime.strptime(stat_date[:10], '%Y-%m-%d') \
+                if isinstance(stat_date, str) else stat_date
+            sd_year, sd_month = sd_dt.year, sd_dt.month
+        except Exception:
+            continue
+        for d in range(4):
+            y, m = add_months(cur_year, cur_month, d)
+            if sd_year == y and sd_month == m:
+                spu = extract_spu_from_sku(sku)
+                if spu:
+                    spu_sys_total[(spu, d)] += qty
+                    sku_sys_qty[(sku, d)]    = qty
+                break
+
+    # ── 有效数量计算：T+1~T+3月用建议下单量，T月用系统预测（当月采购单单独处理）
+    def _effective_qty(sku: str, delta: int) -> int:
+        """
+        所有月份（T~T+3）统一用建议下单量 × 颜色比例。
+        无建议下单量时兜底用系统预测。
+        """
+        spu     = extract_spu_from_sku(sku)
+        sys_qty = sku_sys_qty.get((sku, delta), 0)
+
+        if not spu:
+            return sys_qty
+
+        y, m = add_months(cur_year, cur_month, delta)
+        month_label = f"{str(y)[2:]}年{m}月"
+        suggest_spu = suggest_order_data.get((spu, month_label), 0)
+
+        if suggest_spu <= 0:
+            return sys_qty   # 兜底：无建议下单量用系统预测
+
+        spu_total = spu_sys_total.get((spu, delta), 0)
+        if spu_total <= 0:
+            return sys_qty   # 兜底：系统预测无数据则直接用建议下单量均分逻辑暂不实现
+
+        ratio = sys_qty / spu_total
+        return int(suggest_spu * ratio)
 
     def _empty_bucket():
         return {
-            'purchase_m':  0.0,                      # 当月采购单消耗
-            'sys_month_m': [0.0, 0.0, 0.0, 0.0],    # 系统预测 T~T+3
-            'op_month_m':  [0.0, 0.0, 0.0, 0.0],    # 运营预计 T~T+3
+            'purchase_m':  0.0,
+            'sys_month_m': [0.0, 0.0, 0.0, 0.0],
+            'op_month_m':  [0.0, 0.0, 0.0, 0.0],
             '缺失SPU':     set(),
         }
 
-    total_agg: Dict[str, Dict]             = defaultdict(_empty_bucket)
-    color_agg: Dict[Tuple[str,str], Dict]  = defaultdict(_empty_bucket)
+    total_agg: Dict[str, Dict]            = defaultdict(_empty_bucket)
+    color_agg: Dict[Tuple[str,str], Dict] = defaultdict(_empty_bucket)
 
     # ── 步骤1：本月采购单 → 当月已下单消耗 ──────────────────────────────
     for sku, po_qty in purchase_order_data.items():
@@ -501,9 +597,38 @@ def generate_fabric_forecast(
                     if missing:
                         color_agg[(fabric_name, merged_color)]['缺失SPU'].add(spu)
 
-    # ── 步骤2：系统预测 + 运营预计 → T~T+3月消耗预估 ─────────────────────
-    def _process_forecast_source(source_data: Dict[Tuple[str, str], int], key: str):
-        """key = 'sys_month_m' 或 'op_month_m'"""
+    # ── 步骤2：系统预测（T月全量）+ 建议下单量（T+1~T+3）→ sys_month_m ──
+    # 遍历所有有系统预测的 SKU，对每个 delta 取有效数量
+    all_sku_deltas = set((sku, d) for (sku, d) in sku_sys_qty.keys())
+    for (sku, delta) in all_sku_deltas:
+        eff_qty = _effective_qty(sku, delta)
+        if eff_qty <= 0:
+            continue
+        spu = extract_spu_from_sku(sku)
+        if not spu:
+            continue
+        for _, fabric_name, usage_data in [(s, f, dd) for (s, f), dd in fabric_usage.items() if s == spu]:
+            if fabric_name not in fabric_params:
+                continue
+            meters, missing = _calc_usage_meters(
+                eff_qty, usage_data.get('单件用量'), usage_data.get('单件损耗'),
+                fabric_name, spu, fabric_usage)
+            if meters <= 0:
+                continue
+            total_agg[fabric_name]['sys_month_m'][delta] += meters
+            if missing:
+                total_agg[fabric_name]['缺失SPU'].add(spu)
+            if primary_fabric_by_spu.get(spu) == fabric_name:
+                color_abbr   = extract_color_abbr_from_sku(sku)
+                fabric_code  = fabric_params[fabric_name].get('面料编号', '')
+                merged_color = get_merged_color_abbr(fabric_code, color_abbr, merge_map)
+                if merged_color:
+                    color_agg[(fabric_name, merged_color)]['sys_month_m'][delta] += meters
+                    if missing:
+                        color_agg[(fabric_name, merged_color)]['缺失SPU'].add(spu)
+
+    # ── 步骤3：运营预计 → op_month_m（逻辑不变，仅供参考）─────────────────
+    def _process_op_forecast(source_data: Dict[Tuple[str, str], int]):
         for (sku, stat_date), qty in source_data.items():
             if qty <= 0:
                 continue
@@ -513,7 +638,6 @@ def generate_fabric_forecast(
                 sd_year, sd_month = sd_dt.year, sd_dt.month
             except Exception:
                 continue
-
             delta = None
             for d in range(4):
                 y, m = add_months(cur_year, cur_month, d)
@@ -522,7 +646,6 @@ def generate_fabric_forecast(
                     break
             if delta is None:
                 continue
-
             spu = extract_spu_from_sku(sku)
             if not spu:
                 continue
@@ -534,7 +657,7 @@ def generate_fabric_forecast(
                     fabric_name, spu, fabric_usage)
                 if meters <= 0:
                     continue
-                total_agg[fabric_name][key][delta] += meters
+                total_agg[fabric_name]['op_month_m'][delta] += meters
                 if missing:
                     total_agg[fabric_name]['缺失SPU'].add(spu)
                 if primary_fabric_by_spu.get(spu) == fabric_name:
@@ -542,12 +665,9 @@ def generate_fabric_forecast(
                     fabric_code  = fabric_params[fabric_name].get('面料编号', '')
                     merged_color = get_merged_color_abbr(fabric_code, color_abbr, merge_map)
                     if merged_color:
-                        color_agg[(fabric_name, merged_color)][key][delta] += meters
-                        if missing:
-                            color_agg[(fabric_name, merged_color)]['缺失SPU'].add(spu)
+                        color_agg[(fabric_name, merged_color)]['op_month_m'][delta] += meters
 
-    _process_forecast_source(system_forecast_data, 'sys_month_m')
-    _process_forecast_source(forecast_data,        'op_month_m')
+    _process_op_forecast(forecast_data)
 
     # ── 步骤3：生成记录 ──────────────────────────────────────────────────
     result = []
@@ -756,6 +876,7 @@ def main():
     fabric_usage          = get_fabric_price_data()
     purchase_order_data   = get_purchase_order_data()
     system_forecast_data  = get_system_forecast_data()
+    suggest_order_data    = get_suggest_order_data()       # 新增：建议下单量
     forecast_data         = get_forecast_order_data()
     merge_map             = get_fabric_color_merge_mapping()
     color_map             = get_color_map()
@@ -774,6 +895,7 @@ def main():
         fabric_usage         = fabric_usage,
         purchase_order_data  = purchase_order_data,
         system_forecast_data = system_forecast_data,
+        suggest_order_data   = suggest_order_data,         # 新增
         forecast_data        = forecast_data,
         inventory_data       = inventory_data,
         pending_data         = pending_data,
