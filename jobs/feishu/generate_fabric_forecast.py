@@ -352,41 +352,67 @@ def get_color_map() -> Dict[str, str]:
 def get_inventory_data(
     merge_map: Dict[Tuple[str, str], str]
 ) -> Tuple[Dict[str, int], Dict[str, int]]:
-    logger.info("读取仓库库存明细...")
+    """
+    从「面料库存台账」读取颜色维度库存和待到货量。
+ 
+    匹配键：面料编号颜色缩写（如 FAB-KNIT-JER-0017-BK）
+    经 merge_map 颜色归并处理后存入 inventory / pending。
+ 
+    Returns:
+        inventory: {面料编号-颜色缩写: 库存成品数量_条}
+        pending:   {面料编号-颜色缩写: 备货中数量_条}
+    """
+    logger.info("读取面料库存台账（飞书手工台账）...")
     inventory: Dict[str, int] = defaultdict(int)
     pending:   Dict[str, int] = defaultdict(int)
+ 
+    # 颜色归并：原始 key → 归并后 key
     raw_to_merged = {
         f"{fc}-{rc}": f"{fc}-{mc}"
         for (fc, rc), mc in merge_map.items()
     }
+ 
     try:
         with db_cursor(dictionary=True) as cur:
+            # 检查表是否存在
             cur.execute("""
                 SELECT COUNT(*) as cnt FROM information_schema.TABLES
-                WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='仓库库存明细'
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = '面料库存台账'
             """)
             if not cur.fetchone().get('cnt', 0):
-                logger.warning("仓库库存明细表不存在")
+                logger.warning("面料库存台账表不存在，请先运行 fetch_fabric_inventory_from_feishu.py")
                 return dict(inventory), dict(pending)
+ 
             cur.execute("""
-                SELECT SKU, SUM(可用量) as 可用, SUM(待到货量) as 待到货
-                FROM `仓库库存明细`
-                WHERE SKU IS NOT NULL AND SKU != ''
-                GROUP BY SKU
+                SELECT
+                    面料编号颜色缩写,
+                    库存成品数量_条,
+                    备货中数量_条
+                FROM `面料库存台账`
+                WHERE 面料编号颜色缩写 IS NOT NULL
+                  AND 面料编号颜色缩写 != ''
             """)
-            for row in cur.fetchall():
-                sku   = normalize_str(row.get('SKU'))
-                avail = int(row.get('可用') or 0)
-                pend  = int(row.get('待到货') or 0)
-                if sku:
-                    merged = raw_to_merged.get(sku, sku)
-                    if avail > 0:
-                        inventory[merged] += avail
-                    if pend > 0:
-                        pending[merged]   += pend
-        logger.info(f"  面料颜色编号库存 {len(inventory)} 条")
+            rows = cur.fetchall()
+            logger.info(f"  台账读取到 {len(rows)} 条颜色维度记录")
+ 
+            for row in rows:
+                key    = normalize_str(row.get('面料编号颜色缩写'))
+                avail  = int(row.get('库存成品数量_条') or 0)
+                pend   = int(row.get('备货中数量_条') or 0)
+                if not key:
+                    continue
+                # 颜色归并
+                merged = raw_to_merged.get(key, key)
+                if avail > 0:
+                    inventory[merged] += avail
+                if pend > 0:
+                    pending[merged]   += pend
+ 
+        logger.info(f"  颜色维度库存 {len(inventory)} 条，待到货 {len(pending)} 条")
     except Exception as e:
-        logger.error(f"读取库存明细失败: {e}", exc_info=True)
+        logger.error(f"读取面料库存台账失败: {e}", exc_info=True)
+ 
     return dict(inventory), dict(pending)
 
 
@@ -395,32 +421,76 @@ def get_inventory_by_fabric(
     pending_data:   Dict[str, int],
     fabric_params:  Dict[str, Dict[str, Any]],
 ) -> Tuple[Dict[str, int], Dict[str, int]]:
+    """
+    将颜色维度库存聚合为面料总量维度。
+ 
+    总量维度库存 = 库存成品数量_条 + 现有胚布数量_条（从台账重新读，不从颜色维度推算）
+    总量维度待到货 = 各颜色 备货中数量_条 之和
+ 
+    Returns:
+        inv_by_fabric:  {面料名: 总库存条数（成品+胚布）}
+        pend_by_fabric: {面料名: 总待到货条数}
+    """
+    inv_by_fabric:  Dict[str, int] = defaultdict(int)
+    pend_by_fabric: Dict[str, int] = defaultdict(int)
+ 
+    # 面料编号 → 面料名（用于聚合）
     code_to_name: Dict[str, str] = {}
     for fabric_name, info in fabric_params.items():
         code = info.get('面料编号', '').strip().upper()
         if code:
             code_to_name[code] = fabric_name
-
-    inv_by_fabric:  Dict[str, int] = defaultdict(int)
-    pend_by_fabric: Dict[str, int] = defaultdict(int)
-
-    def _match(sku: str) -> Optional[str]:
-        sku_upper = sku.upper()
-        for code, name in code_to_name.items():
-            if sku_upper.startswith(code + '-'):
-                return name
-        return None
-
-    for sku, qty in inventory_data.items():
-        name = _match(sku)
-        if name:
-            inv_by_fabric[name] += qty
-    for sku, qty in pending_data.items():
-        name = _match(sku)
-        if name:
-            pend_by_fabric[name] += qty
-
-    logger.info(f"  聚合到面料维度：库存 {len(inv_by_fabric)} 种面料")
+ 
+    try:
+        with db_cursor(dictionary=True) as cur:
+            cur.execute("""
+                SELECT COUNT(*) as cnt FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = '面料库存台账'
+            """)
+            if not cur.fetchone().get('cnt', 0):
+                logger.warning("面料库存台账表不存在，总量库存将为 0")
+                return dict(inv_by_fabric), dict(pend_by_fabric)
+ 
+            # 按面料编号（取 面料编号颜色缩写 的前半段）聚合
+            # 面料编号颜色缩写 格式：{面料编号}-{颜色缩写}
+            # 面料编号本身可能含"-"，但约定颜色缩写是最后一段（无"-"）
+            # 所以用 SUBSTRING_INDEX(面料编号颜色缩写, '-', -1) 取颜色，
+            # 用去掉末尾颜色段的剩余部分作为面料编号
+            cur.execute("""
+                SELECT
+                    面料编号颜色缩写,
+                    库存成品数量_条,
+                    现有胚布数量_条,
+                    备货中数量_条
+                FROM `面料库存台账`
+                WHERE 面料编号颜色缩写 IS NOT NULL
+                  AND 面料编号颜色缩写 != ''
+            """)
+            rows = cur.fetchall()
+ 
+            for row in rows:
+                full_key   = normalize_str(row.get('面料编号颜色缩写'))
+                stock_fg   = int(row.get('库存成品数量_条') or 0)
+                stock_grey = int(row.get('现有胚布数量_条') or 0)
+                pend       = int(row.get('备货中数量_条') or 0)
+ 
+                if not full_key or '-' not in full_key:
+                    continue
+ 
+                # 面料编号 = 去掉最后一个"-颜色缩写"段
+                fabric_code = full_key.rsplit('-', 1)[0].upper()
+                fabric_name = code_to_name.get(fabric_code)
+                if not fabric_name:
+                    continue
+ 
+                inv_by_fabric[fabric_name]  += (stock_fg + stock_grey)
+                pend_by_fabric[fabric_name] += pend
+ 
+        logger.info(f"  总量维度库存 {len(inv_by_fabric)} 种面料")
+    except Exception as e:
+        logger.error(f"聚合总量维度库存失败: {e}", exc_info=True)
+ 
     return dict(inv_by_fabric), dict(pend_by_fabric)
 
 
