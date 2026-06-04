@@ -34,7 +34,7 @@ from common.database import db_cursor
 logger = get_logger('fabric_inventory_feishu')
 
 # ── 飞书多维表配置 ────────────────────────────────────────────────────────
-FEISHU_APP_TOKEN = "DB91w3l72i8LyqkzmfLcdTjHnMd"
+FEISHU_APP_TOKEN = "XT6pbXxmdas4rdsme0XctyefnGu"
 FEISHU_TABLE_ID  = "tblMxScMbTyLQbyj"
 FEISHU_VIEW_ID   = None   # 不限定视图，拉全量
 
