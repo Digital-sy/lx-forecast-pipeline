@@ -130,11 +130,12 @@ def parse_records(raw_records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         fabric     = _text(fields.get('面料名', ''))
         color_abbr = _text(fields.get('颜色缩写', ''))
         stock_fg   = _num(fields.get('库存成品数量（条）', 0))
-        stock_grey = _num(fields.get('现有胚布数量（条）', 0))
+        stock_grey = _num(fields.get('现有坯布数量（条）', 0))
         pending    = _num(fields.get('备货中数量（条）', 0))
         upd_date   = _text(fields.get('更新日期', ''))
 
-        if not match_key:
+        if not match_key or match_key.endswith('-'):
+            # match_key 为空，或颜色缩写未填导致末尾是"-"，跳过
             skip_count += 1
             continue
 
@@ -149,7 +150,7 @@ def parse_records(raw_records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         })
 
     if skip_count:
-        logger.warning(f"  跳过 {skip_count} 条「面料编号-颜色缩写」为空的记录")
+        logger.warning(f"  跳过 {skip_count} 条记录（「面料编号-颜色缩写」为空或颜色缩写未填）")
     return result
 
 
@@ -166,7 +167,7 @@ def save_to_mysql(records: List[Dict[str, Any]]) -> int:
     with db_cursor(dictionary=False) as cur:
         cur.execute(f"TRUNCATE TABLE `{TARGET_TABLE}`")
         sql = f"""
-            INSERT INTO `{TARGET_TABLE}`
+            INSERT IGNORE INTO `{TARGET_TABLE}`
                 (`面料编号颜色缩写`, `面料`, `颜色缩写`,
                  `库存成品数量_条`, `现有胚布数量_条`, `备货中数量_条`,
                  `飞书更新日期`)
