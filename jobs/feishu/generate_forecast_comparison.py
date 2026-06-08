@@ -28,7 +28,10 @@ if str(project_root) not in sys.path:
 
 from common import get_logger
 from common.database import db_cursor
-from jobs.feishu.forecast_sales_improved import compute_forecast_for_shop
+from jobs.feishu.forecast_sales_improved import (
+        compute_forecast_for_shop,
+        load_spu_season_map,       # v3 新增
+    )
 
 logger = get_logger('forecast_comparison')
 
@@ -160,10 +163,6 @@ def read_sales_history(
     return result
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# Step2：调用算法计算系统预测
-# ────────────────────────────────────────────────────────────────────────────
-
 def compute_system_forecast(
     shop_sales: Dict[str, Dict[str, Dict[str, Any]]],
     forecast_months: List[Tuple[int, int, str]],
@@ -173,42 +172,40 @@ def compute_system_forecast(
     对每个店铺调用 compute_forecast_for_shop，聚合到两个维度：
       - SPU+店铺+月份  （用于写 预测对比表）
       - SKU+SPU+店铺+月份  （用于写 预测对比表_SKU）
-
     返回：
       system_forecast_spu: {(SPU, 店铺, 月份label): 系统预测销量}
       system_forecast_sku: {(SKU, SPU, 店铺, 月份label): 系统预测销量}
     """
     logger.info("正在计算系统预测销量...")
-
     forecast_sales_labels = [get_forecast_sales_label(y, m) for y, m, _ in forecast_months]
     label_to_month: Dict[str, str] = {
         get_forecast_sales_label(y, m): lbl
         for y, m, lbl in forecast_months
     }
-
+ 
+    # v3 新增：加载 SPU 季节映射
+    from jobs.feishu.forecast_sales_improved import compute_forecast_for_shop, load_spu_season_map
+    spu_season_map = load_spu_season_map()
+ 
     system_forecast_spu: Dict[Tuple[str, str, str], int] = defaultdict(int)
     system_forecast_sku: Dict[Tuple[str, str, str, str], int] = {}
-
     for shop, shop_data in shop_sales.items():
-        sku_forecasts = compute_forecast_for_shop(shop_data, forecast_sales_labels, current_date)
-
+        sku_forecasts = compute_forecast_for_shop(
+            shop_data, forecast_sales_labels, current_date,
+            spu_season_map=spu_season_map,   # v3 新增
+        )
         for sku, forecast_dict in sku_forecasts.items():
             spu = (shop_data[sku].get('SPU') or extract_spu_from_sku(sku)).strip()
             if not spu:
                 continue
-
             for flabel, month_lbl in label_to_month.items():
                 qty = forecast_dict.get(flabel, 0) or 0
-
                 # SPU 维度聚合（原有）
                 system_forecast_spu[(spu, shop, month_lbl)] += qty
-
                 # SKU 维度（新增）
                 system_forecast_sku[(sku, spu, shop, month_lbl)] = qty
-
     logger.info(f"系统预测聚合完成：SPU维度 {len(system_forecast_spu)} 条，SKU维度 {len(system_forecast_sku)} 条")
     return dict(system_forecast_spu), dict(system_forecast_sku)
-
 
 # ────────────────────────────────────────────────────────────────────────────
 # Step3：从运营预计下单表读取，聚合到 SPU+店铺+月 维度
