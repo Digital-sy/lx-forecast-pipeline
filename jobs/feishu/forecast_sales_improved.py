@@ -328,6 +328,9 @@ def _calc_yoy_growth_factor_standalone(
             return min(gf, OFFSEASON_GROWTH_CAP), f"今年近3月/去年有效均值×{gf:.2f}"
 
     return 1.0, "无同比数据默认1.0"
+
+
+def _get_peak_season_avg(
     sku_data: Dict[str, Any],
     season: str,
     last_year: int,
