@@ -155,16 +155,16 @@ def read_sales_history(
                 sku_dict['SPU'] = spu or extract_spu_from_sku(sku)
 
             # ── 当月截断补全：用日均推算当月全月销量 ────────────────────────────
-    _today = datetime.now()
-    if y == _today.year and m == _today.month:
-        days_passed = _today.day - 1  # 已完成天数（不含今天）
-        if days_passed > 0:
-            import calendar as _cal
-            days_in_month = _cal.monthrange(_today.year, _today.month)[1]
-            sales = int(sales * days_in_month / days_passed)
+            _today = datetime.now()
+            if y == _today.year and m == _today.month:
+                days_passed = _today.day - 1  # 已完成天数（不含今天）
+                if days_passed > 0:
+                import calendar as _cal
+                days_in_month = _cal.monthrange(_today.year, _today.month)[1]
+                sales = int(sales * days_in_month / days_passed)
             # 注：此推算仅用于预测算法输入，不写回数据库
  
-    sku_dict[month_key] = sku_dict.get(month_key, 0) + sales
+           sku_dict[month_key] = sku_dict.get(month_key, 0) + sales
     except Exception as e:
         logger.error(f"读取销量历史失败: {e}", exc_info=True)
 
