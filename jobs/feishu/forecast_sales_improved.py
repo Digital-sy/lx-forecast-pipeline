@@ -491,14 +491,28 @@ def _forecast_single_month(
     # ── 内部函数：应用 floor 后返回 ──────────────────────────────────────
     def _apply_floor(val: int, method: str) -> Tuple[int, str]:
         """
-        floor 机制：季节款预测值不能比上月跌超20%。
-        只防断崖下跌，不推动旺季增长（旺季增长由 yoy×growth_factor 自然体现）。
+        floor 机制：季节款上行期，预测值至少是上月的1.1倍。
+        判断是否处于上行季节：去年预测月销量 >= 去年上月销量。
+        非上行期（淡季回落）不施加 floor。
         """
         if season == '全年' or prev_forecast is None or prev_forecast <= 0:
             return val, method
-        floor = int(prev_forecast * 0.8)
-        if val < floor:
-            return floor, method + f"[↑floor={floor}件,防断崖]"
+
+        # 判断是否上行季节（去年本月 >= 去年上月）
+        last_year = forecast_year - 1
+        yoy_y     = last_year + 1 if (season == '秋冬' and forecast_month in [1, 2]) else last_year
+        prev_fy, prev_fm = _offset_month(forecast_year, forecast_month, -1)
+        prev_yoy_y = last_year + 1 if (season == '秋冬' and prev_fm in [1, 2]) else last_year
+        yoy_this   = sku_data.get(_get_month_label(yoy_y, forecast_month), 0) or 0
+        yoy_prev   = sku_data.get(_get_month_label(prev_yoy_y, prev_fm), 0) or 0
+
+        # 上行期判断：去年本月 > 去年上月，或去年数据不足（新品默认上行）
+        is_uptrend = (yoy_this >= yoy_prev) if (yoy_this >= 10 and yoy_prev >= 10) else True
+
+        if is_uptrend:
+            floor = int(prev_forecast * 1.1)
+            if val < floor:
+                return floor, method + f"[↑floor={floor}件,上行×1.1]"
         return val, method
 
     # ── L1 路径：去年同期存在 & 趋势因子有效 ────────────────────────────
