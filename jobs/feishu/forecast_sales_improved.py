@@ -177,29 +177,10 @@ def _calc_new_product_forecast(
 
         if yoy_sales >= 10:
             # ── 去年同期有足够数据：直接用 yoy × growth_factor ──────────
-            # growth_factor 优先用 spu_trend_factor（SPU整体增长系数）
-            # spu_trend_factor 为 None 时用近3月 vs 去年近3月的简单比值估算
-            if spu_trend_factor is not None and spu_trend_factor > 0:
-                growth_factor = min(spu_trend_factor, OFFSEASON_GROWTH_CAP)
-                gf_note = f"spu趋势{growth_factor:.2f}"
-            else:
-                # 用近3月今年 vs 去年同期的比值估算整体增长
-                yoy_recent_vals = []
-                for delta in [-1, -2, -3]:
-                    ry, rm   = _offset_month(current_year, current_month, delta)
-                    this_val = sku_data.get(_get_month_label(ry, rm), 0) or 0
-                    yoy_val  = sku_data.get(_get_month_label(ry - 1, rm), 0) or 0
-                    if this_val > 0 and yoy_val > 0:
-                        yoy_recent_vals.append(this_val / yoy_val)
-                if yoy_recent_vals:
-                    growth_factor = min(
-                        sum(yoy_recent_vals) / len(yoy_recent_vals),
-                        OFFSEASON_GROWTH_CAP
-                    )
-                    gf_note = f"近期同比{growth_factor:.2f}"
-                else:
-                    growth_factor = 1.0
-                    gf_note = "无同比数据默认1.0"
+            gf, gf_note = _calc_yoy_growth_factor_standalone(
+                sku_data, current_year, current_month, forecast_year, season
+            )
+            growth_factor = gf
             final = int(yoy_sales * growth_factor)
             return final, (
                 f"L3_季节同比({season},"
@@ -303,7 +284,50 @@ def _calc_weighted_trend_factor(
 # v4：动态旺季月均销量
 # ────────────────────────────────────────────────────────────────────────────
 
-def _get_peak_season_avg(
+def _calc_yoy_growth_factor_standalone(
+    sku_data: Dict[str, Any],
+    current_year: int,
+    current_month: int,
+    forecast_year: int,
+    season: str,
+) -> Tuple[float, str]:
+    """
+    计算今年整体增长系数（独立版，供 _calc_new_product_forecast 使用）。
+    今年近3月均值 / 去年同期均值，去年同期无效时用去年有效月份均值兜底。
+    """
+    m1_y, m1_m = _offset_month(current_year, current_month, -1)
+    m2_y, m2_m = _offset_month(current_year, current_month, -2)
+    m3_y, m3_m = _offset_month(current_year, current_month, -3)
+    m1 = sku_data.get(_get_month_label(m1_y, m1_m), 0) or 0
+    m2 = sku_data.get(_get_month_label(m2_y, m2_m), 0) or 0
+    m3 = sku_data.get(_get_month_label(m3_y, m3_m), 0) or 0
+    recent_avg = (m1 + m2 + m3) / 3 if (m1 + m2 + m3) > 0 else 0
+
+    # 优先：近3月今年 vs 去年同期
+    yoy_pairs = []
+    for (ry, rm), this_val in [(( m1_y, m1_m), m1), ((m2_y, m2_m), m2), ((m3_y, m3_m), m3)]:
+        yoy_val = sku_data.get(_get_month_label(ry - 1, rm), 0) or 0
+        if this_val > 0 and yoy_val >= 10:
+            yoy_pairs.append(this_val / yoy_val)
+    if yoy_pairs:
+        gf = sum(yoy_pairs) / len(yoy_pairs)
+        return min(gf, OFFSEASON_GROWTH_CAP), f"近期同比×{gf:.2f}"
+
+    # 次选：近3月今年均值 / 去年有效月份均值
+    if recent_avg > 0:
+        last_year = forecast_year - 1
+        yoy_valid = []
+        for m in range(7, 12):
+            y = last_year + 1 if (season == '秋冬' and m in [1, 2]) else last_year
+            v = sku_data.get(_get_month_label(y, m), 0) or 0
+            if v >= 10:
+                yoy_valid.append(v)
+        if yoy_valid:
+            yoy_base = sum(yoy_valid) / len(yoy_valid)
+            gf = recent_avg / yoy_base
+            return min(gf, OFFSEASON_GROWTH_CAP), f"今年近3月/去年有效均值×{gf:.2f}"
+
+    return 1.0, "无同比数据默认1.0"
     sku_data: Dict[str, Any],
     season: str,
     last_year: int,
@@ -386,19 +410,79 @@ def _forecast_single_month(
     recent_total = m1 + m2 + m3
     recent_avg   = recent_total / 3 if recent_total > 0 else 0
 
+    # ── 计算今年整体增长系数（用于修正去年同期）─────────────────────────
+    def _calc_yoy_growth_factor() -> Tuple[float, str]:
+        """
+        今年整体增长系数 = 近3月今年均值 / 近3月去年同期均值。
+        去年同期无数据时，用近3月均值 / 去年有效月份均值（同季节）。
+        fallback 1.0。
+        """
+        # 优先：近3月今年 vs 去年同期
+        yoy_pairs = []
+        for delta in [-1, -2, -3]:
+            ry, rm   = _offset_month(current_year, current_month, delta)
+            this_val = sku_data.get(_get_month_label(ry, rm), 0) or 0
+            yoy_val  = sku_data.get(_get_month_label(ry - 1, rm), 0) or 0
+            if this_val > 0 and yoy_val >= 10:
+                yoy_pairs.append(this_val / yoy_val)
+        if yoy_pairs:
+            gf = sum(yoy_pairs) / len(yoy_pairs)
+            return min(gf, OFFSEASON_GROWTH_CAP), f"近期同比×{gf:.2f}"
+
+        # 次选：近3月今年均值 / 去年有效月份均值（去年7-11月）
+        if recent_avg > 0:
+            last_year = forecast_year - 1
+            yoy_valid = []
+            for m in range(7, 12):
+                y = last_year + 1 if (season == '秋冬' and m in [1, 2]) else last_year
+                v = sku_data.get(_get_month_label(y, m), 0) or 0
+                if v >= 10:
+                    yoy_valid.append(v)
+            if yoy_valid:
+                yoy_base = sum(yoy_valid) / len(yoy_valid)
+                gf = recent_avg / yoy_base
+                return min(gf, OFFSEASON_GROWTH_CAP), f"今年近3月/去年旺季启动均值×{gf:.2f}"
+
+        return 1.0, "无同比数据默认1.0"
+
     # ── 内部函数：应用 floor 后返回 ──────────────────────────────────────
     def _apply_floor(val: int, method: str) -> Tuple[int, str]:
         """
-        季节款 floor 机制：预测值不能低于 max(recent_avg, prev_forecast × 0.8)。
-        仅在旺季趋势期（prev_forecast 存在 且 预测月比上月高的方向）生效，
-        防止旺季启动期出现断崖下跌。
+        季节款 floor 机制：
+          当预测值 < 去年同期 × 今年增长系数 时，用修正值替代。
+          防止旺季启动期因去年同期异常低导致预测断崖。
+          仅对季节款且 prev_forecast 存在时生效。
         """
         if season == '全年' or prev_forecast is None or prev_forecast <= 0:
             return val, method
-        # 只在季节旺季趋势方向上做 floor（prev 已经是近期销量水平）
-        floor = int(max(recent_avg, prev_forecast * 0.8))
+
+        # 去年本月和去年上月的环比
+        last_year   = forecast_year - 1
+        yoy_y       = last_year + 1 if (season == '秋冬' and forecast_month in [1, 2]) else last_year
+        prev_fy, prev_fm = _offset_month(forecast_year, forecast_month, -1)
+        prev_yoy_y  = last_year + 1 if (season == '秋冬' and prev_fm in [1, 2]) else last_year
+        yoy_this    = sku_data.get(_get_month_label(yoy_y, forecast_month), 0) or 0
+        yoy_prev    = sku_data.get(_get_month_label(prev_yoy_y, prev_fm), 0) or 0
+
+        gf, gf_note = _calc_yoy_growth_factor()
+
+        if yoy_this >= 10 and yoy_prev >= 10:
+            # 去年环比有效：floor = prev_forecast × 去年月度环比
+            mom_ratio = yoy_this / yoy_prev
+            floor = int(prev_forecast * mom_ratio)
+            note  = f"去年环比×{mom_ratio:.2f}"
+        else:
+            # 去年环比无效（上市初期）：floor = prev_forecast × 季节固定增长1.2
+            floor = int(prev_forecast * 1.2)
+            note  = "季节启动×1.2"
+
+        # floor 同时用增长系数修正去年同期做上限，防止无限放大
+        if yoy_this >= 10:
+            ceiling = int(yoy_this * gf * 1.5)
+            floor   = min(floor, ceiling)
+
         if val < floor:
-            return floor, method + f"[↑floor={floor}件]"
+            return floor, method + f"[↑floor={floor}件,{note}]"
         return val, method
 
     # ── L1 路径：去年同期存在 & 趋势因子有效 ────────────────────────────
