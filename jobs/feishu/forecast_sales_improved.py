@@ -1,24 +1,37 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
 """
-改进版预计销量算法 v2
-
-【v2 新增改进】
-5. 爆发检测：近期环比持续快速增长 + 同比因子超钳位上限 → 走L3阻尼增长（不压制爆火产品）
-6. 方案C：同比因子越高，越依赖近3月均值（动态α混合，避免高基数效应虚高预测）
-7. 方案A兜底：混合结果再用环比上限兜底（防止极端情况）
-
-【新决策树】
-  有去年同期数据？
-    是 → 计算trend_factor，判断是否爆发
-          爆发（trend超钳位 AND 近期环比>30%）→ L3阻尼增长（真实爆火不压制）
-          非爆发 → 方案C混合（trend>2.0: α=0.3; >1.5: α=0.5; 否则: α=0.7）
-                   → 方案A兜底（min 近3月均值×1.5）→ L1结果
-    否 → L2（去年同期=0但trend=0）/ L3（无去年同期）/ L4（SPU兜底）
+【补丁说明 — forecast_sales_improved.py 季节性感知升级（v2 → v3）】
+ 
+改动范围：
+  1. 新增 `load_spu_season_map()` — 从 MySQL `SPU季节表` 读取 SPU→季节映射
+  2. 新增 `_get_peak_season_avg()` — 计算去年旺季月均销量
+  3. 修改 `_forecast_single_month()` — 加入 seasonal_factor 压制淡季 recent_avg
+  4. 修改 `compute_forecast_for_shop()` — 传入 spu_season_map 参数
+ 
+季节定义：
+  春夏款：3-8月 旺季，9-2月 淡季
+  秋冬款：9-2月 旺季，3-8月 淡季
+  全年款：不做季节压制（现有逻辑不变）
+ 
+季节系数计算：
+  seasonal_factor = 去年目标月销量 / 去年旺季月均销量
+  recent_avg_adj  = recent_avg × seasonal_factor
+  → 用调整后的 recent_avg_adj 代替原 recent_avg 参与方案C混合和方案A上限
+ 
+替换步骤：
+  1. 在文件顶部（常量区之后）添加 load_spu_season_map / _get_peak_season_avg
+  2. 用本文件中的 _forecast_single_month 替换原函数
+  3. 用本文件中的 compute_forecast_for_shop 替换原函数（新增 spu_season_map 参数）
+  4. 调用方（generate_forecast_comparison.py）需先调用 load_spu_season_map()
+     并把结果传入 compute_forecast_for_shop()
 """
-
-from datetime import datetime
+ 
 from typing import Dict, Any, List, Tuple, Optional
+from common.database import db_cursor
+from common import get_logger
+ 
+logger = get_logger('forecast_sales')
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -199,88 +212,117 @@ def _forecast_single_month(
     current_year: int,
     current_month: int,
     trend_factor: Optional[float],
-    raw_trend_factor: float,          # v2新增：未钳位原始值
+    raw_trend_factor: float,
     spu_trend_factor: Optional[float],
     forecast_step: int = 0,
+    season: str = '全年',          # v3 新增
 ) -> Tuple[int, str]:
     """
-    预测决策树（v2）：
-
-    有去年同期 & trend_factor有效？
-      ├─ 爆发检测（raw_factor超钳位 AND 近期环比>30%）→ L3阻尼增长
-      └─ 方案C混合（动态α） → 方案A兜底（min 近3月均值×1.5）→ 返回
-    无去年同期 or trend_factor=None？
-      ├─ L2：去年同期但trend=0
-      ├─ L3：无去年同期（新品）
-      └─ L4：SPU趋势兜底
+    预测决策树（v3）：在 v2 基础上加入季节性感知。
+ 
+    新增逻辑（仅在 L1 路径 & season != '全年' 时生效）：
+      seasonal_factor = 去年目标月销量 / 去年旺季月均销量
+      recent_avg_adj  = recent_avg × seasonal_factor
+      → 用 recent_avg_adj 替换 recent_avg 参与方案C混合和方案A上限
+      → 当预测月是淡季时，recent_avg 被旺季数据拉高的部分被压回淡季水平
     """
+    # ── 以下从原 v2 代码复制，保持原逻辑不变 ────────────────────────────
+    # （此处假设 _get_month_label / _get_recent_3months / _calc_recent_growth
+    #   / _calc_new_product_forecast / ALPHA_* / MOM_CAP_RATIO 等常量
+    #   均已在同一文件中定义，补丁只替换本函数体）
+ 
     yoy_label = _get_month_label(forecast_year - 1, forecast_month)
     yoy_sales = sku_data.get(yoy_label, 0) or 0
-
-    # ── 近3月数据（供方案C、方案A和爆发检测共用）──────────────────────────
+ 
     m1, m2, m3 = _get_recent_3months(sku_data, current_year, current_month)
     recent_total = m1 + m2 + m3
     recent_avg   = recent_total / 3 if recent_total > 0 else 0
-
+ 
+    # ── v3 新增：季节系数计算 ─────────────────────────────────────────────
+    seasonal_note = ""
+    if season != '全年' and recent_avg > 0 and yoy_sales > 0:
+        last_year = forecast_year - 1
+        peak_avg  = _get_peak_season_avg(sku_data, season, last_year)
+        if peak_avg > 0:
+            seasonal_factor = yoy_sales / peak_avg
+            # 钳位：淡季最低压到旺季均值的5%，防止季节系数过小导致预测归零
+            seasonal_factor = max(seasonal_factor, 0.05)
+            # 旺季月份不压制（seasonal_factor > 1 时不放大，保持 ≤ 1）
+            if seasonal_factor < 1.0:
+                recent_avg_adj = recent_avg * seasonal_factor
+                seasonal_note  = (
+                    f"[季节压制:{season},旺季均值{int(peak_avg)},"
+                    f"系数{seasonal_factor:.2f},adj均值{int(recent_avg_adj)}]"
+                )
+            else:
+                recent_avg_adj = recent_avg   # 旺季月份不放大，保持原值
+                seasonal_note  = f"[季节旺季:{season},无压制]"
+        else:
+            recent_avg_adj = recent_avg       # 去年旺季无数据，不处理
+            seasonal_note  = f"[季节:{season},旺季无数据]"
+    else:
+        recent_avg_adj = recent_avg           # 全年款或无数据，不处理
+ 
     # ── L1 路径：去年同期存在 & 趋势因子有效 ────────────────────────────
     if yoy_sales > 0 and trend_factor is not None and trend_factor > 0:
-
         yoy_pred = int(yoy_sales * trend_factor)
-
-        # ── 爆发检测：同比因子需要钳位 AND 近期环比也在快速增长 ───────────
-        is_clamped  = raw_trend_factor > TREND_FACTOR_MAX
+ 
+        is_clamped    = raw_trend_factor > TREND_FACTOR_MAX
         recent_growth = _calc_recent_growth(m1, m2, m3)
-        is_explosive = is_clamped and recent_growth > EXPLOSIVE_GROWTH_THRESHOLD
-
+        is_explosive  = is_clamped and recent_growth > EXPLOSIVE_GROWTH_THRESHOLD
+ 
         if is_explosive:
-            # 真正爆火：信任L3近期趋势，保留季节性
             val, method = _calc_new_product_forecast(
                 sku_data, current_year, current_month, forecast_step
             )
             if val > 0:
-                return val, f"L3_爆发检测(同比{raw_trend_factor:.1f}倍+环比{recent_growth:.0%})→阻尼增长"
-
-        # ── 方案C：动态α混合（高基数效应压制）──────────────────────────
+                return val, (
+                    f"L3_爆发检测(同比{raw_trend_factor:.1f}倍"
+                    f"+环比{recent_growth:.0%})→阻尼增长{seasonal_note}"
+                )
+ 
+        # ── 方案C：动态α混合（使用季节调整后的 recent_avg_adj）──────────
         if trend_factor >= ALPHA_HIGH_THRESHOLD:
-            alpha = ALPHA_HIGH      # 0.3：高度依赖近期均值
+            alpha = ALPHA_HIGH
         elif trend_factor >= ALPHA_MID_THRESHOLD:
-            alpha = ALPHA_MID       # 0.5：均衡
+            alpha = ALPHA_MID
         else:
-            alpha = ALPHA_NORMAL    # 0.7：主要依赖同比（原逻辑接近）
-
-        if recent_avg > 0:
-            blended = int(yoy_pred * alpha + recent_avg * (1 - alpha))
-            # ── 方案A：环比上限兜底 ───────────────────────────────────────
-            mom_cap = int(recent_avg * MOM_CAP_RATIO)
+            alpha = ALPHA_NORMAL
+ 
+        if recent_avg_adj > 0:
+            blended = int(yoy_pred * alpha + recent_avg_adj * (1 - alpha))
+            mom_cap = int(recent_avg_adj * MOM_CAP_RATIO)
             final   = min(blended, mom_cap)
-
+ 
             alpha_note  = f"α={alpha}"
             cap_applied = "→上限截断" if final < blended else ""
             return final, (
-                f"L1_同比趋势+方案C({alpha_note},同比{yoy_pred}件×{alpha:.0%}"
-                f"+近3月均值{int(recent_avg)}件×{1-alpha:.0%}={blended}件"
-                f"{cap_applied})"
+                f"L1_同比趋势+方案C({alpha_note},"
+                f"同比{yoy_pred}件×{alpha:.0%}"
+                f"+调整均值{int(recent_avg_adj)}件×{1-alpha:.0%}={blended}件"
+                f"{cap_applied}){seasonal_note}"
             )
+        elif recent_avg > 0:
+            # 有原始均值但调整后为0（极端季节系数），直接用L1
+            return yoy_pred, f"L1_同比趋势(季节adj后均值为0){seasonal_note}"
         else:
-            # 近3月无销量，直接用L1
-            return yoy_pred, "L1_同比趋势(近期无销量)"
-
-    # ── L2：去年同期存在但趋势因子为0 ───────────────────────────────────
+            return yoy_pred, f"L1_同比趋势(近期无销量){seasonal_note}"
+ 
+    # ── L2 / L3 / L4 路径：与 v2 完全相同，不受季节影响 ────────────────
     if yoy_sales > 0 and trend_factor == 0:
         return int(yoy_sales), "L2_去年同期"
-
-    # ── L3：新品/无同期数据 ──────────────────────────────────────────────
+ 
     val, method = _calc_new_product_forecast(
         sku_data, current_year, current_month, forecast_step
     )
     if val > 0:
         return val, method
-
-    # ── L4：SPU趋势兜底 ──────────────────────────────────────────────────
+ 
     if yoy_sales > 0 and spu_trend_factor is not None and spu_trend_factor > 0:
         return int(yoy_sales * spu_trend_factor), "L4_SPU趋势兜底"
-
+ 
     return 0, "L5_无数据"
+
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -290,28 +332,40 @@ def _forecast_single_month(
 def compute_forecast_for_shop(
     shop_data: Dict[str, Dict[str, Any]],
     forecast_sales_labels: List[str],
-    current_date: datetime = None,
+    current_date=None,
+    spu_season_map: Dict[str, str] = None,   # v3 新增
 ) -> Dict[str, Dict[str, Any]]:
+    """
+    v3：在 v2 基础上，为每个 SKU 查询其 SPU 的季节标签，
+    并在调用 _forecast_single_month 时传入 season 参数。
+ 
+    spu_season_map: {SPU: '春夏'|'秋冬'|'全年'}，由 load_spu_season_map() 提供。
+                    传 None 或空字典时退化为全年（v2 行为）。
+    """
     import re as _re
-
+    from datetime import datetime
+ 
+    if spu_season_map is None:
+        spu_season_map = {}
+ 
     if current_date is None:
         current_date = datetime.now()
-
+ 
     current_year  = current_date.year
     current_month = current_date.month
     last_month_year, last_month = _offset_month(current_year, current_month, -1)
-
-    # Step1：计算每个SKU的趋势因子（clamped + raw）
+ 
+    # Step1：SKU 趋势因子
     sku_trend:     Dict[str, Optional[float]] = {}
     sku_trend_raw: Dict[str, float]           = {}
     for sku, sku_data in shop_data.items():
         tf, raw_tf, _ = _calc_weighted_trend_factor(sku_data, last_month_year, last_month)
         sku_trend[sku]     = tf
         sku_trend_raw[sku] = raw_tf
-
-    # Step2：SPU级趋势因子均值
-    spu_trend:   Dict[str, float]       = {}
-    spu_sku_map: Dict[str, List[str]]   = {}
+ 
+    # Step2：SPU 趋势因子均值
+    spu_trend:   Dict[str, float]     = {}
+    spu_sku_map: Dict[str, List[str]] = {}
     for sku, sku_data in shop_data.items():
         spu = (sku_data.get("SPU") or "").strip()
         if spu:
@@ -320,7 +374,7 @@ def compute_forecast_for_shop(
         valid = [sku_trend[s] for s in skus if sku_trend.get(s) is not None]
         if valid:
             spu_trend[spu] = round(sum(valid) / len(valid), 2)
-
+ 
     # Step3：解析预测月份标签
     forecast_months: List[Tuple[int, int, str]] = []
     for label in forecast_sales_labels:
@@ -329,35 +383,33 @@ def compute_forecast_for_shop(
             yr = 2000 + int(mm.group(1)) if int(mm.group(1)) < 50 else 1900 + int(mm.group(1))
             mo = int(mm.group(2))
             forecast_months.append((yr, mo, label))
-
-    # Step4：逐SKU生成预测
+ 
+    # Step4：逐SKU预测（v3：传入季节）
     result: Dict[str, Dict[str, Any]] = {}
     for sku, sku_data in shop_data.items():
         tf     = sku_trend[sku]
         raw_tf = sku_trend_raw[sku]
         spu    = (sku_data.get("SPU") or "").strip()
         spu_tf = spu_trend.get(spu)
-
-        sku_result: Dict[str, Any] = {
-            "趋势因子": tf if tf is not None else 0.0,
-        }
+        season = spu_season_map.get(spu, '全年')   # v3 新增
+ 
+        sku_result: Dict[str, Any] = {"趋势因子": tf if tf is not None else 0.0}
         method_labels = []
         for idx, (fy, fm, flabel) in enumerate(forecast_months):
             val, method = _forecast_single_month(
                 sku_data,
                 fy, fm,
                 current_year, current_month,
-                tf,
-                raw_tf,      # v2新增
-                spu_tf,
+                tf, raw_tf, spu_tf,
                 forecast_step=idx,
+                season=season,          # v3 新增
             )
             sku_result[flabel] = val
             method_labels.append(f"{fm}月:{method}")
-
+ 
         sku_result["预测方法"] = "；".join(method_labels)
         result[sku] = sku_result
-
+ 
     return result
 
 
@@ -421,3 +473,70 @@ if __name__ == "__main__":
 
     print()
     print("✅ 验证完毕")
+def load_spu_season_map() -> Dict[str, str]:
+    """
+    从 MySQL `SPU季节表` 读取 {SPU: 季节} 映射。
+    季节值：'春夏' / '秋冬' / '全年'
+    若表不存在或读取失败，返回空字典（降级为全年，现有逻辑不变）。
+    """
+    try:
+        with db_cursor(dictionary=True) as cur:
+            cur.execute("""
+                SELECT COUNT(*) AS cnt FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'SPU季节表'
+            """)
+            if not cur.fetchone().get('cnt', 0):
+                logger.warning("SPU季节表不存在，季节性感知功能跳过")
+                return {}
+            cur.execute("SELECT SPU, 季节 FROM `SPU季节表`")
+            result = {row['SPU']: row['季节'] for row in cur.fetchall()}
+            logger.info(f"读取 SPU季节表：{len(result)} 条")
+            return result
+    except Exception as e:
+        logger.warning(f"读取 SPU季节表失败（降级为全年）: {e}")
+        return {}
+ 
+ 
+# ════════════════════════════════════════════════════════════════════════════
+# 2. 新增：计算去年旺季月均销量
+# ════════════════════════════════════════════════════════════════════════════
+ 
+# 季节对应的旺季月份
+PEAK_MONTHS = {
+    '春夏': [3, 4, 5, 6, 7, 8],
+    '秋冬': [9, 10, 11, 12, 1, 2],
+}
+ 
+ 
+def _get_peak_season_avg(
+    sku_data: Dict[str, Any],
+    season: str,
+    last_year: int,
+) -> float:
+    """
+    计算去年旺季月份的平均销量。
+    用于计算 seasonal_factor = 去年目标月 / 去年旺季均值。
+ 
+    Args:
+        sku_data  : SKU销量字典，key 格式 "YY年M月销量"
+        season    : '春夏' / '秋冬'
+        last_year : 去年年份（4位整数）
+ 
+    Returns:
+        float: 去年旺季月均销量（0表示无数据）
+    """
+    peak_ms = PEAK_MONTHS.get(season, [])
+    if not peak_ms:
+        return 0.0
+ 
+    total, count = 0, 0
+    for m in peak_ms:
+        # 跨年处理：秋冬的1、2月属于 last_year+1
+        y = last_year + 1 if (season == '秋冬' and m in [1, 2]) else last_year
+        label = f"{str(y)[-2:]}年{m}月销量"
+        val = sku_data.get(label, 0) or 0
+        if val > 0:
+            total += val
+            count += 1
+ 
+    return total / count if count > 0 else 0.0
