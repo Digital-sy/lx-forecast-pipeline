@@ -136,7 +136,18 @@ def _calc_new_product_forecast(
     current_year: int,
     current_month: int,
     forecast_step: int,
+    season: str = '全年',
+    forecast_year: int = None,
+    forecast_month: int = None,
 ) -> Tuple[int, str]:
+    """
+    L3 路径：新品/无同期数据预测。
+    v4 新增：季节款加入 adj_factor 调整近3月均值，体现预测月的季节差异。
+
+    adj_factor = target_seasonal / recent_seasonal
+      target_seasonal = 去年预测月 / 去年旺季均值
+      recent_seasonal = 去年近3月均值 / 去年旺季均值
+    """
     m1, m2, m3 = _get_recent_3months(sku_data, current_year, current_month)
     recent_total = m1 + m2 + m3
 
@@ -144,19 +155,69 @@ def _calc_new_product_forecast(
         return 0, "L3_数据不足"
 
     g_weighted = _calc_recent_growth(m1, m2, m3)
+    recent_avg = recent_total / 3
 
+    # ── v4：季节调整 ──────────────────────────────────────────────────────
+    seasonal_note = ""
+    adj_factor    = 1.0
+    if (season != '全年'
+            and forecast_year is not None
+            and forecast_month is not None):
+        last_year = forecast_year - 1
+        peak_avg  = _get_peak_season_avg(sku_data, season, last_year)
+        if peak_avg > 0:
+            # 去年预测月的季节系数
+            yoy_target_label  = _get_month_label(last_year, forecast_month)
+            # 秋冬款1/2月跨年
+            if season == '秋冬' and forecast_month in [1, 2]:
+                yoy_target_label = _get_month_label(last_year + 1, forecast_month)
+            yoy_target = sku_data.get(yoy_target_label, 0) or 0
+            target_seasonal = (yoy_target / peak_avg) if yoy_target > 0 else None
+
+            # 去年近3月的季节系数
+            recent_yoy_vals = []
+            for delta in [-1, -2, -3]:
+                ry, rm = _offset_month(current_year, current_month, delta)
+                ry_last = ry - 1
+                label   = _get_month_label(ry_last, rm)
+                v = sku_data.get(label, 0) or 0
+                if v > 0:
+                    recent_yoy_vals.append(v)
+            if recent_yoy_vals:
+                recent_yoy_avg  = sum(recent_yoy_vals) / len(recent_yoy_vals)
+                recent_seasonal = recent_yoy_avg / peak_avg
+            else:
+                # 近3月去年也无数据，用静态兜底（淡季假设系数0.1）
+                recent_seasonal = 0.1
+
+            if target_seasonal is not None and recent_seasonal > 0:
+                adj_factor = target_seasonal / recent_seasonal
+                # 钳位：防止倍数过大或过小
+                adj_factor = _clamp(adj_factor, 0.1, 5.0)
+                seasonal_note = (
+                    f"[季节adj:{season},"
+                    f"目标系数{target_seasonal:.2f},"
+                    f"近期系数{recent_seasonal:.2f},"
+                    f"adj×{adj_factor:.2f}]"
+                )
+
+    # ── 有增长趋势：阻尼增长 × adj_factor ────────────────────────────────
     if g_weighted > NEW_PRODUCT_GROWTH_THRESHOLD:
         g = min(g_weighted, MAX_NEW_PRODUCT_GROWTH)
         value = float(m1)
         for i in range(forecast_step + 1):
             value *= (1.0 + g * (NEW_PRODUCT_DAMPING ** i))
+        value *= adj_factor
         cap_note = (
             f"(原始增速{g_weighted:.0%}→限速{g:.0%})"
             if g < g_weighted else f"(增速{g:.0%})"
         )
-        return int(value), f"L3_阻尼增长{cap_note}·step{forecast_step}"
+        return int(value), f"L3_阻尼增长{cap_note}·step{forecast_step}{seasonal_note}"
     else:
-        return int(recent_total / 3), "L3_近3月均值(无明显趋势)"
+        # 无明显趋势：近3月均值 × adj_factor
+        val = int(recent_avg * adj_factor)
+        note = f"L3_近3月均值×季节adj{seasonal_note}" if seasonal_note else "L3_近3月均值(无明显趋势)"
+        return val, note
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -302,7 +363,8 @@ def _forecast_single_month(
         is_explosive  = is_clamped and recent_growth > EXPLOSIVE_GROWTH_THRESHOLD
         if is_explosive:
             val, method = _calc_new_product_forecast(
-                sku_data, current_year, current_month, forecast_step
+                sku_data, current_year, current_month, forecast_step,
+                season=season, forecast_year=forecast_year, forecast_month=forecast_month,
             )
             if val > 0:
                 return val, (
@@ -360,7 +422,8 @@ def _forecast_single_month(
 
     # ── L3：新品/无同期数据 ───────────────────────────────────────────────
     val, method = _calc_new_product_forecast(
-        sku_data, current_year, current_month, forecast_step
+        sku_data, current_year, current_month, forecast_step,
+        season=season, forecast_year=forecast_year, forecast_month=forecast_month,
     )
     if val > 0:
         return val, method
@@ -493,13 +556,15 @@ if __name__ == "__main__":
     current_date = datetime(2026, 6, 8)
 
     print("=" * 70)
-    print("场景1：LTY351-BO-M（秋冬款，6月预测7/8/9月）")
+    print("场景1：LTY351-BO-M JQ-US（秋冬款，无去年3-5月数据，走L3）")
     print("=" * 70)
     lty351_data = {
-        "26年5月销量": 224, "26年4月销量": 429, "26年3月销量": 371,
-        "25年7月销量": 59,  "25年8月销量": 160, "25年9月销量": 224,
-        "25年10月销量": 858,"25年11月销量": 550,"25年12月销量": 760,
-        "25年6月销量": 180, "25年5月销量": 244, "25年4月销量": 429,
+        # 近3月（今年）
+        "26年5月销量": 57, "26年4月销量": 103, "26年3月销量": 173,
+        # 去年同期（3-5月无数据，所以走L3）
+        "25年7月销量": 76,  "25年8月销量": 272, "25年9月销量": 316,
+        "25年10月销量": 1314, "25年11月销量": 701, "25年12月销量": 862,
+        "26年1月销量": 587, "26年2月销量": 410,
         "SPU": "LTY351",
     }
     labels = ["26年7月预计销量", "26年8月预计销量", "26年9月预计销量"]
