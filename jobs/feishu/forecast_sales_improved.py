@@ -501,11 +501,22 @@ def load_spu_season_map() -> Dict[str, str]:
 # 2. 新增：计算去年旺季月均销量
 # ════════════════════════════════════════════════════════════════════════════
  
-# 季节对应的旺季月份
-PEAK_MONTHS = {
-    '春夏': [3, 4, 5, 6, 7, 8],
-    '秋冬': [9, 10, 11, 12, 1, 2],
+逻辑：
+  1. 取去年全年12个月销量
+  2. 找销量最高的3个月（非连续也可）→ peak_avg
+  3. 如果去年数据不足3个月有销量，fallback 到静态 PEAK_MONTHS 定义
+  4. 如果静态定义也没数据，返回 0（不做季节压制）
+"""
+ 
+# ── 静态兜底旺季定义（动态识别失败时使用）────────────────────────────────
+# 收窄为核心旺季月份，去掉启动月和收尾月
+PEAK_MONTHS_FALLBACK = {
+    '春夏': [4, 5, 6, 7],     # 去掉3月（启动）和8月（收尾）
+    '秋冬': [10, 11, 12, 1],  # 去掉9月（启动）和2月（收尾）
 }
+ 
+# 动态识别时取销量最高的N个月
+PEAK_TOP_N = 3
  
  
 def _get_peak_season_avg(
@@ -514,29 +525,66 @@ def _get_peak_season_avg(
     last_year: int,
 ) -> float:
     """
-    计算去年旺季月份的平均销量。
-    用于计算 seasonal_factor = 去年目标月 / 去年旺季均值。
+    动态识别去年旺季月均销量：
+      1. 取去年全年12个月销量，找最高的 PEAK_TOP_N 个月
+      2. 要求这几个月都属于该季节的合理旺季范围（过滤异常月份）
+      3. 数据不足时 fallback 到静态 PEAK_MONTHS_FALLBACK
  
     Args:
-        sku_data  : SKU销量字典，key 格式 "YY年M月销量"
-        season    : '春夏' / '秋冬'
+        sku_data  : SKU销量字典
+        season    : '春夏' / '秋冬' / '全年'
         last_year : 去年年份（4位整数）
  
     Returns:
-        float: 去年旺季月均销量（0表示无数据）
+        float: 旺季月均销量（0 = 无数据，不做季节压制）
     """
-    peak_ms = PEAK_MONTHS.get(season, [])
-    if not peak_ms:
+    if season == '全年':
         return 0.0
  
-    total, count = 0, 0
-    for m in peak_ms:
-        # 跨年处理：秋冬的1、2月属于 last_year+1
+    # ── Step1：取去年全年12个月销量 ────────────────────────────────────────
+    monthly_sales = []
+    for m in range(1, 13):
+        # 秋冬款的1、2月在去年对应 last_year+1
+        if season == '秋冬' and m in [1, 2]:
+            y = last_year + 1
+        else:
+            y = last_year
+        label = f"{str(y)[-2:]}年{m}月销量"
+        val = sku_data.get(label, 0) or 0
+        monthly_sales.append((m, val))
+ 
+    # ── Step2：动态找最高的 PEAK_TOP_N 个月 ────────────────────────────────
+    # 只取有销量的月份
+    has_sales = [(m, v) for m, v in monthly_sales if v > 0]
+ 
+    if len(has_sales) >= PEAK_TOP_N:
+        # 按销量降序，取前 N 个月
+        top_months = sorted(has_sales, key=lambda x: x[1], reverse=True)[:PEAK_TOP_N]
+        top_months_ids = {m for m, _ in top_months}
+ 
+        # 过滤：这 N 个月中，至少有 2 个属于该季节的静态旺季范围
+        # 防止因为某月有促销异常导致错误识别
+        static_peak = set(PEAK_MONTHS_FALLBACK.get(season, []))
+        overlap = len(top_months_ids & static_peak)
+ 
+        if overlap >= 2:
+            # 动态识别成功
+            peak_avg = sum(v for _, v in top_months) / PEAK_TOP_N
+            return peak_avg
+        # else: 动态识别结果和静态定义偏差太大，fallback
+ 
+    # ── Step3：Fallback 到静态旺季定义 ────────────────────────────────────
+    fallback_months = PEAK_MONTHS_FALLBACK.get(season, [])
+    fallback_sales = []
+    for m in fallback_months:
         y = last_year + 1 if (season == '秋冬' and m in [1, 2]) else last_year
         label = f"{str(y)[-2:]}年{m}月销量"
         val = sku_data.get(label, 0) or 0
         if val > 0:
-            total += val
-            count += 1
+            fallback_sales.append(val)
  
-    return total / count if count > 0 else 0.0
+    if fallback_sales:
+        return sum(fallback_sales) / len(fallback_sales)
+ 
+    # ── Step4：完全无数据，不做季节压制 ───────────────────────────────────
+    return 0.0
