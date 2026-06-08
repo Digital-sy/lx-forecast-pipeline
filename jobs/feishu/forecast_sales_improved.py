@@ -365,13 +365,19 @@ def _forecast_single_month(
     spu_trend_factor: Optional[float],
     forecast_step: int = 0,
     season: str = '全年',
+    prev_forecast: Optional[int] = None,   # v4：上月预测结果
 ) -> Tuple[int, str]:
     """
     预测决策树 v4：
-      L1_淡季同比  → 季节款淡季月，直接用 yoy_sales × growth_factor（体现月份差异）
+      L1_淡季同比  → 季节款淡季月，直接用 yoy_sales × growth_factor
       L1_方案C     → 旺季/过渡月，yoy_pred×α + recent_avg×(1-α) → 方案A兜底
-      L3_爆发      → 爆发检测优先（两种路径均适用）
+      L3_爆发      → 爆发检测优先
       L2/L3/L4/L5  → 无同期数据兜底
+
+    v4 floor 机制：
+      季节款 + prev_forecast 存在时，预测结果不能低于
+      max(recent_avg, prev_forecast × 0.8)
+      防止旺季启动期出现月度断崖下跌
     """
     yoy_label = _get_month_label(forecast_year - 1, forecast_month)
     yoy_sales = sku_data.get(yoy_label, 0) or 0
@@ -379,6 +385,21 @@ def _forecast_single_month(
     m1, m2, m3   = _get_recent_3months(sku_data, current_year, current_month)
     recent_total = m1 + m2 + m3
     recent_avg   = recent_total / 3 if recent_total > 0 else 0
+
+    # ── 内部函数：应用 floor 后返回 ──────────────────────────────────────
+    def _apply_floor(val: int, method: str) -> Tuple[int, str]:
+        """
+        季节款 floor 机制：预测值不能低于 max(recent_avg, prev_forecast × 0.8)。
+        仅在旺季趋势期（prev_forecast 存在 且 预测月比上月高的方向）生效，
+        防止旺季启动期出现断崖下跌。
+        """
+        if season == '全年' or prev_forecast is None or prev_forecast <= 0:
+            return val, method
+        # 只在季节旺季趋势方向上做 floor（prev 已经是近期销量水平）
+        floor = int(max(recent_avg, prev_forecast * 0.8))
+        if val < floor:
+            return floor, method + f"[↑floor={floor}件]"
+        return val, method
 
     # ── L1 路径：去年同期存在 & 趋势因子有效 ────────────────────────────
     if yoy_sales > 0 and trend_factor is not None and trend_factor > 0:
@@ -395,10 +416,10 @@ def _forecast_single_month(
                 spu_trend_factor=spu_trend_factor,
             )
             if val > 0:
-                return val, (
+                return _apply_floor(val, (
                     f"L3_爆发检测(同比{raw_trend_factor:.1f}倍"
                     f"+环比{recent_growth:.0%})→阻尼增长"
-                )
+                ))
 
         # v4：季节性判断
         if season != '全年':
@@ -409,17 +430,16 @@ def _forecast_single_month(
                 seasonal_factor = max(seasonal_factor, 0.05)  # 最低5%
 
                 if seasonal_factor < OFFSEASON_THRESHOLD:
-                    # ── 淡季路径：直接用去年同月 × 增长系数 ────────────
                     growth_factor = min(
                         trend_factor if trend_factor else 1.0,
                         OFFSEASON_GROWTH_CAP
                     )
                     final = int(yoy_sales * growth_factor)
-                    return final, (
+                    return _apply_floor(final, (
                         f"L1_淡季同比({season},旺季均{int(peak_avg)}件,"
                         f"系数{seasonal_factor:.2f}<{OFFSEASON_THRESHOLD},"
                         f"去年同月{yoy_sales}件×{growth_factor:.2f}={final}件)"
-                    )
+                    ))
                 # seasonal_factor >= 0.6：旺季/过渡月，走方案C（不压制）
 
         # ── 旺季/全年/过渡月：方案C动态α混合 ───────────────────────────
@@ -435,18 +455,18 @@ def _forecast_single_month(
             mom_cap = int(recent_avg * MOM_CAP_RATIO)
             final   = min(blended, mom_cap)
             cap_applied = "→上限截断" if final < blended else ""
-            return final, (
+            return _apply_floor(final, (
                 f"L1_同比趋势+方案C(α={alpha},"
                 f"同比{yoy_pred}件×{alpha:.0%}"
                 f"+近3月均值{int(recent_avg)}件×{1-alpha:.0%}={blended}件"
                 f"{cap_applied})"
-            )
+            ))
         else:
-            return yoy_pred, "L1_同比趋势(近期无销量)"
+            return _apply_floor(yoy_pred, "L1_同比趋势(近期无销量)")
 
     # ── L2：去年同期存在但趋势因子为0 ────────────────────────────────────
     if yoy_sales > 0 and trend_factor == 0:
-        return int(yoy_sales), "L2_去年同期"
+        return _apply_floor(int(yoy_sales), "L2_去年同期")
 
     # ── L3：新品/无同期数据 ───────────────────────────────────────────────
     val, method = _calc_new_product_forecast(
@@ -455,11 +475,11 @@ def _forecast_single_month(
         spu_trend_factor=spu_trend_factor,
     )
     if val > 0:
-        return val, method
+        return _apply_floor(val, method)
 
     # ── L4：SPU趋势兜底 ───────────────────────────────────────────────────
     if yoy_sales > 0 and spu_trend_factor is not None and spu_trend_factor > 0:
-        return int(yoy_sales * spu_trend_factor), "L4_SPU趋势兜底"
+        return _apply_floor(int(yoy_sales * spu_trend_factor), "L4_SPU趋势兜底")
 
     return 0, "L5_无数据"
 
@@ -532,6 +552,7 @@ def compute_forecast_for_shop(
 
         sku_result: Dict[str, Any] = {"趋势因子": tf if tf is not None else 0.0}
         method_labels = []
+        prev_forecast: Optional[int] = None   # v4：上月预测结果，用于季节款 floor 兜底
         for idx, (fy, fm, flabel) in enumerate(forecast_months):
             val, method = _forecast_single_month(
                 sku_data,
@@ -540,7 +561,9 @@ def compute_forecast_for_shop(
                 tf, raw_tf, spu_tf,
                 forecast_step=idx,
                 season=season,
+                prev_forecast=prev_forecast,
             )
+            prev_forecast = val
             sku_result[flabel] = val
             method_labels.append(f"{fm}月:{method}")
 
