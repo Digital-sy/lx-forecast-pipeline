@@ -175,16 +175,35 @@ def _calc_new_product_forecast(
         yoy_label = _get_month_label(yoy_year, forecast_month)
         yoy_sales = sku_data.get(yoy_label, 0) or 0
 
-        if yoy_sales > 0:
-            # ── 去年同期有数据：直接用 yoy × growth_factor ───────────────
-            growth_factor = min(
-                spu_trend_factor if spu_trend_factor else 1.0,
-                OFFSEASON_GROWTH_CAP
-            )
+        if yoy_sales >= 10:
+            # ── 去年同期有足够数据：直接用 yoy × growth_factor ──────────
+            # growth_factor 优先用 spu_trend_factor（SPU整体增长系数）
+            # spu_trend_factor 为 None 时用近3月 vs 去年近3月的简单比值估算
+            if spu_trend_factor is not None and spu_trend_factor > 0:
+                growth_factor = min(spu_trend_factor, OFFSEASON_GROWTH_CAP)
+                gf_note = f"spu趋势{growth_factor:.2f}"
+            else:
+                # 用近3月今年 vs 去年同期的比值估算整体增长
+                yoy_recent_vals = []
+                for delta in [-1, -2, -3]:
+                    ry, rm   = _offset_month(current_year, current_month, delta)
+                    this_val = sku_data.get(_get_month_label(ry, rm), 0) or 0
+                    yoy_val  = sku_data.get(_get_month_label(ry - 1, rm), 0) or 0
+                    if this_val > 0 and yoy_val > 0:
+                        yoy_recent_vals.append(this_val / yoy_val)
+                if yoy_recent_vals:
+                    growth_factor = min(
+                        sum(yoy_recent_vals) / len(yoy_recent_vals),
+                        OFFSEASON_GROWTH_CAP
+                    )
+                    gf_note = f"近期同比{growth_factor:.2f}"
+                else:
+                    growth_factor = 1.0
+                    gf_note = "无同比数据默认1.0"
             final = int(yoy_sales * growth_factor)
             return final, (
                 f"L3_季节同比({season},"
-                f"去年同月{yoy_sales}件×{growth_factor:.2f}={final}件)"
+                f"去年同月{yoy_sales}件×{growth_factor:.2f}[{gf_note}]={final}件)"
             )
 
         else:
