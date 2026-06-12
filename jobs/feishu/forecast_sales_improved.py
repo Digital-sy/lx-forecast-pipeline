@@ -213,8 +213,16 @@ def _calc_new_product_forecast(
                     f"adj×{adj_factor:.2f}={val}件)"
                 )
 
-    # ── 全年款 / 无法计算季节 → 原有逻辑 ────────────────────────────────
-    if g_weighted > NEW_PRODUCT_GROWTH_THRESHOLD:
+    # ── 全年款 / 无法计算季节 → 原有逻辑（加近期下跌检测）────────────────
+
+    # 近期下跌检测：如果 m1 < m2（近2个月连续下跌），用 m1 替代近3月均值
+    # 防止历史爆发期数据（m2/m3高峰）污染均值，导致预测虚高
+    is_declining = (m1 > 0 and m2 > 0 and m1 < m2)
+    base_val     = m1 if is_declining else int(recent_avg)
+    decline_note = f"[近期下跌,用m1={m1}件替代均值{int(recent_avg)}件]" if is_declining else ""
+
+    if g_weighted > NEW_PRODUCT_GROWTH_THRESHOLD and not is_declining:
+        # 有增长趋势且未下跌：阻尼增长
         g = min(g_weighted, MAX_NEW_PRODUCT_GROWTH)
         value = float(m1)
         for i in range(forecast_step + 1):
@@ -225,7 +233,14 @@ def _calc_new_product_forecast(
         )
         return int(value), f"L3_阻尼增长{cap_note}·step{forecast_step}"
     else:
-        return int(recent_avg), "L3_近3月均值(无明显趋势)"
+        # 无明显趋势或近期下跌：用 base_val（下跌时=m1，否则=近3月均值）
+        # 下跌时额外施加 0.9^step 的衰减，反映持续回落趋势
+        if is_declining:
+            decay     = 0.9 ** forecast_step
+            final_val = max(1, int(base_val * decay))
+            return final_val, f"L3_近期下跌衰减(×{decay:.2f})·step{forecast_step}{decline_note}"
+        else:
+            return int(recent_avg), "L3_近3月均值(无明显趋势)"
 
 
 # ────────────────────────────────────────────────────────────────────────────
