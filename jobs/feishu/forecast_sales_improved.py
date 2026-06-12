@@ -189,15 +189,28 @@ def _calc_new_product_forecast(
 
         else:
             # ── 去年同期无数据（真正新品）：先检查近期是否下跌 ──────────
-            is_declining = (m1 > 0 and m2 > 0 and m1 < m2)
+            # 下跌检测：当前月销量 < 上月(m1)，说明正在回落
+            import calendar as _cal
+            from datetime import datetime as _dt
+            _today = _dt.now()
+            cur_label  = _get_month_label(current_year, current_month)
+            cur_sales  = sku_data.get(cur_label, 0) or 0
+            # 当月截断补全
+            if (_today.year == current_year and _today.month == current_month
+                    and _today.day > 1):
+                _days_passed   = _today.day - 1
+                _days_in_month = _cal.monthrange(current_year, current_month)[1]
+                cur_sales = int(cur_sales * _days_in_month / _days_passed)
+
+            is_declining = (cur_sales > 0 and m1 > 0 and cur_sales < m1)
 
             if is_declining:
                 # 近期下跌：无论季节如何，走衰减路径
                 decay     = 0.9 ** forecast_step
-                final_val = max(1, int(m1 * decay))
+                final_val = max(1, int(cur_sales * decay))
                 return final_val, (
                     f"L3_新品近期下跌衰减({season},"
-                    f"m1={m1}件×{decay:.2f}={final_val}件)·step{forecast_step}"
+                    f"当月{cur_sales}件×{decay:.2f}={final_val}件)·step{forecast_step}"
                 )
 
             peak_avg = _get_peak_season_avg(sku_data, season, last_year)
@@ -222,11 +235,20 @@ def _calc_new_product_forecast(
 
     # ── 全年款 / 无法计算季节 → 原有逻辑（加近期下跌检测）────────────────
 
-    # 近期下跌检测：如果 m1 < m2（近2个月连续下跌），用 m1 替代近3月均值
-    # 防止历史爆发期数据（m2/m3高峰）污染均值，导致预测虚高
-    is_declining = (m1 > 0 and m2 > 0 and m1 < m2)
-    base_val     = m1 if is_declining else int(recent_avg)
-    decline_note = f"[近期下跌,用m1={m1}件替代均值{int(recent_avg)}件]" if is_declining else ""
+    # 近期下跌检测：当前月销量 < 上月(m1)，说明正在回落
+    import calendar as _cal2
+    from datetime import datetime as _dt2
+    _today2    = _dt2.now()
+    cur_label2 = _get_month_label(current_year, current_month)
+    cur_sales2 = sku_data.get(cur_label2, 0) or 0
+    if (_today2.year == current_year and _today2.month == current_month
+            and _today2.day > 1):
+        _dp2  = _today2.day - 1
+        _dim2 = _cal2.monthrange(current_year, current_month)[1]
+        cur_sales2 = int(cur_sales2 * _dim2 / _dp2)
+
+    is_declining = (cur_sales2 > 0 and m1 > 0 and cur_sales2 < m1)
+    decline_note = f"[近期下跌,当月{cur_sales2}件<上月{m1}件]" if is_declining else ""
 
     if g_weighted > NEW_PRODUCT_GROWTH_THRESHOLD and not is_declining:
         # 有增长趋势且未下跌：阻尼增长
