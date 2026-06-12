@@ -188,21 +188,28 @@ def _calc_new_product_forecast(
             )
 
         else:
-            # ── 去年同期无数据（真正新品）：recent_avg × adj_factor ───────
+            # ── 去年同期无数据（真正新品）：先检查近期是否下跌 ──────────
+            is_declining = (m1 > 0 and m2 > 0 and m1 < m2)
+
+            if is_declining:
+                # 近期下跌：无论季节如何，走衰减路径
+                decay     = 0.9 ** forecast_step
+                final_val = max(1, int(m1 * decay))
+                return final_val, (
+                    f"L3_新品近期下跌衰减({season},"
+                    f"m1={m1}件×{decay:.2f}={final_val}件)·step{forecast_step}"
+                )
+
             peak_avg = _get_peak_season_avg(sku_data, season, last_year)
             if peak_avg > 0:
-                # 目标月季节系数（无去年同期，用0跳过，adj_factor设为1）
-                # 改用今年近3月 / 旺季均值 作为 recent_seasonal（比 fallback 0.1 更准）
                 recent_seasonal = recent_avg / peak_avg if recent_avg > 0 else 0.1
                 recent_seasonal = max(recent_seasonal, 0.05)
 
-                # 目标月静态季节位置（用静态旺季月份判断）
                 static_peak = set(PEAK_MONTHS_FALLBACK.get(season, []))
                 if forecast_month in static_peak:
-                    # 旺季月：adj_factor = 1/recent_seasonal（拉回旺季水平）
                     adj_factor = _clamp(1.0 / recent_seasonal, 0.5, 5.0)
                 else:
-                    adj_factor = 1.0  # 淡季新品维持近3月均值
+                    adj_factor = 1.0
 
                 val = int(recent_avg * adj_factor)
                 return val, (
