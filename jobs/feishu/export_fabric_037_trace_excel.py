@@ -3,22 +3,22 @@
 """
 导出 037超绒 面料使用情况与预估用量溯源 Excel。
 
+兼容说明：
+- 当前服务器数据库可能存在旧版 `面料预估表`，缺少 `运营预计下单量`、`系统预估下单量` 等新字段。
+- 本脚本会动态检查字段是否存在；缺失字段会用 0 或空值兜底，避免导出中断。
+- 库存溯源优先读取正式面料预估逻辑使用的 `面料库存台账`。
+
 输出内容：
 1. 面料预估结果：来自 `面料预估表`
 2. SPU用料关系：来自 `面料核价表`
 3. SKU用量溯源：运营预计下单表 + 预测对比表_SKU + 面料核价表
-4. 库存明细：定制面料参数 + 仓库库存明细
+4. 库存台账：面料库存台账
 5. 颜色归并：面料颜色归并对照
 6. 定制面料参数
 7. 检查项：关键异常提示
-
-运行示例：
-    python -m jobs.feishu.export_fabric_037_trace_excel
-    python -m jobs.feishu.export_fabric_037_trace_excel --fabric-keyword 037 --output exports/037超绒溯源.xlsx
 """
 
 import argparse
-import os
 import re
 import sys
 from datetime import datetime
@@ -80,6 +80,28 @@ def _table_exists(table_name: str) -> bool:
     return bool(rows and rows[0].get('cnt'))
 
 
+def _get_columns(table_name: str) -> set:
+    if not _table_exists(table_name):
+        return set()
+    rows = _fetch_all(
+        """
+        SELECT COLUMN_NAME
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = %s
+        """,
+        (table_name,),
+    )
+    return {r['COLUMN_NAME'] for r in rows}
+
+
+def _col_expr(existing_cols: set, col_name: str, alias: str = None, default_sql: str = '0') -> str:
+    alias = alias or col_name
+    if col_name in existing_cols:
+        return f"`{col_name}` AS `{alias}`"
+    return f"{default_sql} AS `{alias}`"
+
+
 def _normalize_date(value: Any) -> str:
     if value is None:
         return ''
@@ -89,17 +111,26 @@ def _normalize_date(value: Any) -> str:
 
 
 def _extract_spu_sql(alias: str = 'k') -> str:
-    # 与现有脚本逻辑保持接近：按 SKU 第一个 '-' 前内容识别 SPU。
     return f"SUBSTRING_INDEX({alias}.SKU, '-', 1)"
 
 
 def read_fabric_params(keywords: List[str]) -> List[Dict[str, Any]]:
     if not _table_exists('定制面料参数'):
         return []
-    where, params = _like_conditions(['面料', '面料编号'], keywords)
+    cols = _get_columns('定制面料参数')
+    where_cols = [c for c in ['面料', '面料编号'] if c in cols]
+    if not where_cols:
+        return []
+    where, params = _like_conditions(where_cols, keywords)
+    select_cols = [
+        _col_expr(cols, '面料', default_sql="''"),
+        _col_expr(cols, '面料编号', default_sql="''"),
+        _col_expr(cols, '米数每条', default_sql='0'),
+        _col_expr(cols, '公斤数每条', default_sql='0'),
+    ]
     return _fetch_all(
         f"""
-        SELECT 面料, 面料编号, 米数每条, 公斤数每条
+        SELECT {', '.join(select_cols)}
         FROM `定制面料参数`
         WHERE {where}
         ORDER BY 面料, 面料编号
@@ -111,39 +142,40 @@ def read_fabric_params(keywords: List[str]) -> List[Dict[str, Any]]:
 def read_forecast_result(keywords: List[str]) -> List[Dict[str, Any]]:
     if not _table_exists('面料预估表'):
         return []
-    where, params = _like_conditions(['面料', '面料编号', '面料颜色编号'], keywords)
+    cols = _get_columns('面料预估表')
+    where_cols = [c for c in ['面料', '面料编号', '面料颜色编号'] if c in cols]
+    if not where_cols:
+        return []
+    where, params = _like_conditions(where_cols, keywords)
+
+    select_cols = [
+        _col_expr(cols, '统计类型', default_sql="''"),
+        _col_expr(cols, '月份', default_sql="''"),
+        _col_expr(cols, '面料', default_sql="''"),
+        _col_expr(cols, '面料编号', default_sql="''"),
+        _col_expr(cols, '颜色缩写', default_sql="''"),
+        _col_expr(cols, '颜色', default_sql="''"),
+        _col_expr(cols, '面料颜色编号', default_sql="''"),
+        _col_expr(cols, '统计日期', default_sql='NULL'),
+        _col_expr(cols, '运营预计下单量', default_sql='0'),
+        _col_expr(cols, '系统预估下单量', default_sql='0'),
+        _col_expr(cols, '预计用量/米', default_sql='0'),
+        _col_expr(cols, '系统预估用量/米', default_sql='0'),
+        _col_expr(cols, '米数每条', default_sql='0'),
+        _col_expr(cols, '预计用量/条', default_sql='0'),
+        _col_expr(cols, '系统预估用量/条', default_sql='0'),
+        _col_expr(cols, '库存量/条', default_sql='0'),
+        _col_expr(cols, '库存量/米', default_sql='0'),
+        _col_expr(cols, '待到货量/条', default_sql='0'),
+        _col_expr(cols, '待到货量/米', default_sql='0'),
+        _col_expr(cols, '预计总量/条', default_sql='0'),
+        _col_expr(cols, '预计总量/米', default_sql='0'),
+        _col_expr(cols, '用量信息缺失SPU', default_sql="''"),
+        _col_expr(cols, '更新时间', default_sql='NULL'),
+    ]
     rows = _fetch_all(
         f"""
-        SELECT
-            统计类型,
-            月份,
-            面料,
-            面料编号,
-            颜色缩写,
-            颜色,
-            面料颜色编号,
-            统计日期,
-            运营预计下单量,
-            系统预估下单量,
-            `预计用量/米`,
-            `系统预估用量/米`,
-            米数每条,
-            `预计用量/条`,
-            `系统预估用量/条`,
-            `库存量/条`,
-            `库存量/米`,
-            `待到货量/条`,
-            `待到货量/米`,
-            `预计总量/条`,
-            `预计总量/米`,
-            GREATEST(
-                0,
-                IFNULL(`系统预估用量/条`, 0)
-                - IFNULL(`库存量/条`, 0)
-                - IFNULL(`待到货量/条`, 0)
-            ) AS 系统预计采购条数,
-            用量信息缺失SPU,
-            更新时间
+        SELECT {', '.join(select_cols)}
         FROM `面料预估表`
         WHERE {where}
         ORDER BY 统计类型, 统计日期, 面料, 颜色缩写
@@ -153,23 +185,34 @@ def read_forecast_result(keywords: List[str]) -> List[Dict[str, Any]]:
     for r in rows:
         r['统计日期'] = _normalize_date(r.get('统计日期'))
         r['更新时间'] = _normalize_date(r.get('更新时间'))
+        r['系统预计采购条数'] = max(
+            0,
+            float(r.get('系统预估用量/条') or 0)
+            - float(r.get('库存量/条') or 0)
+            - float(r.get('待到货量/条') or 0),
+        )
     return rows
 
 
 def read_spu_fabric_usage(keywords: List[str]) -> List[Dict[str, Any]]:
     if not _table_exists('面料核价表'):
         return []
+    cols = _get_columns('面料核价表')
+    if '面料' not in cols or 'SPU' not in cols:
+        return []
     where, params = _like_conditions(['面料'], keywords)
+    unit_col = '`单件用量`' if '单件用量' in cols else '0'
+    loss_col = '`单件损耗`' if '单件损耗' in cols else '0'
     return _fetch_all(
         f"""
         SELECT
             h.SPU,
             h.面料,
-            h.单件用量,
-            h.单件损耗,
+            {unit_col} AS 单件用量,
+            {loss_col} AS 单件损耗,
             CASE
-                WHEN IFNULL(h.单件用量, 0) = (
-                    SELECT MAX(IFNULL(h2.单件用量, 0))
+                WHEN IFNULL({unit_col}, 0) = (
+                    SELECT MAX(IFNULL({unit_col.replace('`', 'h2.`') if unit_col.startswith('`') else unit_col}, 0))
                     FROM `面料核价表` h2
                     WHERE h2.SPU = h.SPU
                 ) THEN '主面料'
@@ -177,7 +220,7 @@ def read_spu_fabric_usage(keywords: List[str]) -> List[Dict[str, Any]]:
             END AS 主面料判定
         FROM `面料核价表` h
         WHERE {where}
-        ORDER BY h.SPU, h.单件用量 DESC
+        ORDER BY h.SPU, 单件用量 DESC
         """,
         tuple(params),
     )
@@ -185,6 +228,9 @@ def read_spu_fabric_usage(keywords: List[str]) -> List[Dict[str, Any]]:
 
 def read_sku_trace(keywords: List[str]) -> List[Dict[str, Any]]:
     if not _table_exists('面料核价表'):
+        return []
+    fabric_cols = _get_columns('面料核价表')
+    if 'SPU' not in fabric_cols or '面料' not in fabric_cols:
         return []
 
     has_op = _table_exists('运营预计下单表')
@@ -224,6 +270,9 @@ def read_sku_trace(keywords: List[str]) -> List[Dict[str, Any]]:
     """ if has_sys else "sysf AS (SELECT NULL AS SKU, NULL AS 统计日期, 0 AS 系统预估下单量)"
 
     where, params = _like_conditions(['面料'], keywords)
+    unit_col = 'h.`单件用量`' if '单件用量' in fabric_cols else '0'
+    loss_col = 'h.`单件损耗`' if '单件损耗' in fabric_cols else '0'
+
     sql = f"""
         WITH keys_union AS (
             {keys_union}
@@ -235,11 +284,11 @@ def read_sku_trace(keywords: List[str]) -> List[Dict[str, Any]]:
             {_extract_spu_sql('k')} AS SPU,
             k.统计日期,
             h.面料,
-            h.单件用量,
-            h.单件损耗,
+            {unit_col} AS 单件用量,
+            {loss_col} AS 单件损耗,
             CASE
-                WHEN IFNULL(h.单件用量, 0) = (
-                    SELECT MAX(IFNULL(h2.单件用量, 0))
+                WHEN IFNULL({unit_col}, 0) = (
+                    SELECT MAX(IFNULL(h2.`单件用量`, 0))
                     FROM `面料核价表` h2
                     WHERE h2.SPU = h.SPU
                 ) THEN '主面料'
@@ -249,14 +298,14 @@ def read_sku_trace(keywords: List[str]) -> List[Dict[str, Any]]:
             IFNULL(sysf.系统预估下单量, 0) AS 系统预估下单量,
             ROUND(
                 IFNULL(op.运营预计下单量, 0)
-                * IFNULL(h.单件用量, 0)
-                * CASE WHEN IFNULL(h.单件损耗, 0) = 0 THEN 1 ELSE h.单件损耗 END,
+                * IFNULL({unit_col}, 0)
+                * CASE WHEN IFNULL({loss_col}, 0) = 0 THEN 1 ELSE {loss_col} END,
                 2
             ) AS 运营预计用量_米,
             ROUND(
                 IFNULL(sysf.系统预估下单量, 0)
-                * IFNULL(h.单件用量, 0)
-                * CASE WHEN IFNULL(h.单件损耗, 0) = 0 THEN 1 ELSE h.单件损耗 END,
+                * IFNULL({unit_col}, 0)
+                * CASE WHEN IFNULL({loss_col}, 0) = 0 THEN 1 ELSE {loss_col} END,
                 2
             ) AS 系统预估用量_米
         FROM keys_union k
@@ -276,35 +325,52 @@ def read_sku_trace(keywords: List[str]) -> List[Dict[str, Any]]:
 
 
 def read_inventory(keywords: List[str]) -> List[Dict[str, Any]]:
-    if not _table_exists('定制面料参数') or not _table_exists('仓库库存明细'):
+    """优先读取正式面料预估逻辑使用的 `面料库存台账`。"""
+    if not _table_exists('面料库存台账'):
         return []
-    where, params = _like_conditions(['面料', '面料编号'], keywords)
-    return _fetch_all(
+    cols = _get_columns('面料库存台账')
+    if '面料编号颜色缩写' not in cols:
+        return []
+    where, params = _like_conditions(['面料编号颜色缩写'], keywords)
+    select_cols = [
+        _col_expr(cols, '面料编号颜色缩写', default_sql="''"),
+        _col_expr(cols, '库存成品数量_条', default_sql='0'),
+        _col_expr(cols, '备货中数量_条', default_sql='0'),
+        _col_expr(cols, '现有胚布数量_条', default_sql='0'),
+        _col_expr(cols, '面料', default_sql="''"),
+        _col_expr(cols, '颜色', default_sql="''"),
+        _col_expr(cols, '更新时间', default_sql='NULL'),
+    ]
+    rows = _fetch_all(
         f"""
-        SELECT
-            p.面料,
-            p.面料编号,
-            w.SKU AS 仓库SKU,
-            SUM(IFNULL(w.可用量, 0)) AS 可用量,
-            SUM(IFNULL(w.待到货量, 0)) AS 待到货量
-        FROM `定制面料参数` p
-        JOIN `仓库库存明细` w
-            ON w.SKU LIKE CONCAT(p.面料编号, '-%')
+        SELECT {', '.join(select_cols)}
+        FROM `面料库存台账`
         WHERE {where}
-        GROUP BY p.面料, p.面料编号, w.SKU
-        ORDER BY w.SKU
+        ORDER BY 面料编号颜色缩写
         """,
         tuple(params),
     )
+    for r in rows:
+        r['更新时间'] = _normalize_date(r.get('更新时间'))
+    return rows
 
 
 def read_color_merge(keywords: List[str]) -> List[Dict[str, Any]]:
     if not _table_exists('面料颜色归并对照'):
         return []
+    cols = _get_columns('面料颜色归并对照')
+    if '面料编号' not in cols:
+        return []
     where, params = _like_conditions(['面料编号'], keywords)
+    select_cols = [
+        _col_expr(cols, '面料编号', default_sql="''"),
+        _col_expr(cols, '原始颜色缩写', default_sql="''"),
+        _col_expr(cols, '归并颜色缩写', default_sql="''"),
+        _col_expr(cols, '是否启用', default_sql='0'),
+    ]
     return _fetch_all(
         f"""
-        SELECT 面料编号, 原始颜色缩写, 归并颜色缩写, 是否启用
+        SELECT {', '.join(select_cols)}
         FROM `面料颜色归并对照`
         WHERE {where}
         ORDER BY 面料编号, 原始颜色缩写
@@ -330,7 +396,7 @@ def build_check_items(
     add('面料核价表/SPU用料关系', '正常' if spu_rows else '异常', f'命中 {len(spu_rows)} 个 SPU-面料关系')
     add('SKU用量溯源', '正常' if sku_rows else '异常', f'命中 {len(sku_rows)} 条 SKU+月份 来源明细')
     add('面料预估表最终结果', '正常' if result_rows else '异常', f'命中 {len(result_rows)} 条最终预估结果')
-    add('库存匹配', '正常' if inventory_rows else '提醒', f'命中 {len(inventory_rows)} 条库存明细；若为0，检查面料编号是否能匹配仓库库存SKU前缀')
+    add('面料库存台账', '正常' if inventory_rows else '提醒', f'命中 {len(inventory_rows)} 条库存台账；若为0，检查面料编号颜色缩写是否包含037')
     add('颜色归并', '正常' if color_rows else '提醒', f'命中 {len(color_rows)} 条颜色归并；没有不一定异常')
 
     zero_usage_spu = [r for r in spu_rows if float(r.get('单件用量') or 0) <= 0]
@@ -384,7 +450,6 @@ def write_sheet(wb: Workbook, title: str, rows: List[Dict[str, Any]], freeze: st
     ws.freeze_panes = freeze
     ws.auto_filter.ref = ws.dimensions
 
-    # 表格样式
     end_row = ws.max_row
     end_col = ws.max_column
     if end_row >= 2 and end_col >= 1:
@@ -405,13 +470,12 @@ def write_sheet(wb: Workbook, title: str, rows: List[Dict[str, Any]], freeze: st
         except Exception:
             pass
 
-    # 自适应列宽，避免过宽
     for idx, col_cells in enumerate(ws.columns, start=1):
         max_len = 8
         for cell in col_cells:
             val = '' if cell.value is None else str(cell.value)
             max_len = max(max_len, len(val))
-        ws.column_dimensions[get_column_letter(idx)].width = min(max(max_len + 2, 10), 38)
+        ws.column_dimensions[get_column_letter(idx)].width = min(max(max_len + 2, 10), 42)
 
     return ws
 
@@ -422,7 +486,7 @@ def write_summary(wb: Workbook, summary: Dict[str, Any], checks: List[Dict[str, 
     ws.append(['037超绒面料使用情况与预估用量溯源'])
     ws.append(['生成时间', summary['生成时间']])
     ws.append(['关键词', ', '.join(summary['关键词'])])
-    ws.append(['输出说明', '本文件用于核查037超绒的最终预估、SPU用料、SKU来源、库存和颜色归并。'])
+    ws.append(['输出说明', '用于核查037超绒的最终预估、SPU用料、SKU来源、库存台账和颜色归并。'])
     ws.append([])
     ws.append(['数据量汇总'])
     for key, value in summary['数据量汇总'].items():
@@ -442,7 +506,6 @@ def write_summary(wb: Workbook, summary: Dict[str, Any], checks: List[Dict[str, 
             ws.cell(row=row, column=col).alignment = Alignment(vertical='center')
     for cell in ws[6]:
         cell.font = Font(bold=True)
-    # 找检查项表头
     for row in range(1, ws.max_row + 1):
         if ws.cell(row=row, column=1).value == '检查项':
             for cell in ws[row]:
@@ -451,7 +514,7 @@ def write_summary(wb: Workbook, summary: Dict[str, Any], checks: List[Dict[str, 
             break
     ws.column_dimensions['A'].width = 24
     ws.column_dimensions['B'].width = 12
-    ws.column_dimensions['C'].width = 80
+    ws.column_dimensions['C'].width = 90
     ws.freeze_panes = 'A2'
 
 
@@ -472,7 +535,7 @@ def export_excel(output_path: str, keywords: List[str]):
             '面料预估结果': len(result_rows),
             'SPU用料关系': len(spu_rows),
             'SKU用量溯源': len(sku_rows),
-            '库存明细': len(inventory_rows),
+            '库存台账': len(inventory_rows),
             '颜色归并': len(color_rows),
             '定制面料参数': len(params_rows),
         }
@@ -483,7 +546,7 @@ def export_excel(output_path: str, keywords: List[str]):
     write_sheet(wb, '01_面料预估结果', result_rows)
     write_sheet(wb, '02_SPU用料关系', spu_rows)
     write_sheet(wb, '03_SKU用量溯源', sku_rows)
-    write_sheet(wb, '04_库存明细', inventory_rows)
+    write_sheet(wb, '04_库存台账', inventory_rows)
     write_sheet(wb, '05_颜色归并', color_rows)
     write_sheet(wb, '06_定制面料参数', params_rows)
 
