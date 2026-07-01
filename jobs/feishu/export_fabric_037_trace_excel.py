@@ -201,18 +201,19 @@ def read_spu_fabric_usage(keywords: List[str]) -> List[Dict[str, Any]]:
     if '面料' not in cols or 'SPU' not in cols:
         return []
     where, params = _like_conditions(['面料'], keywords)
-    unit_col = '`单件用量`' if '单件用量' in cols else '0'
-    loss_col = '`单件损耗`' if '单件损耗' in cols else '0'
+    unit_h = 'h.`单件用量`' if '单件用量' in cols else '0'
+    unit_h2 = 'h2.`单件用量`' if '单件用量' in cols else '0'
+    loss_h = 'h.`单件损耗`' if '单件损耗' in cols else '0'
     return _fetch_all(
         f"""
         SELECT
             h.SPU,
             h.面料,
-            {unit_col} AS 单件用量,
-            {loss_col} AS 单件损耗,
+            {unit_h} AS 单件用量,
+            {loss_h} AS 单件损耗,
             CASE
-                WHEN IFNULL({unit_col}, 0) = (
-                    SELECT MAX(IFNULL({unit_col.replace('`', 'h2.`') if unit_col.startswith('`') else unit_col}, 0))
+                WHEN IFNULL({unit_h}, 0) = (
+                    SELECT MAX(IFNULL({unit_h2}, 0))
                     FROM `面料核价表` h2
                     WHERE h2.SPU = h.SPU
                 ) THEN '主面料'
@@ -240,17 +241,28 @@ def read_sku_trace(keywords: List[str]) -> List[Dict[str, Any]]:
 
     keys_parts = []
     if has_op:
-        keys_parts.append("""
-            SELECT SKU, 统计日期
-            FROM `运营预计下单表`
-            WHERE SKU IS NOT NULL AND SKU != '' AND 统计日期 IS NOT NULL AND 预计下单量 > 0
-        """)
+        op_cols = _get_columns('运营预计下单表')
+        if {'SKU', '统计日期', '预计下单量'} <= op_cols:
+            keys_parts.append("""
+                SELECT SKU, 统计日期
+                FROM `运营预计下单表`
+                WHERE SKU IS NOT NULL AND SKU != '' AND 统计日期 IS NOT NULL AND 预计下单量 > 0
+            """)
+        else:
+            has_op = False
     if has_sys:
-        keys_parts.append("""
-            SELECT SKU, 统计日期
-            FROM `预测对比表_SKU`
-            WHERE SKU IS NOT NULL AND SKU != '' AND 统计日期 IS NOT NULL AND 系统预测销量 > 0
-        """)
+        sys_cols = _get_columns('预测对比表_SKU')
+        if {'SKU', '统计日期', '系统预测销量'} <= sys_cols:
+            keys_parts.append("""
+                SELECT SKU, 统计日期
+                FROM `预测对比表_SKU`
+                WHERE SKU IS NOT NULL AND SKU != '' AND 统计日期 IS NOT NULL AND 系统预测销量 > 0
+            """)
+        else:
+            has_sys = False
+    if not keys_parts:
+        return []
+
     keys_union = " UNION ".join(keys_parts)
 
     op_cte = """
@@ -270,8 +282,9 @@ def read_sku_trace(keywords: List[str]) -> List[Dict[str, Any]]:
     """ if has_sys else "sysf AS (SELECT NULL AS SKU, NULL AS 统计日期, 0 AS 系统预估下单量)"
 
     where, params = _like_conditions(['面料'], keywords)
-    unit_col = 'h.`单件用量`' if '单件用量' in fabric_cols else '0'
-    loss_col = 'h.`单件损耗`' if '单件损耗' in fabric_cols else '0'
+    unit_h = 'h.`单件用量`' if '单件用量' in fabric_cols else '0'
+    unit_h2 = 'h2.`单件用量`' if '单件用量' in fabric_cols else '0'
+    loss_h = 'h.`单件损耗`' if '单件损耗' in fabric_cols else '0'
 
     sql = f"""
         WITH keys_union AS (
@@ -284,11 +297,11 @@ def read_sku_trace(keywords: List[str]) -> List[Dict[str, Any]]:
             {_extract_spu_sql('k')} AS SPU,
             k.统计日期,
             h.面料,
-            {unit_col} AS 单件用量,
-            {loss_col} AS 单件损耗,
+            {unit_h} AS 单件用量,
+            {loss_h} AS 单件损耗,
             CASE
-                WHEN IFNULL({unit_col}, 0) = (
-                    SELECT MAX(IFNULL(h2.`单件用量`, 0))
+                WHEN IFNULL({unit_h}, 0) = (
+                    SELECT MAX(IFNULL({unit_h2}, 0))
                     FROM `面料核价表` h2
                     WHERE h2.SPU = h.SPU
                 ) THEN '主面料'
@@ -298,14 +311,14 @@ def read_sku_trace(keywords: List[str]) -> List[Dict[str, Any]]:
             IFNULL(sysf.系统预估下单量, 0) AS 系统预估下单量,
             ROUND(
                 IFNULL(op.运营预计下单量, 0)
-                * IFNULL({unit_col}, 0)
-                * CASE WHEN IFNULL({loss_col}, 0) = 0 THEN 1 ELSE {loss_col} END,
+                * IFNULL({unit_h}, 0)
+                * CASE WHEN IFNULL({loss_h}, 0) = 0 THEN 1 ELSE {loss_h} END,
                 2
             ) AS 运营预计用量_米,
             ROUND(
                 IFNULL(sysf.系统预估下单量, 0)
-                * IFNULL({unit_col}, 0)
-                * CASE WHEN IFNULL({loss_col}, 0) = 0 THEN 1 ELSE {loss_col} END,
+                * IFNULL({unit_h}, 0)
+                * CASE WHEN IFNULL({loss_h}, 0) = 0 THEN 1 ELSE {loss_h} END,
                 2
             ) AS 系统预估用量_米
         FROM keys_union k
@@ -325,7 +338,6 @@ def read_sku_trace(keywords: List[str]) -> List[Dict[str, Any]]:
 
 
 def read_inventory(keywords: List[str]) -> List[Dict[str, Any]]:
-    """优先读取正式面料预估逻辑使用的 `面料库存台账`。"""
     if not _table_exists('面料库存台账'):
         return []
     cols = _get_columns('面料库存台账')
