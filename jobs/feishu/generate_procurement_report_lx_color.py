@@ -7,7 +7,7 @@
 - 复用原 jobs.feishu.generate_procurement_report 的主流程和计算逻辑；
 - 仅覆盖 write_fabric_detail_to_feishu；
 - 从 lxpm_product_category_snapshot 按 sku=面料颜色编号 读取 product_name；
-- 解析 product_name 中形如 2#黑玛瑙 的颜色名，写入飞书字段「颜色-领星」。
+- 解析 product_name 中形如 2#黑玛瑙 的领星颜色格式，写入飞书字段「颜色-领星」。
 """
 
 from __future__ import annotations
@@ -25,17 +25,16 @@ logger = get_logger('procurement_report_lx_color')
 
 
 def parse_lingxing_color(product_name: str) -> str:
-    """从领星产品品名解析颜色，例如 2#黑玛瑙 -> 黑玛瑙。"""
+    """从领星产品品名解析颜色，例如保留 2#黑玛瑙。"""
     text = (product_name or '').strip()
     if not text:
         return ''
 
-    # 常见格式：2#黑玛瑙、15#浅卡其；取第一个 数字# 后面的连续中文/字母/数字/空格/符号颜色名。
-    match = re.search(r'\d+\s*#\s*([^#，,;/|]+)', text)
+    # 常见格式：2#黑玛瑙、15#浅卡其；保留 数字#颜色。
+    match = re.search(r'(\d+\s*#\s*[^#，,;/|]+)', text)
     if match:
-        return match.group(1).strip()
+        return re.sub(r'\s+', '', match.group(1).strip())
 
-    # 兜底：如果不是标准格式，避免写脏值，返回空。
     return ''
 
 
@@ -165,7 +164,6 @@ async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
 
 
 def main() -> None:
-    # 运行原主流程，但替换写面料预估明细函数。
     base.write_fabric_detail_to_feishu = write_fabric_detail_to_feishu
     base.main()
 
