@@ -4,13 +4,14 @@
 导出所有 SPU 未来4个月预估下单量 Excel。
 
 包含：
-1. SPU汇总：按 SPU 汇总所有店铺，展示未来4个月系统预估、运营预估、过往销量。
-2. SPU店铺明细：按 SPU+店铺 展示未来4个月系统预估、运营预估、过往销量。
-3. 算法说明：说明系统预估、运营预估、过往销量字段的来源和口径。
+1. SPU汇总：按 SPU 汇总所有店铺，展示库存、生产中、未来4个月系统预估、运营预估、过往销量。
+2. SPU店铺明细：按 SPU+店铺 展示库存、生产中、未来4个月系统预估、运营预估、过往销量。
+3. 算法说明：说明系统预估、运营预估、库存、生产中、过往销量字段的来源和口径。
 
 数据来源：
 - 预测对比表：SPU+店铺+月份，包含系统预测销量、运营预计下单量。
 - 销量统计_msku月度：历史销量，按 SKU 解析 SPU 后汇总。
+- 库存预估表：库存状态包含 FBA可售、FBA在途、本地可用量、本地待到货。
 
 运行：
   cd /opt/apps/pythondata
@@ -25,7 +26,7 @@ import sys
 from collections import defaultdict
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -237,6 +238,96 @@ def read_forecast_data(months: List[Tuple[date, str]]) -> Tuple[List[Dict[str, A
     return summary_rows, detail_rows
 
 
+def read_inventory_metrics() -> Tuple[Dict[str, Dict[str, int]], Dict[Tuple[str, str], Dict[str, int]]]:
+    """读取库存和生产中数量。
+
+    口径：
+    - 库存 = FBA可售 + 本地可用量
+    - 生产中 = FBA在途 + 本地待到货，即采购中未回货/待入库口径
+    """
+    by_spu: Dict[str, Dict[str, int]] = defaultdict(lambda: {'库存': 0, '生产中': 0})
+    by_spu_shop: Dict[Tuple[str, str], Dict[str, int]] = defaultdict(lambda: {'库存': 0, '生产中': 0})
+
+    if _table_exists('库存预估表'):
+        rows = _fetch_all("""
+            SELECT SKU, SPU, 店铺, 库存状态, SUM(数量) AS 数量
+            FROM `库存预估表`
+            WHERE SKU IS NOT NULL AND SKU != ''
+              AND 店铺 IS NOT NULL AND 店铺 != ''
+            GROUP BY SKU, SPU, 店铺, 库存状态
+        """)
+        for r in rows:
+            shop = (r.get('店铺') or '').strip()
+            if not shop or shop in EXCLUDED_SHOPS:
+                continue
+            sku = (r.get('SKU') or '').strip()
+            spu = (r.get('SPU') or '').strip() or _extract_spu_from_sku(sku)
+            status = (r.get('库存状态') or '').strip()
+            qty = int(r.get('数量') or 0)
+            if not spu:
+                continue
+            if status in ('FBA可售', '本地可用量'):
+                by_spu[spu]['库存'] += qty
+                by_spu_shop[(spu, shop)]['库存'] += qty
+            elif status in ('FBA在途', '本地待到货'):
+                by_spu[spu]['生产中'] += qty
+                by_spu_shop[(spu, shop)]['生产中'] += qty
+        logger.info(f"库存预估表读取完成：SPU {len(by_spu)} 个，SPU+店铺 {len(by_spu_shop)} 个")
+        return {k: dict(v) for k, v in by_spu.items()}, {k: dict(v) for k, v in by_spu_shop.items()}
+
+    logger.warning('库存预估表不存在，尝试从 FBA库存明细/仓库库存明细 兜底读取')
+    if _table_exists('FBA库存明细'):
+        cols = _get_columns('FBA库存明细')
+        in_transit_col = '实际在途' if '实际在途' in cols else '在途' if '在途' in cols else None
+        if 'SKU' in cols and '店铺' in cols and 'FBA可售' in cols:
+            transit_expr = f'SUM(`{in_transit_col}`)' if in_transit_col else '0'
+            rows = _fetch_all(f"""
+                SELECT SKU, 店铺, SUM(`FBA可售`) AS 库存, {transit_expr} AS 生产中
+                FROM `FBA库存明细`
+                GROUP BY SKU, 店铺
+            """)
+            for r in rows:
+                sku = (r.get('SKU') or '').strip()
+                shop = (r.get('店铺') or '').strip()
+                if not sku or not shop or shop in EXCLUDED_SHOPS:
+                    continue
+                spu = _extract_spu_from_sku(sku)
+                by_spu[spu]['库存'] += int(r.get('库存') or 0)
+                by_spu[spu]['生产中'] += int(r.get('生产中') or 0)
+                by_spu_shop[(spu, shop)]['库存'] += int(r.get('库存') or 0)
+                by_spu_shop[(spu, shop)]['生产中'] += int(r.get('生产中') or 0)
+
+    if _table_exists('仓库库存明细'):
+        cols = _get_columns('仓库库存明细')
+        if {'SKU', '店铺', '可用量', '待到货量'} <= cols:
+            rows = _fetch_all("""
+                SELECT SKU, 店铺, SUM(`可用量`) AS 库存, SUM(`待到货量`) AS 生产中
+                FROM `仓库库存明细`
+                GROUP BY SKU, 店铺
+            """)
+            for r in rows:
+                sku = (r.get('SKU') or '').strip()
+                shop = (r.get('店铺') or '').strip()
+                if not sku or not shop or shop in EXCLUDED_SHOPS:
+                    continue
+                spu = _extract_spu_from_sku(sku)
+                by_spu[spu]['库存'] += int(r.get('库存') or 0)
+                by_spu[spu]['生产中'] += int(r.get('生产中') or 0)
+                by_spu_shop[(spu, shop)]['库存'] += int(r.get('库存') or 0)
+                by_spu_shop[(spu, shop)]['生产中'] += int(r.get('生产中') or 0)
+
+    logger.info(f"库存兜底读取完成：SPU {len(by_spu)} 个，SPU+店铺 {len(by_spu_shop)} 个")
+    return {k: dict(v) for k, v in by_spu.items()}, {k: dict(v) for k, v in by_spu_shop.items()}
+
+
+def attach_inventory(rows: List[Dict[str, Any]], inv_map: Dict[Any, Dict[str, int]], detail: bool = False) -> None:
+    for row in rows:
+        key = (row.get('SPU'), row.get('店铺')) if detail else row.get('SPU')
+        inv = inv_map.get(key, {})
+        row['库存'] = int(inv.get('库存', 0) or 0)
+        row['生产中'] = int(inv.get('生产中', 0) or 0)
+
+
 def read_sales_history(months: List[Tuple[date, str]]) -> Tuple[Dict[str, Dict[str, int]], Dict[Tuple[str, str], Dict[str, int]], List[str]]:
     """读取过往销量，返回 SPU 汇总、SPU+店铺明细、历史月份标签。"""
     table = '销量统计_msku月度'
@@ -307,7 +398,7 @@ def attach_history(rows: List[Dict[str, Any]], hist_map: Dict[Any, Dict[str, int
 
 
 def ordered_columns(months: List[Tuple[date, str]], hist_labels: List[str], detail: bool = False) -> List[str]:
-    fixed = ['SPU'] + (['店铺'] if detail else ['店铺数'])
+    fixed = ['SPU'] + (['店铺'] if detail else ['店铺数']) + ['库存', '生产中']
     hist_summary = ['近3月销量合计', '近6月销量合计', '近12月销量合计', '近3月月均销量', '近6月月均销量', '近12月月均销量']
     forecast_total = ['未来4个月系统预估合计', '未来4个月运营预估合计', '运营-系统差异', '运营/系统差异率']
     forecast_month_cols = []
@@ -368,6 +459,8 @@ def write_algorithm_sheet(wb: Workbook, months: List[Tuple[date, str]], hist_lab
         ('报表口径', '所有 SPU 未来4个月预估下单量，包含 SPU 汇总和 SPU+店铺明细。'),
         ('未来4个月', '、'.join(lbl for _, lbl in months)),
         ('过往销量月份', '、'.join(hist_labels)),
+        ('库存来源', '优先读取库存预估表；库存 = FBA可售 + 本地可用量。若库存预估表不存在，则尝试从 FBA库存明细、仓库库存明细兜底读取。'),
+        ('生产中来源', '优先读取库存预估表；生产中 = FBA在途 + 本地待到货。本地待到货按采购中未回货/待入库口径处理。'),
         ('系统预估销量来源', '预测对比表.系统预测销量。该表由 generate_forecast_comparison.py 生成。'),
         ('系统预估销量算法', '从 销量统计_msku月度 读取历史销量，按 SKU 调用 forecast_sales_improved.compute_forecast_for_shop 计算未来月份预测，再聚合到 SPU+店铺+月份。算法输入包含近3个月销量、去年同期及前后缓冲月份，并加载 SPU 季节映射。'),
         ('运营预估下单量来源', '运营预计下单表，经 generate_forecast_comparison.py 按 SKU 解析 SPU 后聚合到 SPU+店铺+月份，写入 预测对比表.运营预计下单量。'),
@@ -375,7 +468,7 @@ def write_algorithm_sheet(wb: Workbook, months: List[Tuple[date, str]], hist_lab
         ('近3/6/12月销量', '以当前预测起始月的前一个月为最近完整月，向前滚动 3/6/12 个月汇总。'),
         ('运营-系统差异', '未来4个月运营预估合计 - 未来4个月系统预估合计。'),
         ('运营/系统差异率', '(未来4个月运营预估合计 - 未来4个月系统预估合计) / 未来4个月系统预估合计；系统为0时为空。'),
-        ('注意', '本报表是预估口径，不扣库存和待到货；库存扣减后的建议下单量仍以采购建议报告为准。'),
+        ('注意', '本报表是预估口径；库存和生产中为辅助判断列，不在本表内扣减。库存扣减后的建议下单量仍以采购建议报告为准。'),
     ]
     ws.append(['项目', '说明'])
     for row in rows:
@@ -393,12 +486,14 @@ def write_algorithm_sheet(wb: Workbook, months: List[Tuple[date, str]], hist_lab
 def export_excel(output_path: str) -> str:
     months = read_forecast_months()
     summary_rows, detail_rows = read_forecast_data(months)
+    inv_spu, inv_spu_shop = read_inventory_metrics()
+    attach_inventory(summary_rows, inv_spu, detail=False)
+    attach_inventory(detail_rows, inv_spu_shop, detail=True)
     hist_spu, hist_spu_shop, hist_labels = read_sales_history(months)
     attach_history(summary_rows, hist_spu, hist_labels, ['SPU'])
     attach_history(detail_rows, hist_spu_shop, hist_labels, ['SPU', '店铺'])
 
     wb = Workbook()
-    # 删除默认sheet后按顺序创建
     default = wb.active
     wb.remove(default)
     write_sheet(wb, 'SPU汇总', summary_rows, ordered_columns(months, hist_labels, detail=False), freeze='A2')
