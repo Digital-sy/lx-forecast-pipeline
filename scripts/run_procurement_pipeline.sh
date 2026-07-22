@@ -3,7 +3,7 @@
 # 采购建议核心流水线
 # 1. 飞书运营预计下单量 → MySQL
 # 2. 系统预测 vs 运营预计 → 预测对比表 / 预测对比表_SKU
-# 3. 建议下单量 + 面料用量 → MySQL / 飞书
+# 3. 颜色体系建议下单量 + 面料汇总 + 面料详细预估 → MySQL / 飞书
 # 4. 导出采购建议 Excel
 #
 # 任一步骤失败都会停止后续任务并发送飞书告警。
@@ -49,7 +49,7 @@ send_feishu_success() {
     "$PYTHON" "$PROJECT_DIR/scripts/notify_feishu.py" \
         --task "采购建议流水线" \
         --status "success" \
-        --detail "四个业务步骤全部完成，预测、采购建议、面料明细和 Excel 已更新" \
+        --detail "四个业务步骤全部完成，预测、颜色体系采购建议、面料明细和 Excel 已更新" \
         --elapsed "${elapsed}s" \
         2>/dev/null || true
 }
@@ -81,8 +81,11 @@ echo "[预检] Python 核心模块语法检查..." >> "$LOG_FILE"
 "$PYTHON" -m py_compile \
     "$PROJECT_DIR/jobs/feishu/generate_forecast_comparison.py" \
     "$PROJECT_DIR/jobs/feishu/forecast_sales_improved.py" \
+    "$PROJECT_DIR/jobs/feishu/color_system_resolver.py" \
+    "$PROJECT_DIR/jobs/feishu/procurement_color_logic.py" \
+    "$PROJECT_DIR/jobs/feishu/generate_fabric_forecast_color_system.py" \
     "$PROJECT_DIR/jobs/feishu/generate_procurement_report_lx_color.py" \
-    "$PROJECT_DIR/jobs/feishu/export_procurement_excel.py" \
+    "$PROJECT_DIR/jobs/feishu/export_procurement_excel_color_system.py" \
     >> "$LOG_FILE" 2>&1
 PREFLIGHT_EXIT=$?
 if [ "$PREFLIGHT_EXIT" -ne 0 ]; then
@@ -92,8 +95,8 @@ echo "✓ Python 核心模块语法检查通过" >> "$LOG_FILE"
 
 run_module "1" "jobs.feishu.write_order_forecast_to_feishu" "同步运营预计下单量"
 run_module "2" "jobs.feishu.generate_forecast_comparison" "生成预测对比表"
-run_module "3" "jobs.feishu.generate_procurement_report_lx_color" "生成采购建议和面料用量"
-run_module "4" "jobs.feishu.export_procurement_excel" "导出采购建议 Excel"
+run_module "3" "jobs.feishu.generate_procurement_report_lx_color" "生成颜色体系采购建议和面料预估"
+run_module "4" "jobs.feishu.export_procurement_excel_color_system" "导出颜色体系采购建议 Excel"
 
 END_TIME=$(date '+%Y-%m-%d %H:%M:%S')
 END_TS=$(date +%s)
