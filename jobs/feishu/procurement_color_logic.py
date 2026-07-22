@@ -5,7 +5,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date, datetime
-from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
+from decimal import Decimal
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Sequence, Tuple
 
 from jobs.feishu.color_system_resolver import ColorSystemResolver
 
@@ -138,8 +139,8 @@ def read_inventory(resolver: ColorSystemResolver) -> Dict[ProcurementKey, Dict[s
                     GROUP BY SKU, 店铺
                 """)
                 add_rows(cursor.fetchall(), "可售", "在途")
-    except Exception:
-        pass
+    except Exception as exc:
+        raise RuntimeError(f"读取 FBA 库存失败: {exc}") from exc
 
     try:
         with db_cursor() as cursor:
@@ -157,8 +158,8 @@ def read_inventory(resolver: ColorSystemResolver) -> Dict[ProcurementKey, Dict[s
                     GROUP BY SKU, 店铺
                 """)
                 add_rows(cursor.fetchall(), "可用", "待入库")
-    except Exception:
-        pass
+    except Exception as exc:
+        raise RuntimeError(f"读取本地库存失败: {exc}") from exc
 
     return dict(result)
 
@@ -171,12 +172,7 @@ def get_inventory(
         value = inventory_map[key]
         return {"库存": int(value.get("库存", 0)), "待到货": int(value.get("待到货", 0))}
 
-    identity = key[:3]
-    candidates = [value for candidate, value in inventory_map.items() if candidate[:3] == identity]
-    # 仅有一个其他店铺来源时才兜底；多个店铺时不跨店重复扣减库存。
-    if len(candidates) == 1:
-        value = candidates[0]
-        return {"库存": int(value.get("库存", 0)), "待到货": int(value.get("待到货", 0))}
+    # 不跨店铺兜底，避免同一份库存被多个店铺重复扣减。
     return {"库存": 0, "待到货": 0}
 
 
