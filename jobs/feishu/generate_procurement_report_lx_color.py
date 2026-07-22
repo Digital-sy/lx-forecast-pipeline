@@ -5,17 +5,17 @@
 
 实现方式：
 - 复用原 jobs.feishu.generate_procurement_report 的主流程和计算逻辑；
-- 仅覆盖 write_fabric_detail_to_feishu；
+- 覆盖 write_fabric_detail_to_feishu；
+- 兼容恢复基础模块误删的 save_fabric_usage；
 - 从 lxpm_product_category_snapshot 按 sku=面料颜色编号 读取 product_name；
 - 解析 product_name 中形如 2#黑玛瑙 的领星颜色格式，写入飞书字段「颜色-领星」。
 """
 
 from __future__ import annotations
 
-import asyncio
 import re
 from datetime import datetime
-from typing import Dict
+from typing import Any, Dict, List
 
 from common import get_logger
 from common.database import db_cursor
@@ -70,6 +70,45 @@ def read_lingxing_color_map() -> Dict[str, str]:
     except Exception as e:
         logger.warning(f"读取颜色-领星映射失败: {e}", exc_info=True)
     return color_map
+
+
+def save_fabric_usage(records: List[Dict[str, Any]]) -> None:
+    """恢复基础采购模块缺失的面料预计用量汇总表写入。"""
+    with db_cursor() as cursor:
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS `{base.TABLE_FABRIC_USAGE}` (
+                `id`             INT AUTO_INCREMENT PRIMARY KEY,
+                `面料`           VARCHAR(500) NOT NULL,
+                `SPU数量`        INT          NOT NULL DEFAULT 0,
+                `建议下单量合计` INT          NOT NULL DEFAULT 0,
+                `单件用量(米)`   DECIMAL(8,3) NOT NULL DEFAULT 0,
+                `预计用量(米)`   DECIMAL(12,2) NOT NULL DEFAULT 0,
+                `更新时间`       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                             ON UPDATE CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+              COMMENT='定制面料预计用量（产品经理用）';
+        """)
+        cursor.execute(f"TRUNCATE TABLE `{base.TABLE_FABRIC_USAGE}`")
+
+        if records:
+            sql = f"""
+                INSERT INTO `{base.TABLE_FABRIC_USAGE}`
+                    (`面料`, `SPU数量`, `建议下单量合计`, `单件用量(米)`, `预计用量(米)`)
+                VALUES (%s, %s, %s, %s, %s)
+            """
+            rows = [
+                (
+                    row['面料'],
+                    row['SPU数量'],
+                    row['建议下单量合计'],
+                    row['单件用量(米)'],
+                    row['预计用量(米)'],
+                )
+                for row in records
+            ]
+            cursor.executemany(sql, rows)
+
+    logger.info(f"✓ 写入 {len(records)} 条记录到 `{base.TABLE_FABRIC_USAGE}`")
 
 
 async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
@@ -164,6 +203,8 @@ async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
 
 
 def main() -> None:
+    # 基础模块在款色维度改造时误删 save_fabric_usage；在增强入口恢复该写入能力。
+    base.save_fabric_usage = save_fabric_usage
     base.write_fabric_detail_to_feishu = write_fabric_detail_to_feishu
     base.main()
 
