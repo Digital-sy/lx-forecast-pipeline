@@ -12,6 +12,7 @@ from common import get_logger
 from common.database import db_cursor
 from jobs.feishu import generate_procurement_report as base
 from jobs.feishu.color_system_resolver import ColorSystemResolver
+from jobs.feishu.fabric_merge_rule_loader import load_fabric_merge_maps
 from jobs.feishu import procurement_color_logic as logic
 from jobs.feishu import generate_fabric_forecast_color_system as fabric_detail
 
@@ -274,6 +275,8 @@ def main() -> None:
     logic.save_fabric_usage(fabric_records)
     logger.info(f"✓ 写入 {len(fabric_records)} 条记录到 `{logic.TABLE_FABRIC_USAGE}`")
 
+    # 使用独立安全加载器，避免体系级规则被误当成所有体系的旧版兜底规则。
+    fabric_detail.load_fabric_merge_maps = load_fabric_merge_maps
     # 先使用刚生成的建议下单量刷新详细面料预估，再统一输出飞书。
     detail_records = fabric_detail.main(resolver)
 
