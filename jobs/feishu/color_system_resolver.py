@@ -12,7 +12,7 @@ import re
 import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Mapping, Tuple
+from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
 COLOR_FIELD_ID = "207722905719915521"
 COLOR_FIELD_NAME = "颜色体系"
@@ -132,10 +132,9 @@ class ColorSystemResolver:
         }
 
     @classmethod
-    def from_database(cls) -> "ColorSystemResolver":
+    def from_database(cls, strict: bool = True) -> "ColorSystemResolver":
         from common.database import db_cursor
 
-        rows: list[dict[str, Any]] = []
         try:
             with db_cursor() as cursor:
                 cursor.execute("""
@@ -145,6 +144,8 @@ class ColorSystemResolver:
                       AND TABLE_NAME='lxpm_product_category_snapshot'
                 """)
                 if not cursor.fetchone().get("cnt", 0):
+                    if strict:
+                        raise RuntimeError("lxpm_product_category_snapshot 不存在")
                     return cls()
                 cursor.execute("""
                     SELECT sku, spu, custom_fields_json
@@ -152,8 +153,9 @@ class ColorSystemResolver:
                     WHERE sku IS NOT NULL AND sku != ''
                 """)
                 rows = list(cursor.fetchall())
-        except Exception:
-            # 颜色体系不可用时不阻断主任务，但所有颜色都会进入“待定”，不会误并到 A/B。
+        except Exception as exc:
+            if strict:
+                raise RuntimeError(f"读取颜色体系产品快照失败: {exc}") from exc
             return cls()
         return cls(rows)
 
