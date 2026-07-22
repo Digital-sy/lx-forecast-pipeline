@@ -124,7 +124,7 @@ async def write_fabric_to_feishu(
         {"name": "面料", "type": "text"},
         {"name": "SPU数量", "type": "number"},
         {"name": "建议下单量合计", "type": "number"},
-        {"name": "有效加权单耗(米)", "type": "number", "precision": 3},
+        {"name": "单件用量(米)", "type": "number", "precision": 3},
         {"name": "原始单耗加权均值", "type": "number", "precision": 3},
         {"name": "预计用量(米)", "type": "number", "precision": 2},
         {"name": "计算口径", "type": "text"},
@@ -137,7 +137,7 @@ async def write_fabric_to_feishu(
         "面料": record["面料"],
         "SPU数量": record["SPU数量"],
         "建议下单量合计": record["建议下单量合计"],
-        "有效加权单耗(米)": record["单件用量(米)"],
+        "单件用量(米)": record["单件用量(米)"],
         "原始单耗加权均值": record["原始单耗加权均值"],
         "预计用量(米)": record["预计用量(米)"],
         "计算口径": record["计算口径"],
@@ -274,6 +274,7 @@ def main() -> None:
     logic.save_fabric_usage(fabric_records)
     logger.info(f"✓ 写入 {len(fabric_records)} 条记录到 `{logic.TABLE_FABRIC_USAGE}`")
 
+    # 先使用刚生成的建议下单量刷新详细面料预估，再统一输出飞书。
     detail_records = fabric_detail.main(resolver)
 
     logger.info("正在写入飞书多维表...")
