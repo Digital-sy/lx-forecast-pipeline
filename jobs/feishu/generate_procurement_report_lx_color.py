@@ -275,8 +275,9 @@ def main() -> None:
     logic.save_fabric_usage(fabric_records)
     logger.info(f"✓ 写入 {len(fabric_records)} 条记录到 `{logic.TABLE_FABRIC_USAGE}`")
 
-    # 使用独立安全加载器，避免体系级规则被误当成所有体系的旧版兜底规则。
+    # 体系级规则只用于对应体系；空体系规则才允许作为库存和旧数据的通用兜底。
     fabric_detail.load_fabric_merge_maps = load_fabric_merge_maps
+    fabric_detail.base.get_fabric_color_merge_mapping = lambda: load_fabric_merge_maps()[1]
     # 先使用刚生成的建议下单量刷新详细面料预估，再统一输出飞书。
     detail_records = fabric_detail.main(resolver)
 
