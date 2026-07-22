@@ -1,367 +1,495 @@
-# pythondata 项目说明
+# lx-forecast-pipeline
 
-基于 **领星 OpenAPI + MySQL（阿里云 RDS）+ 飞书** 的数据采集、同步与分析管道。
+基于 **领星 OpenAPI + MySQL + 飞书多维表** 的销量预测、采购建议与面料需求流水线。
 
-核心目标：把领星业务数据同步到 MySQL，结合飞书运营填报，生成销量预估、采购建议、面料用量预估，为备货决策提供准确数据支撑。
+项目负责把领星的产品、销量、库存、采购和利润数据同步到 MySQL，再结合飞书中的运营预计与面料参数，生成未来销量预测、建议下单量、面料预计用量和 Excel 报告。
 
-> 说明：费用单创建流程已下线，项目不再创建、作废或上传任何领星费用单。
+> 费用单创建流程已下线。本项目不创建、作废或上传领星费用单。
 
 ---
 
-## 一、项目结构
+## 1. 项目职责
 
+主要解决四个问题：
+
+1. 未来 4 个月每个 SKU / SPU / 店铺预计能卖多少。
+2. 系统预测与运营预计差异有多大。
+3. 扣除 FBA、本地库存和待到货后，还需要下多少成衣采购单。
+4. 成衣采购计划会消耗多少面料，哪些面料需要补货。
+
+整体链路：
+
+```text
+领星 OpenAPI / 飞书运营填报
+             ↓
+          MySQL 数据层
+             ↓
+     销量预测算法 v4
+             ↓
+  系统预测 vs 运营预计对比
+             ↓
+     库存和待到货扣减
+             ↓
+       建议下单量
+             ↓
+       面料需求预估
+             ↓
+ MySQL / 飞书多维表 / Excel
 ```
-pythondata/
-├── .env                              # 环境配置（需自行创建）
-├── requirements.txt                  # Python 依赖（Python ≥ 3.10）
-├── common/                           # 公共模块：配置、数据库、飞书、日志
-├── lingxing/                         # 领星 OpenAPI SDK
-├── utils/                            # 工具函数
+
+---
+
+## 2. 项目结构
+
+```text
+lx-forecast-pipeline/
+├── .env                         # 环境变量，禁止提交真实密钥
+├── requirements.txt            # Python 依赖
+├── common/                      # 配置、数据库、日志、飞书客户端
+├── lingxing/                    # 领星 OpenAPI 鉴权、签名与请求封装
+├── utils/                       # 通用工具
 ├── jobs/
-│   ├── Sync_data/                    # 领星数据同步：Listing、利润报表
-│   ├── feishu/                       # 飞书读写、销量预估、面料预估、采购建议
-│   └── purchase_analysis/            # 产品、FBA、库存、销量、采购、库存预估
-└── scripts/                          # 部署、维护、定时任务入口
+│   ├── Sync_data/               # Listing、利润报表等同步任务
+│   ├── purchase_analysis/       # 产品、库存、销量、采购和库存预估
+│   └── feishu/                  # 预测、采购建议、面料预估和飞书输出
+└── scripts/                     # 生产流水线、部署、告警和维护入口
+```
+
+服务器默认部署路径：
+
+```text
+/opt/apps/pythondata
 ```
 
 ---
 
-## 二、整体数据流
+## 3. 核心生产流水线
 
+入口：
+
+```bash
+bash scripts/run_procurement_pipeline.sh
 ```
-领星 OpenAPI
-    │
-    ├─→ 产品/Listing/FBA库存/仓库库存/销量/采购单/利润报表
-    │         ↓ 同步入库
-    │       MySQL (RDS)
-    │         │
-    ├─→ 飞书多维表（运营填报）
-    │     ├─ 运营预计下单量 ────→ 运营预计下单表（MySQL）
-    │     ├─ 定制面料参数   ────→ 定制面料参数表（MySQL）
-    │     └─ 面料核价数据   ────→ 面料核价表（MySQL）
-    │
-    └─→ 预测 & 分析管道
-          ├─ forecast_sales_improved.py（系统销量预测 v2）
-          │       ↓
-          │   预测对比表_SKU（MySQL）
-          │       ↓
-          ├─ generate_procurement_report.py
-          │       ↓
-          │   建议下单量表（MySQL）→ 飞书多维表
-          │       ↓
-          ├─ generate_fabric_forecast.py（面料预估 v4）
-          │       ↓
-          │   面料预估表（MySQL）→ 飞书多维表
-          │
-          └─ export_fabric_trace.py（面料用量溯源导出）
-                  ↓
-              /tmp/fabric_XXX_trace.xlsx
+
+实际执行顺序：
+
+```text
+预检：py_compile 检查核心 Python 模块语法
+
+1. jobs.feishu.write_order_forecast_to_feishu
+   飞书运营预计下单量 → MySQL 运营预计下单表
+
+2. jobs.feishu.generate_forecast_comparison
+   历史销量 → 预测算法 v4
+   → 预测对比表
+   → 预测对比表_SKU
+
+3. jobs.feishu.generate_procurement_report_lx_color
+   系统预测 + 库存 + 待到货 + 面料参数
+   → 建议下单量表
+   → 面料预计用量表
+   → 飞书建议下单量 / 面料预计用量 / 面料预估明细
+   → 面料预估明细增加“颜色-领星”
+
+4. jobs.feishu.export_procurement_excel
+   导出采购建议 Excel
 ```
+
+任何一步返回非 0 状态都会：
+
+- 停止后续任务；
+- 写入 `logs/cron_procurement_pipeline.log`；
+- 调用 `scripts/notify_feishu.py` 发送失败告警。
+
+### 主流程安全保护
+
+`generate_forecast_comparison.py` 当前包含以下保护：
+
+- 核心销量源读取失败时直接报错，不再返回部分结果继续运行；
+- 销量历史为空时停止覆盖预测表；
+- 无法生成大于 0 的 SKU 预测时停止覆盖预测表；
+- `预测对比表` 与 `预测对比表_SKU` 的本月及未来数据在同一事务中删除和重写；
+- 数据库写入失败时回滚，避免出现“旧数据已删、新数据未写完”的空表状态。
 
 ---
 
-## 三、核心业务流程
+## 4. 数据来源与输出表
 
-### 流程 1：利润报表同步
+### 4.1 主要输入表
 
-**入口**：`scripts/run_profit_report_fee_sync.sh`
+| 表 | 用途 |
+|---|---|
+| `销量统计_msku月度` | SKU / 店铺历史月销量，是系统预测核心输入 |
+| `SPU季节表` | SPU 的春夏、秋冬、全年属性 |
+| `运营预计下单表` | 运营填写的未来月份预计下单量 |
+| `FBA库存明细` | FBA 可售和在途库存 |
+| `库存预估表` | 本地可用量和本地待到货 |
+| `采购单` | 本月已下单成衣数量和最近供应商 |
+| `定制面料参数` | 面料编号、每条米数和定制面料范围 |
+| `面料核价表` | SPU 对应面料、单件用量和损耗 |
 
-```
-领星 API → fetch_profit_report_msku_daily（上月初至今日）
-         → update_profit_report_calculated_fields（更新计算字段）
-```
+### 4.2 核心输出表
 
-### 流程 2：数据同步与面料预估
-
-**入口**：`scripts/run_data_sync.sh`
-
-```
-1. fetch_listing              领星 Listing 入库
-2. fetch_fabric_params        飞书定制面料参数入库
-3. fetch_feishu_data          飞书面料表入库
-4. generate_order_comparison  生成下单对比表
-5. generate_fabric_forecast   生成面料预估表（见下节详述）
-```
-
-### 流程 3：采购分析
-
-**入口**：`scripts/run_jobs.sh` → `jobs.purchase_analysis.main`
-
-```
-fetch_product              领星产品管理（7日增量）
-fetch_fba_inventory        领星 FBA 库存
-fetch_inventory_details    领星仓库库存明细
-fetch_sale_stat_v2_msku_monthly  领星销量统计（MSKU月度）
-fetch_purchase             领星采购单
-generate_inventory_estimate      生成库存预估表
-```
-
-### 流程 4：库存同步
-
-**入口**：`scripts/run_inventory_sync.sh`
-
-```
-fetch_inventory_details    领星仓库库存明细
-write_inventory_to_feishu  写飞书库存多维表
-Shipment_Number            领星货件单号写飞书
-```
-
-### 流程 5：采购建议流水线（核心流程）
-
-**入口**：`scripts/run_procurement_pipeline.sh`
-
-```
-Step 0: write_order_forecast_to_feishu
-        飞书运营预计下单量 → MySQL 运营预计下单表
-
-Step 1: generate_forecast_comparison
-        系统销量预测（forecast_sales_improved v2）
-        → 预测对比表_SKU（MySQL）
-        ※ v2 改进：动态α混合 + 爆发检测 + 环比上限，解决高基数效应虚高问题
-
-Step 2: generate_procurement_report
-        系统预测 + FBA库存 + 本地库存（含FBA在途）
-        → 建议下单量表（MySQL）→ 飞书多维表
-        ※ 修复：FBA库存字段名由 `在途数量` 改为 `在途`，库存不再为0
-
-Step 3: generate_fabric_forecast（面料预估 v4）
-        当月：采购单实际下单量（待到货+已完成）× 用量率
-        T+1~T+3：建议下单量 × 颜色比例 × 用量率
-        → 面料预估表（MySQL）→ 飞书面料预估明细
-
-Step 4: export_procurement_excel
-        导出采购建议 Excel 报告
-```
+| 表 | 粒度 | 用途 |
+|---|---|---|
+| `预测对比表` | SPU + 店铺 + 月份 | 系统预测与运营预计对比 |
+| `预测对比表_SKU` | SKU + SPU + 店铺 + 月份 | SKU 预测及后续颜色、面料计算 |
+| `建议下单量表` | SPU + 颜色 + 店铺 | 扣除库存后的成衣建议下单量 |
+| `面料预计用量表` | 面料 | 定制面料预计采购需求汇总 |
+| `面料预估表` | 面料 + 颜色 | 库存、待到货、系统和运营口径面料需求 |
 
 ---
 
-## 四、面料预估系统详解（v4）
+## 5. 销量预测算法 v4
 
-面料预估表是本项目的核心输出，为面料采购提供数据支撑。
+文件：
 
-### 4.1 设计理念
-
-```
-面料消耗时间点 = 下成衣采购单的时刻（而非成衣销售时刻）
-→ 用成衣采购单驱动面料需求，消除2-3个月的时间错位
+```text
+jobs/feishu/forecast_sales_improved.py
 ```
 
-### 4.2 字段含义
+预测范围：本月起未来 4 个月。
 
-| 字段 | 来源 | 含义 |
-|------|------|------|
-| 库存量/条 | 仓库库存明细（按面料编号匹配） | 当前面料库存 |
-| 当月已下单消耗/米 | 本月采购单（待到货+已完成）× 用量率 | **确定消耗**，已产生 |
-| 当月完整预估/米 | 当月建议下单量 × 颜色比例 × 用量率 | 当月面料需求总量（A方案） |
-| 当月剩余预估/米 | 完整预估 - 已下单消耗 | 还需要采购的面料（B方案）|
-| T+1月预估/米 | T+1月建议下单量 × 颜色比例 × 用量率 | 下月面料需求预测 |
-| T+2月预估/米 | T+2月建议下单量 × 颜色比例 × 用量率 | 下下月面料需求预测 |
-| 运营当月预估/米 | 运营预计下单量 × 用量率 | 运营口径参考 |
+### 5.1 趋势因子
 
-### 4.3 颜色拆分逻辑
-
-建议下单量是 SPU+店铺 维度，颜色拆分用系统预测比例：
-
-```
-某颜色占比 = 该颜色系统预测件数 ÷ 该SPU系统预测总件数
-该颜色预估米数 = SPU建议下单量 × 该颜色占比 × 平均用量率
-```
-
-### 4.4 建议下单量的库存扣除
-
-建议下单量 = 系统预测 - 成衣FBA可售 - 成衣FBA在途 - 本地可用 - 本地待入库
-已充分考虑全渠道库存，避免重复备货。
-
----
-
-## 五、销量预测算法详解（v2）
-
-**文件**：`jobs/feishu/forecast_sales_improved.py`
-
-### 5.1 预测决策树
-
-```
-有去年同期数据？
-  是 → 计算趋势因子（近3个月加权同比）
-       └─ 爆发检测（趋势因子需钳位 AND 近期环比>30%）
-             是 → L3：阻尼增长（真实爆火，放大预测）
-             否 → 方案C：动态α混合 → 方案A：环比上限兜底
-                   trend>2.0：同比30%+近期70%
-                   trend>1.5：同比50%+近期50%
-                   trend≤1.5：同比70%+近期30%（接近原逻辑）
-  否 → L3：近3月阻尼增长 / L4：SPU兜底
-```
-
-### 5.2 关键参数
+使用最近 3 个月今年销量与去年同期销量的加权比值：
 
 ```python
-TREND_FACTOR_MAX       = 3.0    # 趋势因子最大值
-EXPLOSIVE_GROWTH_THRESHOLD = 0.3  # 爆发检测近期环比阈值（30%/月）
-MOM_CAP_RATIO          = 1.5    # 方案A环比上限（近3月均值×1.5）
-ALPHA_HIGH             = 0.3    # trend>2.0时同比权重
-ALPHA_MID              = 0.5    # trend>1.5时同比权重
-ALPHA_NORMAL           = 0.7    # 正常情况同比权重
+TREND_WEIGHTS = {
+    "last_1": 0.6,
+    "last_2": 0.3,
+    "last_3": 0.1,
+}
+
+TREND_FACTOR_MIN = 0.3
+TREND_FACTOR_MAX = 3.0
 ```
 
-### 5.3 改进背景
+最近月份权重最高；去年同期为 0 的月份不进入趋势因子。
 
-v1 存在高基数效应虚高问题：去年同期基数低（新品起步期），今年同比大幅增长，但算法按同比直接外推导致预测严重虚高（如BX389-BW-S 6月预测4324件，实际1731件，误差+150%）。
+### 5.2 预测决策树
 
-v2 加入动态α混合让高增速情况更依赖近期均值，同时区分"基数效应"和"真实爆发"两种场景。
+```text
+有去年同期销量，并且趋势因子有效
+├─ 爆发检测成立
+│  └─ L3：近期增长阻尼预测
+├─ 季节款淡季
+│  └─ L1：去年同月销量 × 受限增长系数
+└─ 旺季 / 过渡月 / 全年款
+   └─ L1：同比预测与近 3 月均值动态混合
 
----
-
-## 六、关键修复记录
-
-| 问题 | 原因 | 修复 |
-|------|------|------|
-| FBA库存在建议下单量里全为0 | `read_inventory()` 里FBA查询用了 `可售数量`、`在途数量`，但实际字段名是 `FBA可售`、`在途` | 修正字段名，FBA和本地库存拆成独立try/except |
-| 面料预估表过期数据未清除 | DELETE语句用 `>=` 应该用 `<` | 修正为删除 `< 当月` 的数据 |
-| 系统预测虚高 | v1预测算法高基数效应，趋势因子直接外推 | 升级至v2，加入动态α混合和爆发检测 |
-| 面料预估时间错位 | 用成衣销量预测推算面料需求，有2-3月时间差 | 改为用建议下单量（成衣采购时间点）驱动 |
-| 库存预估表字段名不匹配 | `库存预估表` 是竖表结构，但代码按横表读取 | 改用 `CASE WHEN 库存状态 = '本地可用量'` |
-
----
-
-## 七、主要文件说明
-
-### `jobs/feishu/`
-
-| 文件 | 说明 |
-|------|------|
-| `forecast_sales_improved.py` | **系统销量预测算法 v2**，L1~L4四级兜底 + 爆发检测 + 方案C动态α |
-| `generate_forecast_comparison.py` | 生成预测对比表_SKU，每日更新当月及未来月份预测 |
-| `generate_fabric_forecast.py` | **面料预估表 v4**，采购单驱动当月，建议下单量驱动T+1~T+3 |
-| `generate_procurement_report.py` | 生成建议下单量表，写飞书多维表；含FBA+本地双库存 |
-| `export_procurement_excel.py` | 导出采购建议 Excel 报告 |
-| `export_fabric_trace.py` | **面料用量溯源导出**，生成290等面料的SKU级溯源Excel |
-| `write_sales_to_feishu.py` | 销量+库存预估 → 飞书销量预估表 |
-| `write_order_forecast_to_feishu.py` | 飞书运营预计下单量 → MySQL |
-| `write_inventory_to_feishu.py` | 仓库库存明细 → 飞书 |
-| `fetch_fabric_params.py` | 飞书定制面料参数 → MySQL |
-| `fetch_feishu_data.py` | 飞书面料表 → MySQL |
-| `generate_order_comparison.py` | 生成下单对比表 |
-| `Shipment_Number.py` | 领星货件单号 → 飞书 |
-
-### `jobs/purchase_analysis/`
-
-| 文件 | 说明 |
-|------|------|
-| `main.py` | 采购分析主入口 |
-| `fetch_product.py` | 领星产品管理（7日增量） |
-| `fetch_fba_inventory.py` | 领星 FBA 库存 |
-| `fetch_inventory_details.py` | 领星仓库库存明细 |
-| `fetch_sale_stat_v2_msku_monthly.py` | 领星销量统计 MSKU 月度 |
-| `fetch_purchase.py` | 领星采购单 |
-| `generate_inventory_estimate.py` | 生成库存预估表 |
-
----
-
-## 八、面料溯源使用说明
-
-**运行方式**：
-
-```bash
-cd /opt/apps/pythondata && source venv/bin/activate
-python -m jobs.feishu.export_fabric_trace
+没有有效同比条件
+├─ L3：新品阻尼增长
+├─ L3：近期下跌衰减
+├─ L3：季节同比或季节调整
+├─ L4：SPU 趋势兜底
+└─ L5：无有效数据，返回 0
 ```
 
-输出文件：`/tmp/fabric_290_trace.xlsx`
+### 5.3 季节性
 
-下载到本地：
+支持：
 
-```bash
-scp root@SERVER_IP:/tmp/fabric_290_trace.xlsx C:\Users\GA\fabric_290_trace.xlsx
+- 春夏；
+- 秋冬；
+- 全年。
+
+算法优先从去年销量中动态识别最高的 3 个月作为旺季。动态结果不符合季节规律时，回退到静态旺季：
+
+```python
+PEAK_MONTHS_FALLBACK = {
+    "春夏": [4, 5, 6, 7],
+    "秋冬": [10, 11, 12, 1],
+}
 ```
 
-**Excel 包含4个Sheet**：
+当目标月份销量相对旺季均值低于 `0.6` 时，按淡季路径计算，避免近 3 个月均值把不同淡季月份预测成相同结果。
 
-| Sheet | 内容 |
-|-------|------|
-| 面料预估汇总 | 直接读面料预估表，含总量+带颜色两个维度，权威数据 |
-| SKU溯源 | 系统预测件数、颜色内占比、预估面料用量（与汇总一致）、销量+库存 |
-| 本月采购单消耗 | 本月实际采购单折算的面料消耗 |
-| 核价参数 | 各SPU的单件用量和损耗系数 |
+### 5.4 新品与成熟度限制
 
-> 注：SKU溯源里的"预估面料用量/米"= 颜色预估总米 × 颜色内SKU占比，与面料预估汇总（带颜色行）数值一致。总量行（含无主面料贡献）与SKU溯源加总可能有小差异，以总量行为准。
+去年有效销售月份越少，允许的增长上限越高：
+
+| 去年有效月份 | 产品阶段参考 | 增长上限 |
+|---:|---|---:|
+| ≤ 3 | 新品 / 快速成长期 | 3.0 |
+| 4～6 | 成长期 | 2.0 |
+| > 6 | 成熟期 | 1.5 |
+
+### 5.5 近期下跌识别
+
+当月数据按已完成天数推算整月，同时比较：
+
+```text
+当月日均销量 vs 上月日均销量
+```
+
+如果当月日均低于上月日均，算法优先走下跌衰减路径，不继续按历史增长率放大。
+
+### 5.6 上行期连续性保护
+
+季节款进入上行期时，会参考上一个预测月，避免预测曲线出现不合理的断崖下降。每个 SKU 的结果同时保留“预测方法”，便于定位它走了哪条决策路径。
 
 ---
 
-## 九、快速命令参考
+## 6. 预测对比主流程
+
+文件：
+
+```text
+jobs/feishu/generate_forecast_comparison.py
+```
+
+处理步骤：
+
+1. 读取当月、近 3 个月和去年同期销量；
+2. 当月销量按已完成天数补全整月，仅作为预测输入；
+3. 加载 `SPU季节表`；
+4. 调用 v4 算法生成 SKU 未来 4 个月预测；
+5. 聚合出 SPU + 店铺 + 月份预测；
+6. 读取运营预计下单量；
+7. 计算差异和差异率；
+8. 事务性替换本月及未来月份数据。
+
+差异口径：
+
+```text
+差异 = 运营预计下单量 - 系统预测销量
+差异率 = 差异 ÷ 系统预测销量
+```
+
+系统预测为 0 时，差异率为 `NULL`。
+
+---
+
+## 7. 建议下单量
+
+基础公式：
+
+```text
+建议下单量
+= MAX(
+    0,
+    覆盖月份系统预测合计
+    - FBA可售
+    - FBA在途
+    - 本地可用
+    - 本地待到货
+  )
+```
+
+覆盖月份：
+
+| 面料类型 | 默认覆盖月份 |
+|---|---:|
+| 定制面料 | 3 个月 |
+| 现货面料 | 2 个月 |
+
+计算已下沉到：
+
+```text
+SPU + 颜色缩写 + 店铺
+```
+
+运营预计仍为 SPU + 店铺维度，按各颜色系统预测占比分摊。
+
+---
+
+## 8. 面料需求预估
+
+文件：
+
+```text
+jobs/feishu/generate_fabric_forecast.py
+jobs/feishu/generate_procurement_report_lx_color.py
+```
+
+核心原则：
+
+```text
+面料消耗时间点以“下成衣采购单”为准，
+而不是以成衣最终销售月份为准。
+```
+
+主要字段：
+
+| 字段 | 计算口径 |
+|---|---|
+| 库存量/条、库存量/米 | 当前面料库存 |
+| 待到货量/条、待到货量/米 | 已采购但未到货面料 |
+| 当月已下单消耗/米 | 本月有效采购单 × 单件用量 |
+| 当月完整预估/米 | 当月系统需求 × 单件用量 |
+| 当月剩余预估/米 | 完整预估 - 已下单消耗 |
+| T+1、T+2 月预估/米 | 后续月份系统需求 × 单件用量 |
+| 运营月份预估/米 | 运营预计下单量 × 单件用量 |
+
+### 颜色-领星
+
+`generate_procurement_report_lx_color.py` 会读取：
+
+```text
+lxpm_product_category_snapshot
+```
+
+该表由独立项目 `lx-product-m` 维护。脚本按“面料颜色编号 = 领星 SKU”匹配产品名称，并从产品名称中解析类似 `2#黑玛瑙` 的值，写入飞书字段“颜色-领星”。
+
+如果 `lxpm_product_category_snapshot` 不存在，流水线仍可继续，但“颜色-领星”字段为空。
+
+---
+
+## 9. 其他生产入口
+
+### 利润报表同步
 
 ```bash
-# 服务器路径
-cd /opt/apps/pythondata && source venv/bin/activate
+bash scripts/run_profit_report_fee_sync.sh
+```
 
-# 同步一次完整流水线
-bash scripts/run_procurement_pipeline.sh
+### 基础数据与面料预估同步
 
-# 单独运行某个模块
-python -m jobs.feishu.generate_fabric_forecast
-python -m jobs.feishu.generate_procurement_report
-python -m jobs.feishu.export_fabric_trace
+```bash
+bash scripts/run_data_sync.sh
+```
 
-# 拉取最新代码
+### 采购分析数据采集
+
+```bash
+bash scripts/run_jobs.sh
+```
+
+主要包括：产品管理、FBA 库存、仓库库存、MSKU 月度销量、采购单和库存预估表。
+
+### 库存同步到飞书
+
+```bash
+bash scripts/run_inventory_sync.sh
+```
+
+---
+
+## 10. 安装与配置
+
+建议使用 Python 3.10 或更高版本。
+
+```bash
+cd /opt/apps/pythondata
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+在项目根目录创建 `.env`。具体字段以 `common/config.py` 为准，至少包括：
+
+```env
+LINGXING_HOST=https://openapi.lingxing.com
+LINGXING_APP_ID=***
+LINGXING_APP_SECRET=***
+
+DB_HOST=***
+DB_PORT=3306
+DB_USER=***
+DB_PASSWORD=***
+DB_DATABASE=***
+
+FEISHU_APP_ID=***
+FEISHU_APP_SECRET=***
+```
+
+所有 Token、App Secret、Webhook 和数据库密码必须通过环境变量或服务器密钥管理维护，不得写入 README、Shell 或 Python 源码。
+
+---
+
+## 11. 运行与验证
+
+### 更新代码
+
+```bash
+cd /opt/apps/pythondata
 git pull origin main
+source venv/bin/activate
+pip install -r requirements.txt
+```
 
-# 查看日志
-tail -f logs/fabric_forecast.log
+### 语法检查
+
+```bash
+python -m py_compile \
+  jobs/feishu/generate_forecast_comparison.py \
+  jobs/feishu/forecast_sales_improved.py \
+  jobs/feishu/generate_procurement_report_lx_color.py \
+  jobs/feishu/export_procurement_excel.py
+
+bash -n scripts/run_procurement_pipeline.sh
+```
+
+### 单独运行预测对比
+
+```bash
+python -m jobs.feishu.generate_forecast_comparison
+```
+
+### 执行完整核心流水线
+
+```bash
+bash scripts/run_procurement_pipeline.sh
+```
+
+### 查看日志
+
+```bash
 tail -f logs/cron_procurement_pipeline.log
 ```
 
----
+### 数据库结果检查
 
-## 十、定时任务建议
+```sql
+SELECT COUNT(*) AS cnt,
+       MIN(统计日期) AS min_date,
+       MAX(统计日期) AS max_date
+FROM `预测对比表`;
 
-推荐每日 02:00 按顺序执行：
+SELECT COUNT(*) AS cnt,
+       COUNT(DISTINCT SKU) AS sku_cnt,
+       MIN(统计日期) AS min_date,
+       MAX(统计日期) AS max_date
+FROM `预测对比表_SKU`;
 
-```bash
-#!/bin/bash
-PROJECT_DIR="/opt/apps/pythondata"
-
-"$PROJECT_DIR/scripts/run_profit_report_fee_sync.sh" || true
-"$PROJECT_DIR/scripts/run_jobs.sh"                    || true
-"$PROJECT_DIR/scripts/run_data_sync.sh"               || true
-"$PROJECT_DIR/scripts/run_inventory_sync.sh"          || true
-"$PROJECT_DIR/scripts/run_procurement_pipeline.sh"    || true
+SELECT 月份,
+       SUM(系统预测销量) AS system_qty,
+       SUM(运营预计下单量) AS operation_qty
+FROM `预测对比表`
+GROUP BY 月份
+ORDER BY MIN(统计日期);
 ```
-
-> 实际生产以服务器 crontab / `/etc/cron.daily/` 配置为准。
-
----
-
-## 十一、环境与维护
-
-- **Python**：≥ 3.10
-- **数据库**：MySQL 8.0（阿里云 RDS），host 见 `.env`
-- **依赖**：见 `requirements.txt`
-- **配置**：项目根目录 `.env`，参考 `common/config.py`
-- **日志**：项目下 `logs/`，按任务分文件
-- **维护脚本**：
-  - `scripts/setup_server.sh`：新机部署
-  - `scripts/update_project.sh`：拉代码+更新依赖
-  - `scripts/check_status.sh`：检查环境/数据库/crontab
 
 ---
 
-## 十二、当前进度
+## 12. 定时任务建议
 
+实际生产以服务器 crontab 或 DolphinScheduler 配置为准。各任务存在上下游依赖，不建议无条件使用 `|| true` 吞掉失败。
+
+推荐顺序：
+
+```text
+利润数据同步
+  ↓
+产品 / 库存 / 销量 / 采购数据同步
+  ↓
+飞书参数与面料基础数据同步
+  ↓
+库存同步
+  ↓
+采购建议核心流水线
 ```
-✅ 完成
-  领星全量数据同步（Listing/FBA/库存/销量/采购/利润报表）
-  销量预测算法 v2（动态α + 爆发检测 + 环比上限）
-  面料预估系统 v4（采购单驱动 + 建议下单量驱动 + 颜色比例拆分）
-  面料预估写飞书（动态月份字段名，T~T+2共3个月滚动展示）
-  FBA库存修复（建议下单量现已包含FBA可售+在途）
-  面料溯源报告（SKU级别，与汇总口径一致）
 
-🚧 已知差异
-  SKU溯源加总 vs 面料预估总量行存在小差异
-  原因：总量行包含非主面料SKU的平均用量兜底贡献，带颜色行仅统计主面料SKU
-  处理：以总量行为权威，SKU溯源作分析参考
+核心采购流水线自身已实现失败即停止和飞书告警。
 
-📋 待优化
-  当月实际销量回写（销量统计_msku月度数据完整性）
-  库存聚合逻辑（面料颜色编号与仓库SKU的精确匹配）
-  面料核价表覆盖率（部分SPU-面料组合未配置）
-```
+---
+
+## 13. 已知事项
+
+1. 预测算法是可解释的业务规则模型，不是训练型机器学习模型。
+2. 当月销量补全依赖 `销量统计_msku月度` 中当月数据为“截至昨日累计值”。
+3. 运营预计按 SPU + 店铺录入，颜色维度由系统预测占比分摊。
+4. 面料核价表缺少单件用量时，对应 SPU 的面料结果可能不完整。
+5. “颜色-领星”依赖 `lx-product-m` 的产品快照同步及时性。
+6. 飞书报表目前以清空后全量重写为主，执行期间不应并发运行同一输出任务。
