@@ -83,6 +83,8 @@ echo "[预检] Python 核心模块语法检查..." >> "$LOG_FILE"
     "$PROJECT_DIR/jobs/feishu/forecast_sales_improved.py" \
     "$PROJECT_DIR/jobs/feishu/color_system_resolver.py" \
     "$PROJECT_DIR/jobs/feishu/procurement_color_logic.py" \
+    "$PROJECT_DIR/jobs/feishu/generate_fabric_forecast.py" \
+    "$PROJECT_DIR/jobs/feishu/generate_procurement_report.py" \
     "$PROJECT_DIR/jobs/feishu/generate_fabric_forecast_color_system.py" \
     "$PROJECT_DIR/jobs/feishu/generate_procurement_report_lx_color.py" \
     "$PROJECT_DIR/jobs/feishu/export_procurement_excel_color_system.py" \
