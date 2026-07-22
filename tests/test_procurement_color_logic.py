@@ -64,6 +64,17 @@ class ProcurementLogicTests(unittest.TestCase):
         result = largest_remainder_allocate(10, {"a": 1, "b": 1, "c": 1})
         self.assertEqual(sum(result.values()), 10)
 
+    def test_inventory_does_not_cross_shop(self):
+        from jobs.feishu.procurement_color_logic import get_inventory
+
+        inventory = {
+            ("SP1", "A2023", "BK", "SHOP-A"): {"库存": 100, "待到货": 20}
+        }
+        self.assertEqual(
+            get_inventory(inventory, ("SP1", "A2023", "BK", "SHOP-B")),
+            {"库存": 0, "待到货": 0},
+        )
+
     def test_custom_coverage_and_weighted_fabric_usage(self):
         months = ["26年7月", "26年8月", "26年9月", "26年10月"]
         forecast = {
