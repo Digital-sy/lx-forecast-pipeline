@@ -1,12 +1,16 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
-"""导出“当前颜色体系未收录，但另一颜色体系有候选”的精确 SKU 清单（只读）。
+"""导出“SKU 明确颜色体系未收录，但另一颜色体系有候选”的精确 SKU 清单（只读）。
+
+只审核 SKU 自身在领星明确填写为 A2023/B2024 的记录。颜色体系为空、异常或
+多值的 SKU 不进入本清单，而应进入“颜色体系待定 SKU 清单”。禁止使用同 SPU、
+同颜色代码或同款其他尺码推断颜色体系。
 
 判定示例：
-- SKU 当前识别为 A2023；A2023 中查不到颜色代码 CD；B2024 中能查到“科尔多瓦红”。
-- SKU 当前识别为 B2024；B2024 中查不到颜色代码；A2023 中存在候选。
+- SKU 领星原始标签为 A2023；A2023 中查不到颜色代码 CD；B2024 中能查到“科尔多瓦红”。
+- SKU 领星原始标签为 B2024；B2024 中查不到颜色代码；A2023 中存在候选。
 
-输出包含产品快照信息、颜色体系识别来源和全历史/当年累计/近12个月销量，
+输出包含产品快照信息、领星原始标签和全历史/当年累计/近12个月销量，
 用于区分“SKU 颜色体系可能打错”与“颜色编制表需要补录”。
 """
 from __future__ import annotations
@@ -25,7 +29,11 @@ if str(ROOT) not in sys.path:
 from common import get_logger
 from common.database import db_cursor
 from jobs.feishu.color_mapping_catalog import ColorMappingCatalog, SUPPORTED_SYSTEMS
-from jobs.feishu.color_system_resolver import ColorSystemResolver, normalize_sku
+from jobs.feishu.color_system_resolver import (
+    ColorSystemResolver,
+    extract_color_system,
+    normalize_sku,
+)
 
 logger = get_logger("color_system_mapping_mismatch_skus")
 OUTPUT_DIR = ROOT / "exports"
@@ -115,10 +123,16 @@ def find_mismatches(
     result: list[dict[str, Any]] = []
 
     for sku, row in snapshot.items():
+        raw_system = extract_color_system(row.get("custom_fields_json"))
+        if raw_system not in SUPPORTED_SYSTEMS:
+            continue
+
         identity = resolver.resolve(sku, str(row.get("spu") or ""))
         system = identity.color_system
-        if system not in SUPPORTED_SYSTEMS:
-            continue
+        if system != raw_system:
+            raise RuntimeError(
+                f"SKU精确颜色体系解析不一致：{sku}，原始={raw_system}，解析={system}"
+            )
 
         other_system = "B2024" if system == "A2023" else "A2023"
         current_entry = catalog.lookup(system, identity.color_code)
@@ -131,7 +145,8 @@ def find_mismatches(
             "SKU": sku,
             "SPU": identity.spu,
             "产品名称": row.get("product_name") or "",
-            "当前颜色体系": system,
+            "领星原始颜色体系": raw_system,
+            "系统最终颜色体系": system,
             "颜色代码": identity.color_code,
             "当前体系中文候选": "",
             "另一颜色体系": other_system,
@@ -143,8 +158,8 @@ def find_mismatches(
             "当年累计销量": round(float(sku_sales.get("当年累计", 0)), 2),
             "近12个月销量": round(float(sku_sales.get("近12个月", 0)), 2),
             "建议核对方向": (
-                f"核对该 SKU 是否应改为 {other_system}；"
-                f"若当前 {system} 标签无误，则需在 {system} 颜色编制表补录代码 {identity.color_code}"
+                f"领星已明确标记为 {system}。核对该 SKU 是否应改为 {other_system}；"
+                f"若 {system} 标签无误，则需在 {system} 颜色编制表补录代码 {identity.color_code}"
             ),
         })
 
@@ -152,7 +167,7 @@ def find_mismatches(
         -float(item["当年累计销量"]),
         -float(item["近12个月销量"]),
         -float(item["全历史销量"]),
-        str(item["当前颜色体系"]),
+        str(item["领星原始颜色体系"]),
         str(item["颜色代码"]),
         str(item["SKU"]),
     ))
@@ -165,20 +180,20 @@ def main() -> None:
     sales = load_sales(today)
     rows = find_mismatches(snapshot, sales)
 
-    a_to_b = sum(1 for row in rows if row["当前颜色体系"] == "A2023")
-    b_to_a = sum(1 for row in rows if row["当前颜色体系"] == "B2024")
+    a_to_b = sum(1 for row in rows if row["领星原始颜色体系"] == "A2023")
+    b_to_a = sum(1 for row in rows if row["领星原始颜色体系"] == "B2024")
     with_sales = sum(1 for row in rows if float(row["全历史销量"]) > 0)
     ytd_sales = sum(float(row["当年累计销量"]) for row in rows)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output = OUTPUT_DIR / (
-        "当前体系未收录但另一体系有候选_SKU清单_"
+        "明确标签当前体系未收录但另一体系有候选_SKU清单_"
         + datetime.now().strftime("%Y%m%d_%H%M%S")
         + ".csv"
     )
     headers = [
-        "SKU", "SPU", "产品名称", "当前颜色体系", "颜色代码",
-        "当前体系中文候选", "另一颜色体系", "另一体系中文候选",
+        "SKU", "SPU", "产品名称", "领星原始颜色体系", "系统最终颜色体系",
+        "颜色代码", "当前体系中文候选", "另一颜色体系", "另一体系中文候选",
         "另一体系英文候选", "另一体系潘通色号", "颜色体系识别来源",
         "全历史销量", "当年累计销量", "近12个月销量", "建议核对方向",
     ]
@@ -188,8 +203,9 @@ def main() -> None:
         writer.writerows(rows)
 
     print("\n" + "=" * 76)
-    print("当前体系未收录、另一体系有候选的 SKU 清单")
+    print("领星明确标签：当前体系未收录、另一体系有候选的 SKU 清单")
     print("=" * 76)
+    print("口径：仅保留SKU自身明确填写A2023/B2024的记录，不做任何SPU推断")
     print(f"SKU总数：{len(rows):,}")
     print(f"A2023未收录、B2024有候选：{a_to_b:,}")
     print(f"B2024未收录、A2023有候选：{b_to_a:,}")
