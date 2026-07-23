@@ -2,6 +2,10 @@
 # -*- coding: utf-8 -*-
 """SKU 颜色体系识别与安全汇总键。
 
+颜色体系属于 SKU 级主数据，只接受当前 SKU 自身明确填写的 A2023/B2024。
+禁止根据同 SPU、同颜色代码或同款其他尺码推断颜色体系。原始字段为空、
+异常或存在多个不同值时统一标记为“待定”。
+
 颜色代码必须和颜色体系一起使用。A2023-BK 与 B2024-BK 是两个不同的
 颜色身份，除非后续存在明确的人工归并规则，否则不能自动合并。
 """
@@ -10,9 +14,8 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, Mapping, Tuple
 
 COLOR_FIELD_ID = "207722905719915521"
 COLOR_FIELD_NAME = "颜色体系"
@@ -71,6 +74,7 @@ def parse_custom_fields(value: Any) -> list[dict[str, Any]]:
 
 
 def extract_color_system(custom_fields: Any) -> str:
+    """读取 SKU 自身颜色体系；空白、无效值或多值均返回空字符串。"""
     values: list[str] = []
     for item in parse_custom_fields(custom_fields):
         field_id = clean(item.get("id"))
@@ -84,7 +88,7 @@ def extract_color_system(custom_fields: Any) -> str:
                 break
         if value and value not in values:
             values.append(value)
-    return values[0] if len(values) == 1 else ""
+    return values[0] if len(values) == 1 and values[0] in SUPPORTED_SYSTEMS else ""
 
 
 @dataclass(frozen=True)
@@ -98,38 +102,18 @@ class ColorIdentity:
 
 
 class ColorSystemResolver:
-    """按精确 SKU、同 SPU+颜色码、同 SPU 三层安全识别颜色体系。"""
+    """只按当前 SKU 自身的明确标签识别颜色体系。"""
 
     def __init__(self, rows: Iterable[Mapping[str, Any]] = ()) -> None:
         self._exact: Dict[str, str] = {}
-        pair_systems: Dict[Tuple[str, str], set[str]] = defaultdict(set)
-        spu_systems: Dict[str, set[str]] = defaultdict(set)
 
         for row in rows:
             sku = normalize_sku(row.get("sku"))
             if not sku:
                 continue
-            spu = clean(row.get("spu")).upper() or extract_spu_from_sku(sku)
-            code = extract_raw_color_code(sku)
             system = extract_color_system(row.get("custom_fields_json"))
-            if system not in SUPPORTED_SYSTEMS:
-                continue
-            self._exact[sku] = system
-            if spu and code:
-                pair_systems[(spu, code)].add(system)
-            if spu:
-                spu_systems[spu].add(system)
-
-        self._pair_unique = {
-            key: next(iter(values))
-            for key, values in pair_systems.items()
-            if len(values) == 1
-        }
-        self._spu_unique = {
-            key: next(iter(values))
-            for key, values in spu_systems.items()
-            if len(values) == 1
-        }
+            if system in SUPPORTED_SYSTEMS:
+                self._exact[sku] = system
 
     @classmethod
     def from_database(cls, strict: bool = True) -> "ColorSystemResolver":
@@ -165,16 +149,11 @@ class ColorSystemResolver:
         color_code = extract_raw_color_code(normalized_sku) or "UNKNOWN"
 
         system = self._exact.get(normalized_sku)
-        source = "SKU精确标签"
-        if not system:
-            system = self._pair_unique.get((normalized_spu, color_code))
-            source = "同SPU同颜色码唯一体系"
-        if not system:
-            system = self._spu_unique.get(normalized_spu)
-            source = "同SPU唯一体系"
-        if not system:
+        if system:
+            source = "SKU精确标签"
+        else:
             system = UNKNOWN_SYSTEM
-            source = "未唯一识别"
+            source = "SKU颜色体系为空或无有效标签"
 
         aggregate_code = f"{system}:{color_code}"
         return ColorIdentity(
