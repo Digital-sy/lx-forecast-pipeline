@@ -9,8 +9,8 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import os
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -156,6 +156,20 @@ def _candidate_project_paths() -> list[Path]:
     return result
 
 
+def _load_rows_from_file(mapping_file: Path) -> Sequence[Sequence[Any]]:
+    spec = importlib.util.spec_from_file_location(
+        "_lx_color_system_mapping_data", mapping_file
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"无法创建模块加载器: {mapping_file}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    rows = getattr(module, "COLOR_MAPPING_ROWS", None)
+    if not rows:
+        raise RuntimeError(f"COLOR_MAPPING_ROWS 为空: {mapping_file}")
+    return rows
+
+
 def load_mapping_rows(strict: bool = True) -> Sequence[Sequence[Any]]:
     errors: list[str] = []
     try:
@@ -167,19 +181,13 @@ def load_mapping_rows(strict: bool = True) -> Sequence[Sequence[Any]]:
         errors.append(f"直接导入失败: {exc}")
 
     for project_path in _candidate_project_paths():
-        if not project_path.exists():
+        mapping_file = project_path / "lx_product_m" / "color_system_mapping_data.py"
+        if not mapping_file.exists():
             continue
-        path_text = str(project_path)
-        if path_text not in sys.path:
-            sys.path.insert(0, path_text)
         try:
-            sys.modules.pop("lx_product_m.color_system_mapping_data", None)
-            module = importlib.import_module("lx_product_m.color_system_mapping_data")
-            rows = getattr(module, "COLOR_MAPPING_ROWS")
-            if rows:
-                return rows
+            return _load_rows_from_file(mapping_file)
         except Exception as exc:  # pragma: no cover - depends on deployment path
-            errors.append(f"{project_path}: {exc}")
+            errors.append(f"{mapping_file}: {exc}")
 
     message = (
         "无法读取颜色编制表。请确认 /opt/apps/lx-product-m 存在，或设置 "
