@@ -15,6 +15,11 @@ from jobs.feishu.color_mapping_catalog import ColorMappingCatalog
 from jobs.feishu.color_system_resolver import ColorSystemResolver
 
 logger = get_logger("fabric_forecast_named_colors")
+
+# 在任何包装层临时改写 base.main 之前，保留原始函数引用。
+# 否则 generate_procurement_report_named_colors 将 base.main 指向本模块 main 后，
+# 这里再次调用 base.main 会无限递归。
+_ORIGINAL_MAIN = base.main
 _ORIGINAL_GENERATE_RECORDS = base.generate_records
 
 
@@ -48,7 +53,8 @@ def main(resolver: ColorSystemResolver | None = None) -> List[dict[str, Any]]:
     base.generate_records = generate_records
     base.base.get_color_map = lambda: {}
     try:
-        return base.main(resolver)
+        # 必须调用模块加载时保存的原始 main，不能调用可能已被包装层替换的 base.main。
+        return _ORIGINAL_MAIN(resolver)
     finally:
         base.generate_records = original_generate
         base.base.get_color_map = original_color_map
