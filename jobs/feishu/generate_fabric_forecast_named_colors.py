@@ -3,7 +3,7 @@
 """用颜色编制表中文名称增强颜色体系面料预估。
 
 此模块复用 ``generate_fabric_forecast_color_system`` 的全部计算，只替换颜色展示：
-``颜色`` 字段写成“中文颜色名称｜颜色体系”，不再使用领星产品名称颜色。
+``颜色`` 字段写成“中文颜色名称｜颜色体系”，不再读取领星产品名称颜色。
 """
 from __future__ import annotations
 
@@ -37,18 +37,21 @@ def generate_records(*args: Any, **kwargs: Any) -> List[dict[str, Any]]:
             unresolved += 1
     logger.info(
         f"颜色编制表名称写入：主映射 {matched} 条，体系待定 {unresolved} 条，"
-        f"不再读取领星颜色名称"
+        f"未读取领星颜色名称"
     )
     return records
 
 
 def main(resolver: ColorSystemResolver | None = None) -> List[dict[str, Any]]:
-    original = base.generate_records
+    original_generate = base.generate_records
+    original_color_map = base.base.get_color_map
     base.generate_records = generate_records
+    base.base.get_color_map = lambda: {}
     try:
         return base.main(resolver)
     finally:
-        base.generate_records = original
+        base.generate_records = original_generate
+        base.base.get_color_map = original_color_map
 
 
 if __name__ == "__main__":
