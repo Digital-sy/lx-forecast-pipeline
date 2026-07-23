@@ -29,13 +29,47 @@ class ColorResolverTests(unittest.TestCase):
             },
         ]
         resolver = ColorSystemResolver(rows)
-        a = resolver.resolve("SP1-BK-M")
-        b = resolver.resolve("SP2-BK-M")
+        a = resolver.resolve("SP1-BK-S")
+        b = resolver.resolve("SP2-BK-S")
         self.assertEqual(a.aggregate_code, "A2023:BK")
         self.assertEqual(b.aggregate_code, "B2024:BK")
         self.assertNotEqual(a.aggregate_code, b.aggregate_code)
 
-    def test_style_segment_uses_real_color_code(self):
+    def test_empty_sku_does_not_inherit_same_spu_system(self):
+        rows = [
+            {
+                "sku": "SB011-BR-S",
+                "spu": "SB011",
+                "custom_fields_json": json.dumps([
+                    {"name": "颜色体系", "val_text": "A2023"}
+                ], ensure_ascii=False),
+            },
+            {
+                "sku": "SB011-BW-S",
+                "spu": "SB011",
+                "custom_fields_json": json.dumps([
+                    {"name": "颜色体系", "val_text": ""}
+                ], ensure_ascii=False),
+            },
+        ]
+        identity = ColorSystemResolver(rows).resolve("SB011-BW-S", "SB011")
+        self.assertEqual(identity.color_system, "待定")
+        self.assertEqual(identity.aggregate_code, "待定:BW")
+        self.assertEqual(identity.source, "SKU颜色体系为空或无有效标签")
+
+    def test_missing_size_does_not_inherit_same_spu_same_color(self):
+        rows = [{
+            "sku": "SP1-BK-S",
+            "spu": "SP1",
+            "custom_fields_json": json.dumps([
+                {"name": "颜色体系", "val_text": "A2023"}
+            ], ensure_ascii=False),
+        }]
+        identity = ColorSystemResolver(rows).resolve("SP1-BK-M", "SP1")
+        self.assertEqual(identity.color_system, "待定")
+        self.assertEqual(identity.aggregate_code, "待定:BK")
+
+    def test_style_segment_uses_real_color_code_for_exact_sku(self):
         rows = [{
             "sku": "KZ291-SHORT-BK-S",
             "spu": "KZ291",
@@ -43,9 +77,31 @@ class ColorResolverTests(unittest.TestCase):
                 {"name": "颜色体系", "val_text": "A2023"}
             ], ensure_ascii=False),
         }]
-        identity = ColorSystemResolver(rows).resolve("KZ291-SHORT-BK-M")
+        identity = ColorSystemResolver(rows).resolve("KZ291-SHORT-BK-S")
         self.assertEqual(identity.color_code, "BK")
         self.assertEqual(identity.color_system, "A2023")
+
+    def test_invalid_or_multiple_system_values_are_pending(self):
+        rows = [
+            {
+                "sku": "SP3-WH-S",
+                "spu": "SP3",
+                "custom_fields_json": json.dumps([
+                    {"name": "颜色体系", "val_text": "A2023"},
+                    {"name": "颜色体系", "val_text": "B2024"},
+                ], ensure_ascii=False),
+            },
+            {
+                "sku": "SP4-WH-S",
+                "spu": "SP4",
+                "custom_fields_json": json.dumps([
+                    {"name": "颜色体系", "val_text": "历史体系"}
+                ], ensure_ascii=False),
+            },
+        ]
+        resolver = ColorSystemResolver(rows)
+        self.assertEqual(resolver.resolve("SP3-WH-S").color_system, "待定")
+        self.assertEqual(resolver.resolve("SP4-WH-S").color_system, "待定")
 
 
 class ProcurementLogicTests(unittest.TestCase):
