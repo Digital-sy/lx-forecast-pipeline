@@ -80,6 +80,17 @@ class ColorMappingCatalog:
     def lookup(self, system: str, code: str) -> ColorMappingEntry | None:
         return self.primary.get((clean(system), normalize_code(code)))
 
+    def entries_for_code(
+        self, system: str, code: str
+    ) -> tuple[ColorMappingEntry, ...]:
+        """返回同体系同代码的主映射及显式历史别名。"""
+        return tuple(
+            self.by_key.get(
+                (clean(system), normalize_code(code)),
+                (),
+            )
+        )
+
     def candidates(self, code: str) -> dict[str, ColorMappingEntry | None]:
         code = normalize_code(code)
         return {system: self.lookup(system, code) for system in SUPPORTED_SYSTEMS}
