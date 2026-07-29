@@ -334,6 +334,59 @@ lxpm_product_category_snapshot
 
 如果 `lxpm_product_category_snapshot` 不存在，流水线仍可继续，但“颜色-领星”字段为空。
 
+### SKU 颜色销量 → 当前有效面料-颜色备货对照（只读）
+
+`jobs/feishu/fabric_color_stocking.py` 在现有预测与面料映射后增加一层只读核对：
+
+```text
+预测对比表_SKU
+  + lxpm_product_category_snapshot（品名、颜色体系）
+  + 面料核价表（SPU → 面料）
+  + 飞书当前有效面料颜色清单
+  → 面料-颜色备货 / 未匹配 / 优先补标
+```
+
+匹配优先级固定为：
+
+1. SKU `颜色中文名` = 清单 `颜色`；
+2. SKU `颜色编码` = 清单 `领星新颜色缩写`；
+3. 使用 `颜色体系 + 颜色编码/中文名` 经 A2023/B2024 编制表精确消歧。
+
+该层不做模糊匹配、别名归一、大小写归一或空格删除。匹配失败会保留在
+“未匹配清单”；其中因 `颜色体系=待定` 无法消歧的 SKU 另按预估销量降序
+输出到“优先补标清单”。
+
+为兼容当前主分支尚未把四个颜色字段持久化到 `预测对比表_SKU` 的情况，
+兼容读取会显式复用既有规则：`normalize_sku`、`parse_lingxing_color`、
+`get_fabric_price_data` 和 `ColorMappingCatalog`。这些上游处理会在“核对摘要”
+的 `source_adapter_disclosures` 单独列出；清单直接匹配本身仍保持字面精确。
+
+手工 dry-run：
+
+```bash
+python -m jobs.feishu.fabric_color_stocking --dry-run \
+  --output-dir /opt/apps/pythondata/exports
+```
+
+输出 Excel 包含“面料-颜色备货”“未匹配清单”“优先补标清单”和“核对摘要”，
+同目录另写一份 JSON 核对指标。任务只读 MySQL/飞书，不写回远端，也尚未加入
+`run_procurement_pipeline.sh` 的生产执行步骤；人工核验通过后再安排固化。
+
+“预估备货量”沿用本需求的颜色销量件数口径，不换算米数；同一 SPU 若在
+`面料核价表` 关联多种面料，其预估销量会分别计入每种面料。需要单件用量、
+损耗和米数口径时，继续使用现有“面料预估明细”。
+
+飞书清单资源坐标可用以下环境变量覆盖：
+
+```text
+FABRIC_COLOR_CATALOG_BASE_TOKEN
+FABRIC_COLOR_CATALOG_TABLE_ID
+FABRIC_COLOR_CATALOG_VIEW_ID
+FABRIC_COLOR_LINKED_TABLE_ID
+```
+
+飞书认证继续使用已有 `FEISHU_APP_ID` / `FEISHU_APP_SECRET` 环境变量，凭证不写入代码。
+
 ---
 
 ## 9. 其他生产入口

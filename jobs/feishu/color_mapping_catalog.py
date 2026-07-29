@@ -43,6 +43,7 @@ class ColorMappingCatalog:
 
     def __init__(self, rows: Iterable[Sequence[Any]]) -> None:
         by_key: dict[tuple[str, str], list[ColorMappingEntry]] = {}
+        by_name: dict[tuple[str, str], list[ColorMappingEntry]] = {}
         for raw in rows:
             if len(raw) < 6:
                 continue
@@ -66,6 +67,10 @@ class ColorMappingCatalog:
             )
         self.by_key = by_key
         self.primary = {key: values[0] for key, values in by_key.items() if values}
+        for (system, _), entry in self.primary.items():
+            if entry.chinese:
+                by_name.setdefault((system, entry.chinese), []).append(entry)
+        self.by_name = by_name
 
     @classmethod
     def from_runtime(cls, strict: bool = True) -> "ColorMappingCatalog":
@@ -78,6 +83,12 @@ class ColorMappingCatalog:
     def candidates(self, code: str) -> dict[str, ColorMappingEntry | None]:
         code = normalize_code(code)
         return {system: self.lookup(system, code) for system in SUPPORTED_SYSTEMS}
+
+    def entries_for_name(self, system: str, chinese: str) -> tuple[ColorMappingEntry, ...]:
+        """按颜色体系+中文名返回主映射候选，不跨体系推断。"""
+        # 中文名匹配必须保持字面值；不能在这一层静默 trim 后命中。
+        literal_name = "" if chinese is None else str(chinese)
+        return tuple(self.by_name.get((clean(system), literal_name), ()))
 
     def describe(self, system: str, code: str) -> dict[str, str]:
         """返回中文名称、展示名称和待定候选。

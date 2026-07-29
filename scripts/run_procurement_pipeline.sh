@@ -95,6 +95,7 @@ echo "[预检] Python 核心模块语法检查..." >> "$LOG_FILE"
     "$PROJECT_DIR/jobs/feishu/generate_procurement_report_named_colors.py" \
     "$PROJECT_DIR/jobs/feishu/export_procurement_excel_color_system.py" \
     "$PROJECT_DIR/jobs/feishu/export_fabric_color_order_forecast.py" \
+    "$PROJECT_DIR/jobs/feishu/fabric_color_stocking.py" \
     >> "$LOG_FILE" 2>&1
 PREFLIGHT_EXIT=$?
 if [ "$PREFLIGHT_EXIT" -ne 0 ]; then
