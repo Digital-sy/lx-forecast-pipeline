@@ -7,6 +7,7 @@ from openpyxl import load_workbook
 
 from jobs.feishu.color_mapping_catalog import ColorMappingCatalog
 from jobs.feishu.fabric_color_stocking import (
+    MATCH_CATALOG_LABEL,
     MATCH_CODE,
     MATCH_NAME,
     MATCH_SYSTEM,
@@ -66,6 +67,70 @@ class FabricColorMatchingTests(unittest.TestCase):
             self.governance,
         )
         self.assertEqual(decision.method, MATCH_CODE)
+
+    def test_code_precedes_catalog_label_when_both_match(self):
+        rows = [
+            CatalogRow("面料A", "2#黑色", "OTHER"),
+            CatalogRow("面料A", "清单当前名称", "BK"),
+        ]
+        decision = match_catalog_row(
+            forecast(
+                color_name="黑色",
+                color_code="BK",
+                color_system="待定",
+            ),
+            "面料A",
+            CatalogIndex(rows),
+            self.governance,
+        )
+        self.assertEqual(decision.method, MATCH_CODE)
+        self.assertEqual(decision.row.color_name, "清单当前名称")
+
+    def test_catalog_number_prefix_is_explicit_match_method(self):
+        rows = [CatalogRow("面料A", "2#黑色", "NEW-BK")]
+        decision = match_catalog_row(
+            forecast(
+                color_name="黑色",
+                color_code="OLD",
+                color_system="待定",
+            ),
+            "面料A",
+            CatalogIndex(rows),
+            self.governance,
+        )
+        self.assertEqual(decision.method, MATCH_CATALOG_LABEL)
+        self.assertEqual(decision.row.color_name, "2#黑色")
+
+    def test_catalog_dash_prefix_is_explicit_match_method(self):
+        rows = [CatalogRow("面料A", "037-拿铁", "")]
+        decision = match_catalog_row(
+            forecast(
+                color_name="拿铁",
+                color_code="OLD",
+                color_system="待定",
+            ),
+            "面料A",
+            CatalogIndex(rows),
+            self.governance,
+        )
+        self.assertEqual(decision.method, MATCH_CATALOG_LABEL)
+
+    def test_catalog_parsed_name_does_not_hide_ambiguity(self):
+        rows = [
+            CatalogRow("面料A", "1#黑色", ""),
+            CatalogRow("面料A", "2#黑色", ""),
+        ]
+        decision = match_catalog_row(
+            forecast(
+                color_name="黑色",
+                color_code="OLD",
+                color_system="待定",
+            ),
+            "面料A",
+            CatalogIndex(rows),
+            self.governance,
+        )
+        self.assertEqual(decision.reason_code, REASON_AMBIGUOUS)
 
     def test_system_mapping_resolves_code_to_current_chinese(self):
         rows = [CatalogRow("面料A", "黑色", "NEW-BK")]
@@ -177,6 +242,12 @@ class FabricColorMatchingTests(unittest.TestCase):
         self.assertEqual(result.metrics["fully_matched_sku_count"], 2)
         self.assertEqual(result.metrics["match_method_counts"][MATCH_NAME], 1)
         self.assertEqual(result.metrics["match_method_counts"][MATCH_CODE], 1)
+        self.assertEqual(result.metrics["catalog_fabric_name_count"], 1)
+        self.assertEqual(result.metrics["forecast_fabric_name_count"], 1)
+        self.assertEqual(
+            result.metrics["in_scope_fabric_assignment_match_rate_pct"],
+            100.0,
+        )
 
     def test_pending_subset_is_sorted_by_forecast_qty(self):
         rows = [CatalogRow("面料A", "黑色", "NEW")]

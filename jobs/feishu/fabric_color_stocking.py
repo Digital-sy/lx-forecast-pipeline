@@ -24,6 +24,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -63,9 +64,15 @@ DEFAULT_LX_CODE_FIELD = "领星新颜色缩写"
 DEFAULT_LINKED_FABRIC_FIELD = "面料品名"
 
 MATCH_NAME = "中文名直连"
+MATCH_CATALOG_LABEL = "清单色号解析"
 MATCH_CODE = "缩写"
 MATCH_SYSTEM = "体系消歧"
-MATCH_METHOD_ORDER = (MATCH_NAME, MATCH_CODE, MATCH_SYSTEM)
+MATCH_METHOD_ORDER = (
+    MATCH_NAME,
+    MATCH_CODE,
+    MATCH_CATALOG_LABEL,
+    MATCH_SYSTEM,
+)
 
 REASON_NO_FABRIC = "品名/SPU无面料映射"
 REASON_FABRIC_INACTIVE = "面料不在当前清单"
@@ -89,6 +96,31 @@ CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
 def _quantity(value: float) -> int | float:
     value = round(float(value or 0), 4)
     return int(value) if value.is_integer() else value
+
+
+CATALOG_COLOR_PATTERNS = (
+    ("数字#前缀", re.compile(r"^\d+#(.+)$")),
+    ("数字-前缀", re.compile(r"^\d+[-－](.+)$")),
+)
+
+
+def parse_catalog_color_label(value: Any) -> tuple[str, str]:
+    """显式解析飞书颜色字段中的业务色号前缀。
+
+    仅接受两种确定性结构：
+
+    - ``2#黑色`` -> ``黑色``
+    - ``037-拿铁`` -> ``拿铁``
+
+    不执行 strip、大小写归一、别名替换或模糊匹配。没有命中明确结构时
+    保留原值。该结果使用独立匹配方式“清单色号解析”，不会伪装成原值直连。
+    """
+    raw = "" if value is None else str(value)
+    for rule, pattern in CATALOG_COLOR_PATTERNS:
+        match = pattern.fullmatch(raw)
+        if match:
+            return match.group(1), rule
+    return raw, "原值"
 
 
 @dataclass(frozen=True)
@@ -161,13 +193,24 @@ class CatalogIndex:
         self.raw_association_count = len(raw_rows)
 
         self.by_name: MutableMapping[tuple[str, str], list[CatalogRow]] = defaultdict(list)
+        self.by_parsed_name: MutableMapping[
+            tuple[str, str], list[CatalogRow]
+        ] = defaultdict(list)
         self.by_code: MutableMapping[tuple[str, str], list[CatalogRow]] = defaultdict(list)
         self.by_fabric: MutableMapping[str, list[CatalogRow]] = defaultdict(list)
         self.global_names: set[str] = set()
+        self.parsed_color_rule_counts: Counter[str] = Counter()
         pair_identities: MutableMapping[tuple[str, str], list[CatalogRow]] = defaultdict(list)
 
         for row in self.rows:
             self.by_name[(row.fabric_name, row.color_name)].append(row)
+
+            parsed_name, parsed_rule = parse_catalog_color_label(row.color_name)
+            if parsed_name and parsed_name != row.color_name:
+                self.by_parsed_name[(row.fabric_name, parsed_name)].append(row)
+                self.global_names.add(parsed_name)
+                self.parsed_color_rule_counts[parsed_rule] += row.raw_row_count
+
             if row.lingxing_code:
                 self.by_code[(row.fabric_name, row.lingxing_code)].append(row)
             self.by_fabric[row.fabric_name].append(row)
@@ -205,6 +248,16 @@ class CatalogIndex:
                 {(row.fabric_name, row.color_name) for row in self.rows}
             ),
             "rows_with_lingxing_code": rows_with_code,
+            "parsed_color_label_row_count": sum(
+                self.parsed_color_rule_counts.values()
+            ),
+            "parsed_color_rule_counts": dict(
+                sorted(self.parsed_color_rule_counts.items())
+            ),
+            "parsed_color_label_policy": (
+                "仅解析数字#中文名、数字-中文名；"
+                "不做strip、别名、大小写或模糊归一"
+            ),
             "exact_duplicate_business_group_count": len(self.duplicate_business_rows),
             "exact_duplicate_business_rows": self.duplicate_business_rows,
             "ambiguous_fabric_color_pair_count": len(self.ambiguous_pairs),
@@ -225,7 +278,7 @@ def match_catalog_row(
     index: CatalogIndex,
     governance_catalog: ColorMappingCatalog,
 ) -> MatchDecision:
-    """严格按中文名→缩写→体系映射匹配单个 SKU-面料关联。"""
+    """严格按原值中文名→清单色号解析→缩写→体系映射匹配。"""
     if forecast.field_issue:
         return MatchDecision(
             None,
@@ -256,6 +309,22 @@ def match_catalog_row(
     if len(code_candidates) == 1:
         return MatchDecision(code_candidates[0], method=MATCH_CODE)
 
+    parsed_name_candidates = (
+        _unique(
+            index.by_parsed_name.get(
+                (fabric_name, forecast.color_name),
+                (),
+            )
+        )
+        if forecast.color_name
+        else []
+    )
+    if len(parsed_name_candidates) == 1:
+        return MatchDecision(
+            parsed_name_candidates[0],
+            method=MATCH_CATALOG_LABEL,
+        )
+
     system_candidates: list[CatalogRow] = []
     mapping_found = False
     if forecast.color_system in SUPPORTED_SYSTEMS:
@@ -266,7 +335,16 @@ def match_catalog_row(
             mapping_found = True
             if mapped_by_code.chinese:
                 system_candidates.extend(
-                    index.by_name.get((fabric_name, mapped_by_code.chinese), ())
+                    index.by_name.get(
+                        (fabric_name, mapped_by_code.chinese),
+                        (),
+                    )
+                )
+                system_candidates.extend(
+                    index.by_parsed_name.get(
+                        (fabric_name, mapped_by_code.chinese),
+                        (),
+                    )
                 )
 
         if forecast.color_name:
@@ -284,7 +362,12 @@ def match_catalog_row(
         if len(system_candidates) == 1:
             return MatchDecision(system_candidates[0], method=MATCH_SYSTEM)
 
-    if len(name_candidates) > 1 or len(code_candidates) > 1 or len(system_candidates) > 1:
+    if (
+        len(name_candidates) > 1
+        or len(parsed_name_candidates) > 1
+        or len(code_candidates) > 1
+        or len(system_candidates) > 1
+    ):
         return MatchDecision(
             None,
             reason_code=REASON_AMBIGUOUS,
@@ -324,6 +407,9 @@ def aggregate_stocking(
 ) -> StockingResult:
     """聚合预估销量并保留所有未匹配 SKU。"""
     index = CatalogIndex(catalog_rows, source_record_count=source_record_count)
+    catalog_fabric_names = set(index.by_fabric)
+    forecast_fabric_names: set[str] = set()
+
     buckets: dict[
         tuple[str, str, str],
         dict[str, Any],
@@ -339,6 +425,8 @@ def aggregate_stocking(
 
     for forecast in forecasts:
         fabrics = list(dict.fromkeys(fabrics_by_spu.get(forecast.spu, ())))
+        forecast_fabric_names.update(fabrics)
+
         if not fabrics:
             total_assignments += 1
             decision = MatchDecision(
@@ -450,6 +538,21 @@ def aggregate_stocking(
         matched_assignments / total_assignments * 100, 2
     ) if total_assignments else 0.0
 
+    no_fabric_assignment_count = reason_counts.get(REASON_NO_FABRIC, 0)
+    out_of_scope_assignment_count = reason_counts.get(
+        REASON_FABRIC_INACTIVE,
+        0,
+    )
+    in_scope_assignment_count = (
+        total_assignments
+        - no_fabric_assignment_count
+        - out_of_scope_assignment_count
+    )
+    in_scope_assignment_rate = round(
+        matched_assignments / in_scope_assignment_count * 100,
+        2,
+    ) if in_scope_assignment_count else 0.0
+
     metrics = {
         "input_sku_count": len(input_skus),
         "input_forecast_qty": _quantity(
@@ -463,6 +566,18 @@ def aggregate_stocking(
         "matched_fabric_assignment_count": matched_assignments,
         "unmatched_fabric_assignment_count": total_assignments - matched_assignments,
         "fabric_assignment_match_rate_pct": assignment_rate,
+        "forecast_fabric_name_count": len(forecast_fabric_names),
+        "catalog_fabric_name_count": len(catalog_fabric_names),
+        "exact_fabric_name_overlap_count": len(
+            forecast_fabric_names & catalog_fabric_names
+        ),
+        "out_of_scope_fabric_name_count": len(
+            forecast_fabric_names - catalog_fabric_names
+        ),
+        "no_fabric_mapping_assignment_count": no_fabric_assignment_count,
+        "out_of_scope_fabric_assignment_count": out_of_scope_assignment_count,
+        "in_scope_fabric_assignment_count": in_scope_assignment_count,
+        "in_scope_fabric_assignment_match_rate_pct": in_scope_assignment_rate,
         "matched_fabric_assignment_forecast_qty": _quantity(
             matched_assignment_qty
         ),
@@ -1007,7 +1122,8 @@ async def run_read_only(
         "预测表缺少颜色字段时复用 parse_lingxing_color：从品名提取“数字#中文名”并删除其中空白",
         "SPU→面料复用 get_fabric_price_data：仅 strip 首尾空白",
         "体系消歧复用 ColorMappingCatalog：颜色编码转大写并删除空白；匹配方式单列为“体系消歧”",
-        "清单直接中文名/缩写匹配不做 strip、casefold、模糊匹配或别名归一",
+        "清单原值中文名/缩写匹配不做 strip、casefold、模糊匹配或别名归一",
+        "清单颜色另显式解析“数字#中文名”“数字-中文名”；匹配方式独立标记为“清单色号解析”",
     ]
     result.metrics["generated_at"] = datetime.now().isoformat(timespec="seconds")
     workbook_path, metrics_path = export_workbook(result, output_dir)
