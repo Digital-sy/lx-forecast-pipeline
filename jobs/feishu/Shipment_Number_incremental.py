@@ -2,10 +2,15 @@
 # -*- coding: utf-8 -*-
 """货件箱明细增量同步入口。
 
-复用原有 ``Shipment_Number.py`` 的完整业务逻辑，只对领星箱明细请求增加缓存：
-- 已结束且飞书已有记录的货件：直接复用飞书现有箱记录，不再请求领星箱明细接口；
-- 新货件、进行中货件、飞书没有历史记录的已结束货件：仍按原逻辑请求接口；
-- 最终仍交给原脚本全量刷新飞书，避免已结束货件从多维表中消失。
+复用原有 ``Shipment_Number.py`` 的货件列表、箱明细加工和飞书写入逻辑，
+但把高耗时的箱明细接口改为“按需抓取”：
+
+1. 每次都调用货件列表接口，刷新货件状态、时间、地址等货件级信息；
+2. 飞书中已有该货件箱记录时，默认直接复用，不再调用箱明细接口；
+3. 飞书没有该货件历史箱记录时，调用一次箱明细接口建立缓存；
+4. WORKING / READY_TO_SHIP 状态若 gmt_modified 发生变化，补抓一次箱明细；
+5. SHIPPED 及之后的状态只刷新货件列表数据，不再重复读取箱结构；
+6. 最终仍全量刷新飞书，避免缓存货件记录丢失。
 """
 from __future__ import annotations
 
@@ -19,19 +24,10 @@ from typing import Any, DefaultDict, Dict, Iterable, List, Optional, Set
 from jobs.feishu import Shipment_Number as legacy
 
 
-# 保守判定：只缓存明确不会再变化的终态，不把 SHIPPED / RECEIVING 视为结束。
-TERMINAL_STATUSES: Set[str] = {
-    "CLOSED",
-    "DELETED",
-    "CANCELLED",
-    "CANCELED",
-    "COMPLETED",
-    "FINISHED",
-    "DONE",
-    "已关闭",
-    "已取消",
-    "已完成",
-    "已结束",
+# 这两个状态下仍可能修改装箱结构；仅在 gmt_modified 比缓存更新时补抓。
+BOX_MUTABLE_STATUSES: Set[str] = {
+    "WORKING",
+    "READY_TO_SHIP",
 }
 
 DATE_FIELDS = {
@@ -82,16 +78,18 @@ SHIPMENT_LEVEL_FIELDS = {
 
 
 class IncrementalState:
-    """保存当前运行中识别到的货件状态和可复用飞书记录。"""
+    """保存当前运行中识别到的货件、飞书缓存和增量统计。"""
 
     def __init__(self) -> None:
         self.rows_by_shipment: DefaultDict[str, List[Dict[str, Any]]] = defaultdict(list)
         self.shipment_by_sta_id: Dict[str, Dict[str, Any]] = {}
         self.cached_in_progress: Set[str] = set()
         self.status_counts: Counter[str] = Counter()
+
         self.reused_shipments = 0
         self.reused_rows = 0
         self.cache_misses = 0
+        self.mutable_refreshes = 0
         self.skip_next_throttle_sleep = False
         self.skipped_throttle_sleeps = 0
 
@@ -103,7 +101,7 @@ ORIGINAL_ASYNCIO_MODULE = legacy.asyncio
 
 
 class _AsyncioProxy:
-    """只跳过缓存命中后原脚本固定的 2 秒节流等待。"""
+    """只跳过缓存命中后原脚本固定的2秒箱接口节流等待。"""
 
     def __getattr__(self, name: str) -> Any:
         return getattr(ORIGINAL_ASYNCIO_MODULE, name)
@@ -163,6 +161,18 @@ def _date_text(value: Any) -> str:
     return _text(value)
 
 
+def _parse_datetime(value: Any) -> Optional[datetime]:
+    text = _date_text(value)
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
 def _number(value: Any, default: float = 0) -> Any:
     if value in (None, ""):
         return default
@@ -174,7 +184,7 @@ def _number(value: Any, default: float = 0) -> Any:
 
 
 def _normalize_existing_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
-    """把飞书原始字段转换成原脚本 ``processed_data`` 的结构。"""
+    """把飞书原始字段转换成原脚本 processed_data 的结构。"""
     normalized: Dict[str, Any] = {}
     for name, value in fields.items():
         if name == "图片链接":
@@ -200,10 +210,52 @@ def _shipment_status(item: Dict[str, Any]) -> str:
     return _text(value)
 
 
-def _is_terminal(item: Dict[str, Any]) -> bool:
-    status = _shipment_status(item)
-    normalized = status.strip().upper()
-    return normalized in TERMINAL_STATUSES or status.strip() in TERMINAL_STATUSES
+def _shipment_modified(item: Dict[str, Any]) -> Optional[datetime]:
+    value = (
+        item.get("gmt_modified")
+        or item.get("update_time")
+        or item.get("updated_at")
+        or item.get("gmtModified")
+        or item.get("updateTime")
+        or item.get("updatedAt")
+    )
+    return _parse_datetime(value)
+
+
+def _cached_modified(cached_rows: List[Dict[str, Any]]) -> Optional[datetime]:
+    values = [
+        _parse_datetime(row.get("修改时间"))
+        for row in cached_rows
+        if isinstance(row, dict)
+    ]
+    valid = [value for value in values if value is not None]
+    return max(valid) if valid else None
+
+
+def _should_reuse_cache(
+    shipment: Dict[str, Any],
+    cached_rows: List[Dict[str, Any]],
+) -> bool:
+    """判断是否可直接复用历史箱记录。"""
+    if not cached_rows:
+        return False
+
+    status = _shipment_status(shipment).upper()
+
+    # 发货前可能继续改箱；仅在列表修改时间比缓存更新时补抓。
+    if status in BOX_MUTABLE_STATUSES:
+        current_modified = _shipment_modified(shipment)
+        previous_modified = _cached_modified(cached_rows)
+
+        # 缺少可比较时间时采用保守策略，重新抓取箱明细。
+        if current_modified is None or previous_modified is None:
+            return False
+
+        if current_modified > previous_modified:
+            return False
+
+    # SHIPPED及之后、CANCELLED/CLOSED等状态，只刷新列表数据，箱结构永久复用。
+    return True
 
 
 def _shipment_fields(item: Dict[str, Any], seller_name: str) -> Dict[str, Any]:
@@ -270,8 +322,7 @@ def _response_shipments(response: Any) -> List[Dict[str, Any]]:
 
 
 def _cached_response(row_count: int) -> SimpleNamespace:
-    # 原脚本会先把 shipmentPackingList 转成 box_data，再调用 process_box_info。
-    # 这里提供相同数量的占位箱；真正的数据由 process_box_info 增量包装器返回。
+    """生成原脚本可识别的占位箱响应，实际行由缓存包装器返回。"""
     packing_list = [
         {
             "boxId": f"CACHE-{index + 1}",
@@ -303,7 +354,8 @@ async def _load_existing_feishu_rows() -> None:
     )
     try:
         records = await client.read_records()
-    except Exception as exc:  # 缓存不可用时安全降级为原来的全量抓取
+    except Exception as exc:
+        # 缓存不可用时安全降级为原来的全量抓取。
         print(f"⚠️  读取飞书历史货件失败，将按原逻辑全量抓取箱明细: {exc}")
         return
 
@@ -338,30 +390,37 @@ async def _request_with_incremental_cache(
 ) -> Any:
     req_body = kwargs.get("req_body")
     if req_body is None and args:
-        # 兼容 request(..., req_body) 的位置参数调用。
         req_body = args[0]
 
     if path.endswith("/listShipmentBoxes") and isinstance(req_body, dict):
-        shipment_ids = req_body.get("shipmentIdList") or []
-        sta_id = _text(shipment_ids[0]) if shipment_ids else ""
+        sta_ids = req_body.get("shipmentIdList") or []
+        sta_id = _text(sta_ids[0]) if sta_ids else ""
         shipment = STATE.shipment_by_sta_id.get(sta_id)
         shipment_id = _text((shipment or {}).get("shipment_id"))
         cached_rows = STATE.rows_by_shipment.get(shipment_id, [])
 
-        if shipment and _is_terminal(shipment) and cached_rows:
+        if shipment and _should_reuse_cache(shipment, cached_rows):
             STATE.cached_in_progress.add(shipment_id)
             STATE.reused_shipments += 1
             STATE.reused_rows += len(cached_rows)
             STATE.skip_next_throttle_sleep = True
             print(
-                f"  ♻️  已结束货件，复用飞书历史箱记录: "
+                "  ♻️  复用飞书历史箱记录，不请求箱明细接口: "
                 f"status={_shipment_status(shipment)}, rows={len(cached_rows)}"
             )
             return _cached_response(len(cached_rows))
 
-        if shipment and _is_terminal(shipment) and not cached_rows:
+        if shipment and cached_rows:
+            STATE.mutable_refreshes += 1
+            print(
+                "  🔄 发货前货件有更新，重新抓取箱明细: "
+                f"status={_shipment_status(shipment)}, "
+                f"current_modified={_date_text(_shipment_modified(shipment))}, "
+                f"cached_modified={_date_text(_cached_modified(cached_rows))}"
+            )
+        else:
             STATE.cache_misses += 1
-            print("  🆕 已结束但飞书无历史记录，本次仍抓取箱明细并建立缓存")
+            print("  🆕 飞书无历史箱记录，本次抓取箱明细并建立缓存")
 
     response = await ORIGINAL_REQUEST(
         self,
@@ -393,7 +452,7 @@ def _process_box_info_with_cache(
 
         for cached in cached_rows:
             row = copy.deepcopy(cached)
-            # 只用货件列表的非空值刷新货件级字段；箱子和商品字段保持历史快照。
+            # 每次用货件列表的最新值刷新货件级字段，箱子和商品字段保持历史快照。
             for field in SHIPMENT_LEVEL_FIELDS:
                 value = refreshed_fields.get(field)
                 if value not in (None, ""):
@@ -425,10 +484,11 @@ async def main() -> None:
         legacy.asyncio = ORIGINAL_ASYNCIO_MODULE
 
     print("\n" + "=" * 60)
-    print("📈 货件箱明细增量统计")
-    print(f"  ♻️  复用已结束货件: {STATE.reused_shipments} 个")
+    print("📈 货件箱明细按需抓取统计")
+    print(f"  ♻️  复用已有货件箱缓存: {STATE.reused_shipments} 个")
     print(f"  📦 复用历史箱记录: {STATE.reused_rows} 条")
-    print(f"  🆕 终态缓存未命中: {STATE.cache_misses} 个")
+    print(f"  🆕 无缓存首次抓取: {STATE.cache_misses} 个")
+    print(f"  🔄 发货前修改后补抓: {STATE.mutable_refreshes} 个")
     print(f"  ⏭️  跳过固定2秒等待: {STATE.skipped_throttle_sleeps} 次")
     if STATE.status_counts:
         summary = "，".join(
