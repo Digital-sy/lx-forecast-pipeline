@@ -71,7 +71,7 @@ else
 fi
 
 echo "[3/3] 增量获取货件单号和箱明细..."
-$PYTHON "$PROJECT_DIR/jobs/feishu/Shipment_Number_incremental.py"
+$PYTHON -m jobs.feishu.Shipment_Number_incremental
 EXIT_CODE_3=$?
 
 if [ $EXIT_CODE_3 -ne 0 ]; then
