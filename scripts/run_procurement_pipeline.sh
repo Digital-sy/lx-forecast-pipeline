@@ -19,6 +19,9 @@ VENV_DIR="${VENV_DIR:-$PROJECT_DIR/venv}"
 PYTHON="${PYTHON:-$VENV_DIR/bin/python}"
 LOG_DIR="${LOG_DIR:-$PROJECT_DIR/logs}"
 LOG_FILE="${LOG_FILE:-$LOG_DIR/cron_procurement_pipeline.log}"
+SHARED_CONFIG_DIR="${SHARED_CONFIG_DIR:-/opt/apps/pythondata/shared_config}"
+HISTORICAL_MANUAL_MAPPING="${FABRIC_COLOR_MANUAL_MAPPING_PATH:-$SHARED_CONFIG_DIR/fabric_color_manual_mapping.csv}"
+SPU_MANUAL_MAPPING="${FABRIC_COLOR_SPU_MANUAL_MAPPING_PATH:-$SHARED_CONFIG_DIR/fabric_color_manual_mapping_spu.csv}"
 
 cd "$PROJECT_DIR" || {
     echo "项目目录不存在：$PROJECT_DIR" >&2
@@ -69,9 +72,10 @@ run_module() {
     local step_no="$1"
     local module="$2"
     local description="$3"
+    shift 3
 
     echo "[${step_no}/5] ${description} (${module})..." >> "$LOG_FILE"
-    "$PYTHON" -m "$module" >> "$LOG_FILE" 2>&1
+    "$PYTHON" -m "$module" "$@" >> "$LOG_FILE" 2>&1
     local exit_code=$?
     if [ "$exit_code" -ne 0 ]; then
         fail_step "$module" "$exit_code"
@@ -109,7 +113,9 @@ run_module "1" "jobs.feishu.write_order_forecast_to_feishu" "同步运营预计�
 run_module "2" "jobs.feishu.generate_forecast_comparison" "生成预测对比表"
 run_module "3" "jobs.feishu.generate_procurement_report_named_colors" "生成中文颜色体系采购建议和面料预估"
 run_module "4" "jobs.feishu.export_procurement_excel_color_system" "导出颜色体系采购建议 Excel"
-run_module "5" "jobs.feishu.export_fabric_color_order_forecast_final" "导出最终飞书颜色面料-颜色预计下单 Excel"
+run_module "5" "jobs.feishu.export_fabric_color_order_forecast_final" "导出最终飞书颜色面料-颜色预计下单 Excel" \
+    --manual-mapping "$HISTORICAL_MANUAL_MAPPING" \
+    --spu-manual-mapping "$SPU_MANUAL_MAPPING"
 
 END_TIME=$(date '+%Y-%m-%d %H:%M:%S')
 END_TS=$(date +%s)
