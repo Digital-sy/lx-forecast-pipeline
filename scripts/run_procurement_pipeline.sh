@@ -6,7 +6,7 @@
 # 3. 颜色体系建议下单量 + 面料详细预估 → MySQL / 飞书
 #    A2023/B2024 仅使用 SKU 自身明确标签，不由飞书颜色反推
 # 4. 导出采购建议 Excel
-# 5. 导出最终面料-颜色预计下单 Excel
+# 5. 导出最终面料预估表（业务21列表头）
 #    最终颜色优先使用 SPU 人工映射，再走确定性规则/历史人工映射
 #
 # 任一步骤失败都会停止后续任务并发送飞书告警。
@@ -55,7 +55,7 @@ send_feishu_success() {
     "$PYTHON" "$PROJECT_DIR/scripts/notify_feishu.py" \
         --task "采购建议流水线" \
         --status "success" \
-        --detail "五个业务步骤全部完成，预测、颜色体系采购建议、中文颜色面料明细和最终飞书颜色预计下单表已更新" \
+        --detail "五个业务步骤全部完成，预测、颜色体系采购建议、中文颜色面料明细和业务版最终面料预估表已更新" \
         --elapsed "${elapsed}s" \
         2>/dev/null || true
 }
@@ -102,6 +102,7 @@ echo "[预检] Python 核心模块语法检查..." >> "$LOG_FILE"
     "$PROJECT_DIR/jobs/feishu/fabric_color_stocking.py" \
     "$PROJECT_DIR/jobs/feishu/fabric_color_stocking_spu.py" \
     "$PROJECT_DIR/jobs/feishu/export_fabric_color_order_forecast_final.py" \
+    "$PROJECT_DIR/jobs/feishu/export_fabric_color_order_forecast_business.py" \
     >> "$LOG_FILE" 2>&1
 PREFLIGHT_EXIT=$?
 if [ "$PREFLIGHT_EXIT" -ne 0 ]; then
@@ -113,7 +114,7 @@ run_module "1" "jobs.feishu.write_order_forecast_to_feishu" "同步运营预计�
 run_module "2" "jobs.feishu.generate_forecast_comparison" "生成预测对比表"
 run_module "3" "jobs.feishu.generate_procurement_report_named_colors" "生成中文颜色体系采购建议和面料预估"
 run_module "4" "jobs.feishu.export_procurement_excel_color_system" "导出颜色体系采购建议 Excel"
-run_module "5" "jobs.feishu.export_fabric_color_order_forecast_final" "导出最终飞书颜色面料-颜色预计下单 Excel" \
+run_module "5" "jobs.feishu.export_fabric_color_order_forecast_business" "导出业务21列表头最终面料预估表" \
     --manual-mapping "$HISTORICAL_MANUAL_MAPPING" \
     --spu-manual-mapping "$SPU_MANUAL_MAPPING"
 
