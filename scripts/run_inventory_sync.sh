@@ -70,12 +70,12 @@ else
   echo "✓ 写入完成"
 fi
 
-echo "[3/3] 获取货件单号列表..."
-$PYTHON "$PROJECT_DIR/jobs/feishu/Shipment_Number.py"
+echo "[3/3] 增量获取货件单号和箱明细..."
+$PYTHON -m jobs.feishu.Shipment_Number_incremental
 EXIT_CODE_3=$?
 
 if [ $EXIT_CODE_3 -ne 0 ]; then
-  handle_error "获取货件单号列表" $EXIT_CODE_3
+  handle_error "增量获取货件单号和箱明细" $EXIT_CODE_3
 else
   echo "✓ 获取完成"
 fi
@@ -92,10 +92,10 @@ ELAPSED_STR="${ELAPSED}秒"
 
 if [ $EXIT_CODE_1 -eq 0 ] && [ $EXIT_CODE_2 -eq 0 ] && [ $EXIT_CODE_3 -eq 0 ]; then
     STATUS="success"
-    DETAIL="**1/3 采集库存明细：** ✅ 成功\n**2/3 写入飞书多维表：** ✅ 成功\n**3/3 获取货件单号：** ✅ 成功"
+    DETAIL="**1/3 采集库存明细：** ✅ 成功\n**2/3 写入飞书多维表：** ✅ 成功\n**3/3 增量获取货件箱明细：** ✅ 成功"
 else
     STATUS="failed"
-    DETAIL="**1/3 采集库存明细：** $([ $EXIT_CODE_1 -eq 0 ] && echo '✅ 成功' || echo '❌ 失败')\n**2/3 写入飞书多维表：** $([ $EXIT_CODE_2 -eq 0 ] && echo '✅ 成功' || echo '❌ 失败')\n**3/3 获取货件单号：** $([ $EXIT_CODE_3 -eq 0 ] && echo '✅ 成功' || echo '❌ 失败')"
+    DETAIL="**1/3 采集库存明细：** $([ $EXIT_CODE_1 -eq 0 ] && echo '✅ 成功' || echo '❌ 失败')\n**2/3 写入飞书多维表：** $([ $EXIT_CODE_2 -eq 0 ] && echo '✅ 成功' || echo '❌ 失败')\n**3/3 增量获取货件箱明细：** $([ $EXIT_CODE_3 -eq 0 ] && echo '✅ 成功' || echo '❌ 失败')"
 fi
 
 PYTHONPATH=/opt/apps/pythondata /opt/apps/pythondata/venv/bin/python3 \
