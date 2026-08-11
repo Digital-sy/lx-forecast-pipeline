@@ -11,6 +11,7 @@
 - 模糊候选保持人工审核用途，不进入最终已确认颜色。
 - 已生成正式飞书颜色版面料预计下单表，并接入采购流水线第 5 步。
 - 新增业务版 21 列主表输出，月份随运行月份自动滚动。
+- 已同步当前 `main`（`76833a6`）到 `codex/fabric-color-forecast`，同步点分支 `behind=0`。
 
 ## 生产 dry-run 验证
 
@@ -110,6 +111,9 @@
 - 分支：`codex/fabric-color-forecast`
 - PR：#9
 - PR 保持 Draft
+- 已合入当前 main：`76833a6 Fix cron shipment incremental module import`
+- 同步 merge commit：`8fd7cf4 Merge latest main into fabric color forecast branch`
+- 同步后 `main...codex/fabric-color-forecast`：`behind 0`，仅保留本功能分支自身改动。
 
 主要新增提交：
 
@@ -120,11 +124,13 @@
 - `8f7cb72` Pass shared manual color mappings to final forecast export
 - `dd77285` Export final fabric forecast with business 21-column layout
 - `ad6f485` Use business-layout final fabric forecast export
+- `ecfb55d` Document fabric color forecast progress for 2026-08-10
+- `8fd7cf4` Merge latest main into fabric color forecast branch
 
 ## 待完成
 
 - 将 `fabric_color_stocking_spu` 正式内聚到 `fabric_color_stocking`，减少双模块维护。
-- 同步 / rebase 当前 main 后重新跑全量单测、语法检查、dry-run 与最终业务表守恒。
+- 在已同步 main 的分支上重新跑全量单测、语法检查、dry-run 与最终业务表守恒。
 - 复核最终业务表库存唯一归属、待确认颜色与总米数。
 - 验证完成后再将 PR #9 从 Draft 转 Ready 并合并 main。
 
