@@ -1,9 +1,9 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
-"""按业务固定表头导出最终“面料预估表”。
+"""按业务固定表头导出最终“面料预估表”，并可同步写入飞书。
 
 计算完全复用 ``export_fabric_color_order_forecast_final.build_final_rows``，只调整
-Excel 展示结构，不改变颜色匹配、A2023/B2024 判定、库存归属和面料用量口径。
+Excel / 飞书展示结构，不改变颜色匹配、A2023/B2024 判定、库存归属和面料用量口径。
 
 主表固定为 21 列：
 SKU、面料颜色编号、面料、颜色、领星颜色、库存量/米、待到货量/米、统计类型、
@@ -12,6 +12,7 @@ SKU、面料颜色编号、面料、颜色、领星颜色、库存量/米、待�
 运营当月预估/米、运营T+1月预估/米、运营T+2月预估/米。
 
 月份标题随运行月份动态滚动。例如 2026-08 运行时显示 8月、9月、10月。
+A2023/B2024 仍严格来自当前 SKU 自身明确标签，飞书颜色和人工映射绝不反推体系。
 """
 from __future__ import annotations
 
@@ -30,9 +31,14 @@ from common import get_logger
 from common.feishu import FeishuClient
 from jobs.feishu import fabric_color_stocking as stocking
 from jobs.feishu import export_fabric_color_order_forecast_final as final_export
+from jobs.feishu import generate_procurement_report as procurement_base
 from jobs.feishu.fabric_color_stocking_spu import DEFAULT_SPU_MANUAL_MAPPING_PATH
 
 logger = get_logger("export_fabric_color_order_forecast_business")
+
+DEFAULT_FEISHU_TABLE_NAME = os.getenv(
+    "FABRIC_FORECAST_FEISHU_TABLE_NAME", "面料预估明细"
+)
 
 
 def _month_number(label: str) -> str:
@@ -205,14 +211,12 @@ def _to_business_total_row(
     }
 
 
-def export_business_workbook(
+def build_business_rows(
     color_rows: Sequence[Mapping[str, Any]],
     total_rows: Sequence[Mapping[str, Any]],
-    pending_rows: Sequence[Mapping[str, Any]],
-    metrics: Mapping[str, Any],
     lingxing_names: Mapping[str, str],
-    output_dir: Path,
-) -> Path:
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """把最终计算结果转换成业务固定 21 列。"""
     labels = _find_month_labels(color_rows or total_rows)
     if len(labels) < 3:
         raise RuntimeError(f"无法识别连续3个月份字段，实际识别到: {labels}")
@@ -229,6 +233,20 @@ def export_business_workbook(
         business_rows.append(_to_business_total_row(total, labels))
         for color in colors_by_fabric.get(fabric, ()):
             business_rows.append(_to_business_color_row(color, labels, lingxing_names))
+    return headers, business_rows
+
+
+def export_business_workbook(
+    color_rows: Sequence[Mapping[str, Any]],
+    total_rows: Sequence[Mapping[str, Any]],
+    pending_rows: Sequence[Mapping[str, Any]],
+    metrics: Mapping[str, Any],
+    lingxing_names: Mapping[str, str],
+    output_dir: Path,
+) -> Path:
+    headers, business_rows = build_business_rows(
+        color_rows, total_rows, lingxing_names
+    )
 
     workbook = Workbook()
     ws = workbook.active
@@ -276,17 +294,61 @@ def export_business_workbook(
     return output
 
 
+def _field_list(headers: Sequence[str]) -> list[dict[str, Any]]:
+    """飞书 21 列字段定义；米数/条数字段均使用数字类型。"""
+    result: list[dict[str, Any]] = []
+    for header in headers:
+        is_number = (
+            header.endswith("/米")
+            or header.endswith("/条")
+            or header in {"库存量/米", "待到货量/米", "库存量/条", "待到货量/条"}
+        )
+        if is_number:
+            result.append({"name": header, "type": "number", "precision": 2})
+        else:
+            result.append({"name": header, "type": "text"})
+    return result
+
+
+async def write_business_rows_to_feishu(
+    headers: Sequence[str],
+    business_rows: Sequence[Mapping[str, Any]],
+    table_name: str = DEFAULT_FEISHU_TABLE_NAME,
+) -> int:
+    """用最终业务 21 列全量覆盖飞书“面料预估明细”。"""
+    if not business_rows:
+        raise RuntimeError("最终业务面料预估结果为空，拒绝清空飞书表")
+
+    client = await procurement_base._get_or_create_table(
+        procurement_base.FEISHU_APP_TOKEN,
+        table_name,
+        _field_list(headers),
+        remove_extra=True,
+    )
+    old_count = await client.delete_all_records()
+    logger.info("飞书%s：已清空旧记录 %d 条", table_name, old_count)
+    written = await client.write_records(list(business_rows), batch_size=500)
+    if written != len(business_rows):
+        raise RuntimeError(
+            f"飞书写入数量不一致：应写 {len(business_rows)} 条，实际 {written} 条"
+        )
+    logger.info("✓ 飞书%s写入最终业务面料预估 %d 条", table_name, written)
+    return written
+
+
 async def run(
     output_dir: Path,
     manual_mapping_path: Path,
     spu_manual_mapping_path: Path,
+    write_feishu: bool = False,
+    feishu_table_name: str = DEFAULT_FEISHU_TABLE_NAME,
 ) -> Path:
     color_rows, total_rows, pending_rows, metrics = await final_export.build_final_rows(
         manual_mapping_path=manual_mapping_path,
         spu_manual_mapping_path=spu_manual_mapping_path,
     )
     lingxing_names = await _load_lingxing_name_by_record_id()
-    return export_business_workbook(
+    output = export_business_workbook(
         color_rows,
         total_rows,
         pending_rows,
@@ -294,6 +356,16 @@ async def run(
         lingxing_names,
         output_dir,
     )
+    if write_feishu:
+        headers, business_rows = build_business_rows(
+            color_rows, total_rows, lingxing_names
+        )
+        await write_business_rows_to_feishu(
+            headers,
+            business_rows,
+            table_name=feishu_table_name,
+        )
+    return output
 
 
 def main() -> Path:
@@ -315,12 +387,24 @@ def main() -> Path:
         default=DEFAULT_SPU_MANUAL_MAPPING_PATH,
         help="SPU级人工映射 CSV；键=面料名+原始颜色编码+SPU",
     )
+    parser.add_argument(
+        "--write-feishu",
+        action="store_true",
+        help="将最终业务21列表全量覆盖写入飞书面料预估明细",
+    )
+    parser.add_argument(
+        "--feishu-table-name",
+        default=DEFAULT_FEISHU_TABLE_NAME,
+        help="目标飞书表名，默认面料预估明细",
+    )
     args = parser.parse_args()
     return asyncio.run(
         run(
             output_dir=args.output_dir,
             manual_mapping_path=args.manual_mapping,
             spu_manual_mapping_path=args.spu_manual_mapping,
+            write_feishu=args.write_feishu,
+            feishu_table_name=args.feishu_table_name,
         )
     )
 
