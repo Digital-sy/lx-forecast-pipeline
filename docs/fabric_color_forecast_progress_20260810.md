@@ -106,6 +106,27 @@
 
 面料总量库存继续独立聚合，不由颜色库存反推。
 
+## 每日自动更新设计（2026-08-19）
+
+服务器当前基础数据任务已确认正常执行：
+
+- 22:30 采购分析：产品、FBA库存、仓库库存、月销量、采购单、库存预估；
+- 02:00 基础数据同步；
+- 08:30 / 10:30 / 12:30 / 14:30 / 16:30 / 18:30 库存与货件同步。
+
+最终业务面料预测改为仅在每日 **08:30 库存同步成功后** 执行：
+
+`08:30库存同步 → 最新预测对比 → 建议下单 → SPU人工颜色映射 → 最终21列表 → 飞书“面料预估明细”`
+
+新增：
+
+- `scripts/run_morning_inventory_and_forecast.sh`：串联 08:30 库存同步和最新采购/面料预测流水线；库存失败则不使用旧库存继续预测。
+- `export_fabric_color_order_forecast_business.py --write-feishu`：将最终业务 21 列全量覆盖写入飞书。
+- `run_procurement_pipeline.sh` 第 5 步默认写入飞书 `面料预估明细`。
+- 第 3 步旧版“面料预估明细”写入在最终业务表模式下跳过，避免同一轮任务重复改表结构。
+
+飞书写入前会拒绝空结果清表；写入后校验实际写入条数必须与业务主表行数一致。
+
 ## 当前分支与 PR
 
 - 分支：`codex/fabric-color-forecast`
@@ -126,12 +147,16 @@
 - `ad6f485` Use business-layout final fabric forecast export
 - `ecfb55d` Document fabric color forecast progress for 2026-08-10
 - `8fd7cf4` Merge latest main into fabric color forecast branch
+- `4bc53c2` Write final business fabric forecast to Feishu
+- `c17affe` Skip legacy fabric detail write when final business table owns Feishu output
+- `58d2a83` Publish final fabric forecast to Feishu in procurement pipeline
+- `f3a8070` Run final fabric forecast after 08:30 inventory sync
 
 ## 待完成
 
+- 在生产 `/opt/apps/pythondata` 部署当前分支并配置 08:30 新链路 cron。
+- 首次自动写飞书后核对：行数、总米数、库存唯一归属、待确认颜色、月份字段。
 - 将 `fabric_color_stocking_spu` 正式内聚到 `fabric_color_stocking`，减少双模块维护。
-- 在已同步 main 的分支上重新跑全量单测、语法检查、dry-run 与最终业务表守恒。
-- 复核最终业务表库存唯一归属、待确认颜色与总米数。
 - 验证完成后再将 PR #9 从 Draft 转 Ready 并合并 main。
 
 第二轮 A 历史 24 组没有可验证原始产物，不再推断恢复；只按当前可验证规则继续治理。
