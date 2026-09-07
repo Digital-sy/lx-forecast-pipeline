@@ -38,7 +38,13 @@ def _month_delta(stat_date: Any, current_date: datetime) -> int | None:
     return final_export._month_delta(stat_date, current_date)
 
 
-async def run(fabric_name: str, colors: list[str], output: Path) -> None:
+async def run(
+    fabric_name: str,
+    colors: list[str],
+    output: Path,
+    manual_mapping: Path,
+    spu_manual_mapping: Path,
+) -> None:
     now = datetime.now()
     target_colors = set(colors)
 
@@ -51,8 +57,8 @@ async def run(fabric_name: str, colors: list[str], output: Path) -> None:
     target_catalog = [r for r in catalog_rows if r.fabric_name == fabric_name]
     index = stocking.CatalogIndex(target_catalog)
 
-    manual_catalog = stocking.load_manual_mapping_catalog(stocking.DEFAULT_MANUAL_MAPPING_PATH)
-    spu_catalog = load_spu_manual_mapping_catalog()
+    manual_catalog = stocking.load_manual_mapping_catalog(manual_mapping)
+    spu_catalog = load_spu_manual_mapping_catalog(spu_manual_mapping)
 
     forecasts, _ = stocking.load_forecast_skus(governance_catalog)
     forecast_by_sku = {r.sku: r for r in forecasts}
@@ -199,12 +205,34 @@ def main() -> None:
     parser.add_argument("--fabric", required=True)
     parser.add_argument("--color", action="append", required=True)
     parser.add_argument(
+        "--manual-mapping",
+        type=Path,
+        default=Path(os.getenv(
+            "FABRIC_COLOR_MANUAL_MAPPING_PATH",
+            "/opt/apps/pythondata/shared_config/fabric_color_manual_mapping.csv",
+        )),
+    )
+    parser.add_argument(
+        "--spu-manual-mapping",
+        type=Path,
+        default=Path(os.getenv(
+            "FABRIC_COLOR_SPU_MANUAL_MAPPING_PATH",
+            "/opt/apps/pythondata/shared_config/fabric_color_manual_mapping_spu.csv",
+        )),
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=Path("/opt/apps/pythondata/exports/fabric_color_usage_trace.csv"),
     )
     args = parser.parse_args()
-    asyncio.run(run(args.fabric, args.color, args.output))
+    asyncio.run(run(
+        args.fabric,
+        args.color,
+        args.output,
+        args.manual_mapping,
+        args.spu_manual_mapping,
+    ))
 
 
 if __name__ == "__main__":
