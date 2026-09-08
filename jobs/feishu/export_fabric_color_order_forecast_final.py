@@ -41,7 +41,6 @@ from jobs.feishu import generate_fabric_forecast_color_system as color_system
 from jobs.feishu.color_system_resolver import ColorSystemResolver, normalize_sku
 from jobs.feishu.fabric_color_stocking_spu import (
     DEFAULT_SPU_MANUAL_MAPPING_PATH,
-    MATCH_SPU_MANUAL,
     SpuManualMappingCatalog,
     load_spu_manual_mapping_catalog,
 )
@@ -502,7 +501,7 @@ async def run(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="生成最终版面料-颜色预计下单表")
+    parser = argparse.ArgumentParser(description="生成最终版面料-颜色预计下单表（方案B）")
     parser.add_argument(
         "--output-dir",
         type=Path,
