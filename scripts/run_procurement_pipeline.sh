@@ -6,7 +6,7 @@
 # 3. 颜色体系建议下单量 + 面料详细预估 → MySQL / 飞书
 #    A2023/B2024 仅使用 SKU 自身明确标签，不由飞书颜色反推
 # 4. 导出采购建议 Excel
-# 5. 导出最终面料预估表（业务21列表头）并覆盖写入飞书“面料预估明细”
+# 5. 最终面料预估：方案B导出业务21列并覆盖飞书；方案A每日快照保留MySQL
 #    最终颜色优先使用 SPU 人工映射，再走确定性规则/历史人工映射
 #
 # 任一步骤失败都会停止后续任务并发送飞书告警。
@@ -23,6 +23,7 @@ SHARED_CONFIG_DIR="${SHARED_CONFIG_DIR:-/opt/apps/pythondata/shared_config}"
 HISTORICAL_MANUAL_MAPPING="${FABRIC_COLOR_MANUAL_MAPPING_PATH:-$SHARED_CONFIG_DIR/fabric_color_manual_mapping.csv}"
 SPU_MANUAL_MAPPING="${FABRIC_COLOR_SPU_MANUAL_MAPPING_PATH:-$SHARED_CONFIG_DIR/fabric_color_manual_mapping_spu.csv}"
 FABRIC_FORECAST_FEISHU_TABLE_NAME="${FABRIC_FORECAST_FEISHU_TABLE_NAME:-面料预估明细}"
+FABRIC_FORECAST_SCHEME_A_HISTORY_TABLE="${FABRIC_FORECAST_SCHEME_A_HISTORY_TABLE:-面料预估方案A历史}"
 
 # 第3步仍写建议下单量/面料汇总到飞书，但不再用旧版逻辑覆盖“面料预估明细”。
 # 最终业务21列表由第5步唯一负责写入该表，避免同一轮任务重复改表结构。
@@ -60,7 +61,7 @@ send_feishu_success() {
     "$PYTHON" "$PROJECT_DIR/scripts/notify_feishu.py" \
         --task "采购建议流水线" \
         --status "success" \
-        --detail "五个业务步骤全部完成，预测、建议下单、最终颜色面料预估和飞书业务21列表已更新" \
+        --detail "五个业务步骤全部完成：方案B最终颜色面料预估已更新飞书业务21列表，方案A当日快照已保留MySQL" \
         --elapsed "${elapsed}s" \
         2>/dev/null || true
 }
@@ -119,11 +120,12 @@ run_module "1" "jobs.feishu.write_order_forecast_to_feishu" "同步运营预计�
 run_module "2" "jobs.feishu.generate_forecast_comparison" "生成预测对比表"
 run_module "3" "jobs.feishu.generate_procurement_report_named_colors" "生成中文颜色体系采购建议和面料预估"
 run_module "4" "jobs.feishu.export_procurement_excel_color_system" "导出颜色体系采购建议 Excel"
-run_module "5" "jobs.feishu.export_fabric_color_order_forecast_business" "导出并写入飞书最终业务21列面料预估表" \
+run_module "5" "jobs.feishu.export_fabric_color_order_forecast_business" "方案B写飞书最终业务21列，并保留方案A MySQL快照" \
     --manual-mapping "$HISTORICAL_MANUAL_MAPPING" \
     --spu-manual-mapping "$SPU_MANUAL_MAPPING" \
     --write-feishu \
-    --feishu-table-name "$FABRIC_FORECAST_FEISHU_TABLE_NAME"
+    --feishu-table-name "$FABRIC_FORECAST_FEISHU_TABLE_NAME" \
+    --scheme-a-history-table "$FABRIC_FORECAST_SCHEME_A_HISTORY_TABLE"
 
 END_TIME=$(date '+%Y-%m-%d %H:%M:%S')
 END_TS=$(date +%s)
