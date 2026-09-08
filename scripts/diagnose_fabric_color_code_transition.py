@@ -2,8 +2,10 @@
 # -*- coding: utf-8 -*-
 """Diagnose whether an old/new color abbreviation transition causes missing fabric demand.
 
-Read-only. It inspects all SKU demand sources used by the final fabric forecast and explains
-why candidate SKUs do or do not land on a selected final Feishu fabric color.
+Read-only. It inspects all SKU demand sources used by the final Scheme B fabric
+forecast and explains why candidate SKUs do or do not land on a selected final
+Feishu fabric color. Primary fabric is retained only as context; being a
+non-primary fabric is no longer a blocking reason under Scheme B.
 """
 from __future__ import annotations
 
@@ -134,14 +136,12 @@ async def run(
             reasons.append("无SPU")
         if not usage:
             reasons.append("SPU未配置该面料")
-        if usage and primary != fabric_name:
-            reasons.append(f"该面料不是主面料(主面料={primary})")
-        if usage and primary == fabric_name and resolved_color != final_color:
+        if usage and resolved_color != final_color:
             reasons.append(f"最终颜色未落到{final_color}(实际={resolved_color or decision_text})")
         if purchase_qty == 0 and sum(sys_qtys) == 0 and sum(op_qtys) == 0:
             reasons.append("当前采购/系统/运营均无数量")
         if not reasons:
-            reasons.append("应进入目标颜色用量")
+            reasons.append("应进入目标颜色用量（方案B）")
 
         row = {
             "SKU": sku,
@@ -152,6 +152,7 @@ async def run(
             "目标面料": fabric_name,
             "主面料": primary,
             "是否配置目标面料": "是" if usage else "否",
+            "是否目标面料为主面料": "是" if usage and primary == fabric_name else "否",
             "最终飞书颜色": resolved_color,
             "最终领星缩写": resolved_lx,
             "匹配方式/原因": decision_text,
@@ -172,7 +173,7 @@ async def run(
     else:
         print(f"{fabric_name} | {final_color}: 当前飞书清单不存在")
 
-    print("\n===== 旧/新缩写候选诊断 =====")
+    print("\n===== 旧/新缩写候选诊断（方案B） =====")
     print(f"候选条件: 颜色编码/sku包含={sorted(code_set)}；品名包含={name_token or '-'}")
     print(f"候选SKU数: {len(rows)}")
 
@@ -191,7 +192,7 @@ async def run(
         or any(_q(r.get(f"运营{m}数量")) for m in month_labels)
     ]
     active.sort(key=lambda r: (
-        "应进入目标颜色用量" not in r["诊断"],
+        "应进入目标颜色用量（方案B）" not in r["诊断"],
         r["SPU"], r["SKU"]
     ))
     for r in active[:200]:
@@ -215,7 +216,7 @@ async def run(
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="诊断旧/新颜色缩写是否导致最终面料颜色无预测")
+    p = argparse.ArgumentParser(description="诊断旧/新颜色缩写是否导致最终方案B面料颜色无预测")
     p.add_argument("--fabric", required=True)
     p.add_argument("--final-color", required=True)
     p.add_argument("--code", action="append", default=[])
