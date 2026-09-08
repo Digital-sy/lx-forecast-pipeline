@@ -5,6 +5,9 @@
 计算完全复用 ``export_fabric_color_order_forecast_final.build_final_rows``，只调整
 Excel / 飞书展示结构，不改变颜色匹配、A2023/B2024 判定、库存归属和面料用量口径。
 
+正式业务口径使用方案 B：SPU 只要配置了目标面料，该面料就按当前 SKU 的最终飞书颜色拆分。
+方案 A（仅主面料拆颜色）每天保留一份 MySQL 快照，仅用于历史对照，不写飞书。
+
 主表固定为 21 列：
 SKU、面料颜色编号、面料、颜色、领星颜色、库存量/米、待到货量/米、统计类型、
 面料编号、颜色缩写、库存量/条、待到货量/条、用量信息缺失SPU、当月完整预估/米、
@@ -28,6 +31,7 @@ from typing import Any, Mapping, Sequence
 from openpyxl import Workbook
 
 from common import get_logger
+from common.database import db_cursor
 from common.feishu import FeishuClient
 from jobs.feishu import fabric_color_stocking as stocking
 from jobs.feishu import export_fabric_color_order_forecast_final as final_export
@@ -38,6 +42,9 @@ logger = get_logger("export_fabric_color_order_forecast_business")
 
 DEFAULT_FEISHU_TABLE_NAME = os.getenv(
     "FABRIC_FORECAST_FEISHU_TABLE_NAME", "面料预估明细"
+)
+SCHEME_A_HISTORY_TABLE = os.getenv(
+    "FABRIC_FORECAST_SCHEME_A_HISTORY_TABLE", "面料预估方案A历史"
 )
 
 
@@ -336,18 +343,176 @@ async def write_business_rows_to_feishu(
     return written
 
 
+def _validated_table_name(table_name: str) -> str:
+    """表名来自环境变量；只接受中文/字母/数字/下划线，避免动态 SQL 注入。"""
+    value = str(table_name or "").strip()
+    if not value or not re.fullmatch(r"[\w\u4e00-\u9fff]+", value):
+        raise ValueError(f"非法方案A历史表名: {table_name!r}")
+    return value
+
+
+def archive_scheme_a_to_mysql(
+    color_rows: Sequence[Mapping[str, Any]],
+    total_rows: Sequence[Mapping[str, Any]],
+    lingxing_names: Mapping[str, str],
+    table_name: str = SCHEME_A_HISTORY_TABLE,
+) -> int:
+    """保存方案A的每日业务21列快照；同一天重跑时覆盖当天快照。"""
+    labels = _find_month_labels(color_rows or total_rows)
+    if len(labels) < 3:
+        raise RuntimeError(f"方案A无法识别连续3个月份字段，拒绝覆盖历史快照: {labels}")
+
+    _, business_rows = build_business_rows(color_rows, total_rows, lingxing_names)
+    if not business_rows:
+        raise RuntimeError("方案A业务结果为空，拒绝删除当天数据库快照")
+
+    table_name = _validated_table_name(table_name)
+    now = datetime.now()
+    business_date = now.date()
+    m0, m1, m2 = labels[:3]
+    h0, h1, h2 = _month_number(m0), _month_number(m1), _month_number(m2)
+
+    create_sql = f"""
+        CREATE TABLE IF NOT EXISTS `{table_name}` (
+            `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            `业务日期` DATE NOT NULL,
+            `生成时间` DATETIME NOT NULL,
+            `方案` VARCHAR(8) NOT NULL DEFAULT 'A',
+            `当月标签` VARCHAR(16) NOT NULL,
+            `T1标签` VARCHAR(16) NOT NULL,
+            `T2标签` VARCHAR(16) NOT NULL,
+            `SKU` TEXT,
+            `面料颜色编号` VARCHAR(255),
+            `面料` VARCHAR(255),
+            `颜色` VARCHAR(255),
+            `领星颜色` VARCHAR(255),
+            `库存量米` DECIMAL(18,2) NOT NULL DEFAULT 0,
+            `待到货量米` DECIMAL(18,2) NOT NULL DEFAULT 0,
+            `统计类型` VARCHAR(32),
+            `面料编号` VARCHAR(255),
+            `颜色缩写` VARCHAR(255),
+            `库存量条` DECIMAL(18,2) NOT NULL DEFAULT 0,
+            `待到货量条` DECIMAL(18,2) NOT NULL DEFAULT 0,
+            `用量信息缺失SPU` TEXT,
+            `当月完整预估米` DECIMAL(18,2) NOT NULL DEFAULT 0,
+            `当月已下单消耗米` DECIMAL(18,2) NOT NULL DEFAULT 0,
+            `当月剩余预估米` DECIMAL(18,2) NOT NULL DEFAULT 0,
+            `T1预估米` DECIMAL(18,2) NOT NULL DEFAULT 0,
+            `T2预估米` DECIMAL(18,2) NOT NULL DEFAULT 0,
+            `运营当月预估米` DECIMAL(18,2) NOT NULL DEFAULT 0,
+            `运营T1预估米` DECIMAL(18,2) NOT NULL DEFAULT 0,
+            `运营T2预估米` DECIMAL(18,2) NOT NULL DEFAULT 0,
+            PRIMARY KEY (`id`),
+            KEY `idx_scheme_a_date` (`业务日期`, `方案`),
+            KEY `idx_scheme_a_fabric_color` (`面料`, `颜色`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """
+
+    insert_sql = f"""
+        INSERT INTO `{table_name}` (
+            `业务日期`, `生成时间`, `方案`, `当月标签`, `T1标签`, `T2标签`,
+            `SKU`, `面料颜色编号`, `面料`, `颜色`, `领星颜色`,
+            `库存量米`, `待到货量米`, `统计类型`, `面料编号`, `颜色缩写`,
+            `库存量条`, `待到货量条`, `用量信息缺失SPU`,
+            `当月完整预估米`, `当月已下单消耗米`, `当月剩余预估米`,
+            `T1预估米`, `T2预估米`, `运营当月预估米`, `运营T1预估米`, `运营T2预估米`
+        ) VALUES (
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+            %s,%s,%s,%s,%s,%s,%s,%s
+        )
+    """
+
+    values = []
+    for row in business_rows:
+        values.append((
+            business_date,
+            now,
+            "A",
+            m0,
+            m1,
+            m2,
+            str(row.get("SKU") or ""),
+            str(row.get("面料颜色编号") or ""),
+            str(row.get("面料") or ""),
+            str(row.get("颜色") or ""),
+            str(row.get("领星颜色") or ""),
+            float(row.get("库存量/米") or 0),
+            float(row.get("待到货量/米") or 0),
+            str(row.get("统计类型") or ""),
+            str(row.get("面料编号") or ""),
+            str(row.get("颜色缩写") or ""),
+            float(row.get("库存量/条") or 0),
+            float(row.get("待到货量/条") or 0),
+            str(row.get("用量信息缺失SPU") or ""),
+            float(row.get(f"{h0}完整预估/米") or 0),
+            float(row.get(f"{h0}已下单消耗/米") or 0),
+            float(row.get(f"{h0}剩余预估/米") or 0),
+            float(row.get(f"{h1}预估/米") or 0),
+            float(row.get(f"{h2}预估/米") or 0),
+            float(row.get(f"运营{h0}预估/米") or 0),
+            float(row.get(f"运营{h1}预估/米") or 0),
+            float(row.get(f"运营{h2}预估/米") or 0),
+        ))
+
+    with db_cursor(dictionary=False) as cur:
+        cur.execute(create_sql)
+        cur.execute(
+            f"DELETE FROM `{table_name}` WHERE `业务日期`=%s AND `方案`='A'",
+            (business_date,),
+        )
+        cur.executemany(insert_sql, values)
+        cur.execute(
+            f"SELECT COUNT(*) FROM `{table_name}` WHERE `业务日期`=%s AND `方案`='A'",
+            (business_date,),
+        )
+        saved_count = int(cur.fetchone()[0])
+        if saved_count != len(values):
+            raise RuntimeError(
+                f"方案A数据库快照行数不一致：应保存 {len(values)}，实际 {saved_count}"
+            )
+
+    logger.info(
+        "✓ 方案A每日快照已保存到 MySQL `%s`：%s，%d 行；月份=%s/%s/%s",
+        table_name,
+        business_date,
+        saved_count,
+        m0,
+        m1,
+        m2,
+    )
+    return saved_count
+
+
 async def run(
     output_dir: Path,
     manual_mapping_path: Path,
     spu_manual_mapping_path: Path,
     write_feishu: bool = False,
     feishu_table_name: str = DEFAULT_FEISHU_TABLE_NAME,
+    scheme_a_history_table: str = SCHEME_A_HISTORY_TABLE,
 ) -> Path:
+    # 正式口径：方案B。默认参数也是B，这里显式传入，避免未来默认值变更造成静默回退。
     color_rows, total_rows, pending_rows, metrics = await final_export.build_final_rows(
         manual_mapping_path=manual_mapping_path,
         spu_manual_mapping_path=spu_manual_mapping_path,
+        color_split_mode="B",
     )
+
+    # 对照口径：方案A。只用于数据库每日快照，不写入飞书。
+    a_color_rows, a_total_rows, _, _ = await final_export.build_final_rows(
+        manual_mapping_path=manual_mapping_path,
+        spu_manual_mapping_path=spu_manual_mapping_path,
+        color_split_mode="A",
+    )
+
     lingxing_names = await _load_lingxing_name_by_record_id()
+    archive_scheme_a_to_mysql(
+        a_color_rows,
+        a_total_rows,
+        lingxing_names,
+        table_name=scheme_a_history_table,
+    )
+
     output = export_business_workbook(
         color_rows,
         total_rows,
@@ -369,7 +534,7 @@ async def run(
 
 
 def main() -> Path:
-    parser = argparse.ArgumentParser(description="按业务21列表头生成最终面料预估表")
+    parser = argparse.ArgumentParser(description="按业务21列表头生成最终面料预估表：B写飞书，A留MySQL")
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -390,12 +555,17 @@ def main() -> Path:
     parser.add_argument(
         "--write-feishu",
         action="store_true",
-        help="将最终业务21列表全量覆盖写入飞书面料预估明细",
+        help="将方案B最终业务21列表全量覆盖写入飞书面料预估明细",
     )
     parser.add_argument(
         "--feishu-table-name",
         default=DEFAULT_FEISHU_TABLE_NAME,
         help="目标飞书表名，默认面料预估明细",
+    )
+    parser.add_argument(
+        "--scheme-a-history-table",
+        default=SCHEME_A_HISTORY_TABLE,
+        help="方案A每日快照MySQL表名，默认面料预估方案A历史",
     )
     args = parser.parse_args()
     return asyncio.run(
@@ -405,6 +575,7 @@ def main() -> Path:
             spu_manual_mapping_path=args.spu_manual_mapping,
             write_feishu=args.write_feishu,
             feishu_table_name=args.feishu_table_name,
+            scheme_a_history_table=args.scheme_a_history_table,
         )
     )
 
