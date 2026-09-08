@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Diagnose color demand hidden by the "primary fabric only" split rule.
+"""Compare Scheme A and Scheme B color allocation for non-primary fabrics.
 
-Read-only. The final business forecast always counts every configured fabric into
-the fabric TOTAL bucket, but only the fabric with the largest per-piece usage for
-an SPU is allowed into concrete color buckets. This script evaluates the target
-fabric for every configured SPU regardless of that gate, resolves the final
-Feishu color with the production resolver, and quantifies meters that are
-currently present only in the fabric total but not allocated to a color row.
+Read-only. Both schemes count every configured fabric into the fabric TOTAL
+bucket. Scheme A only allocates the largest-per-piece-usage fabric of an SPU to
+concrete color rows; the production Scheme B allocates every configured target
+fabric by the current SKU's resolved final Feishu color.
 
-It does not change any MySQL/Feishu data and does not change production logic.
+This script quantifies the meters that Scheme A would leave outside concrete
+color rows but Scheme B now allocates. It does not change MySQL/Feishu data.
 
 Example:
   python scripts/diagnose_non_primary_fabric_color_usage.py \
@@ -192,8 +191,9 @@ async def run(
                 continue
 
         period = month_labels[0] if source == "当月已下单消耗" else month_labels[delta]
-        color_allocated_now = bool(is_primary and decision.row)
-        hidden_by_primary_gate = bool((not is_primary) and decision.row)
+        allocated_by_scheme_b = bool(decision.row)
+        allocated_by_scheme_a = bool(is_primary and decision.row)
+        added_by_scheme_b = bool((not is_primary) and decision.row)
 
         details.append({
             "面料": fabric_name,
@@ -215,14 +215,15 @@ async def run(
             "单件损耗": _m(usage.get("单件损耗")),
             "用量米数": _m(meters),
             "用量参数状态": "平均单耗兜底" if missing else "正常",
-            "当前是否进入颜色行": "是" if color_allocated_now else "否",
-            "是否被主面料规则挡住": "是" if hidden_by_primary_gate else "否",
-            "颜色维度当前漏拆/米": _m(meters) if hidden_by_primary_gate else 0.0,
+            "方案A是否进入颜色行": "是" if allocated_by_scheme_a else "否",
+            "方案B是否进入颜色行": "是" if allocated_by_scheme_b else "否",
+            "方案B相对A新增拆色": "是" if added_by_scheme_b else "否",
+            "方案B相对A新增拆色/米": _m(meters) if added_by_scheme_b else 0.0,
         })
 
     summary: dict[tuple[str, str, str, str], float] = defaultdict(float)
     by_spu: dict[tuple[str, str, str, str, str], float] = defaultdict(float)
-    hidden_total = 0.0
+    added_total = 0.0
     pending_non_primary_total = 0.0
     for row in details:
         color_key = row["最终飞书颜色"] or "待确认"
@@ -238,7 +239,7 @@ async def run(
                 row["SPU"],
             )
         ] += float(row["用量米数"])
-        hidden_total += float(row["颜色维度当前漏拆/米"])
+        added_total += float(row["方案B相对A新增拆色/米"])
         if row["当前角色"] == "非主面料" and not row["最终飞书颜色"]:
             pending_non_primary_total += float(row["用量米数"])
 
@@ -249,16 +250,16 @@ async def run(
     print(f"其中当前判定为非主面料: {len(non_primary_spus)}")
     print(f"未来/当月存在需求的SPU: {len(active_spus)}")
 
-    print("\n===== 颜色维度影响 =====")
+    print("\n===== 方案A → 方案B 颜色维度影响 =====")
     print(
-        "已确认颜色、但仅因‘非主面料’规则未进入颜色行: "
-        f"{hidden_total:.2f} 米"
+        "方案B相对A新增的已确认颜色拆分: "
+        f"{added_total:.2f} 米"
     )
     print(
-        "非主面料且颜色仍待确认（不能直接分配）: "
+        "非主面料且颜色仍待确认（方案B也不能直接分配）: "
         f"{pending_non_primary_total:.2f} 米"
     )
-    print("说明: 上述‘漏拆’不是面料总量漏算；总量桶在主面料判断前已累加。")
+    print("说明: A/B 的面料总量口径相同；差异只发生在具体颜色分配。")
 
     print("\n===== 按角色 / 颜色 / 月份汇总 =====")
     for key, meters in sorted(
@@ -285,8 +286,8 @@ async def run(
         "颜色体系", "原颜色编码", "最终飞书颜色", "最终领星缩写",
         "匹配方式", "待确认原因", "来源口径", "月份", "数量",
         "单件用量", "单件损耗", "用量米数", "用量参数状态",
-        "当前是否进入颜色行", "是否被主面料规则挡住",
-        "颜色维度当前漏拆/米",
+        "方案A是否进入颜色行", "方案B是否进入颜色行",
+        "方案B相对A新增拆色", "方案B相对A新增拆色/米",
     ]
     with output.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
@@ -298,7 +299,7 @@ async def run(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="量化非主面料因主面料闸门而未拆到具体颜色的需求（只读）"
+        description="量化方案B相对方案A新增的非主面料颜色拆分需求（只读）"
     )
     parser.add_argument("--fabric", required=True)
     parser.add_argument("--color", action="append", default=[])
