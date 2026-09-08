@@ -28,7 +28,6 @@ from jobs.feishu import export_fabric_color_order_forecast_final as final_export
 from jobs.feishu import fabric_color_stocking as stocking
 from jobs.feishu import generate_fabric_forecast as fabric_base
 from jobs.feishu import generate_fabric_forecast_color_system as color_system
-from jobs.feishu.color_mapping_catalog import SUPPORTED_SYSTEMS
 from jobs.feishu.color_system_resolver import ColorSystemResolver
 from jobs.feishu.fabric_color_stocking_spu import load_spu_manual_mapping_catalog
 
@@ -189,7 +188,7 @@ async def run(
             fabric_usage,
         )
 
-        row = {
+        rows.append({
             "SKU": sku,
             "SPU": spu,
             "品名": forecast.product_name,
@@ -212,12 +211,12 @@ async def run(
             **{f"系统{month_labels[d]}用量/米": sys_meters[d] for d in range(4)},
             **{f"运营{month_labels[d]}数量": op_qtys[d] for d in range(4)},
             "系统未来4月用量/米": _m(sum(sys_meters)),
-        }
-        rows.append(row)
+        })
 
     print("\n===== 当前飞书面料颜色清单 =====")
-    print(f"面料: {fabric_name} | 有效颜色数: {len(index.by_fabric.get(fabric_name, ())) }生")
-    for row in index.by_fabric.get(fabric_name, ()):
+    current_catalog = index.by_fabric.get(fabric_name, ())
+    print(f"面料: {fabric_name} | 有效颜色数: {len(current_catalog)}")
+    for row in current_catalog:
         print(
             f"  {row.color_name} | 领星新颜色缩写={row.lingxing_code or '-'} | "
             f"record_id={'、'.join(row.record_ids) or '-'}"
@@ -246,8 +245,8 @@ async def run(
         print(f"  原因={_join(row['匹配方式/未确认原因'] for row in code_rows)}")
         print(f"  系统未来4月={sum(float(row['系统未来4月用量/米'] or 0) for row in code_rows):.2f} 米")
 
-    print("\n===== SPU人工目标色在当前飞书316清单中的状态 =====")
-    target_names = {row.color_name for row in index.by_fabric.get(fabric_name, ())}
+    print("\n===== SPU人工目标色在当前飞书清单中的状态 =====")
+    target_names = {row.color_name for row in current_catalog}
     seen_manual: set[tuple[str, str, str, str]] = set()
     for row in rows:
         manual_targets = str(row["SPU人工目标色"] or "")
