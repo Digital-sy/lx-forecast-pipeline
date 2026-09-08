@@ -422,7 +422,7 @@ async def build_final_rows(
 
     pending_rows: list[dict[str, Any]] = []
     for (fabric_name, system, code, reason), bucket in pending_agg.items():
-        row = {
+        pending_rows.append({
             "面料": fabric_name,
             "颜色体系": system,
             "原颜色编码": code,
@@ -430,9 +430,10 @@ async def build_final_rows(
             **demand_fields(bucket),
             "SPU": "、".join(sorted(bucket["spus"])),
             "SKU": "、".join(sorted(bucket["skus"])),
-        }
-        pending_rows.append(row)
-    pending_rows.sort(key=lambda row: (str(row["面料"]), str(row["颜色体系"]), str(row["原颜色编码"])))
+        })
+    pending_rows.sort(key=lambda row: (
+        str(row["面料"]), str(row["颜色体系"]), str(row["原颜色编码"])
+    ))
 
     audit = {
         "生成时间": current_date.isoformat(timespec="seconds"),
