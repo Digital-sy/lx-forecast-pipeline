@@ -8,7 +8,7 @@
 
 本入口只解决 A/B 两次计算的数据一致性问题。它在一次进程内缓存两套计算共同
 依赖的只读源数据，并冻结本轮计算时间，使 A/B 严格使用同一批：
-SKU 主数据、预测、面料核价、颜色目录、库存/在途和运行月份。
+SKU 主数据、预测、面料核价、颜色目录、人工映射、库存/在途和运行月份。
 
 缓存仅在本次 ``run`` 的上下文内有效，结束后恢复原函数，不影响其他任务。
 """
@@ -98,6 +98,8 @@ def shared_ab_source_snapshot() -> Iterator[dict[str, dict[str, int]]]:
 
     for obj, name in (
         (stocking, "load_catalog_from_feishu"),
+        (stocking, "load_manual_mapping_catalog"),
+        (final_export, "load_spu_manual_mapping_catalog"),
         (stocking, "load_forecast_skus"),
         (stocking, "_load_snapshot_rows"),
         (fabric_base, "get_fabric_params"),
