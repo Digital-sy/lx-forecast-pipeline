@@ -87,9 +87,7 @@ def _month_delta(stat_date: Any, current_date: datetime) -> int | None:
         else:
             value = stat_date
         for delta in range(4):
-            year, month = color_system.add_months(
-                current_date.year, current_date.month, delta
-            )
+            year, month = color_system.add_months(current_date.year, current_date.month, delta)
             if value.year == year and value.month == month:
                 return delta
     except Exception:
@@ -122,8 +120,7 @@ def _fallback_forecast(
         product_name=product_name,
         color_code=str(identity.color_code or "").strip(),
         color_name=str(color_name or "").strip(),
-        color_system=str(identity.color_system or stocking.UNKNOWN_SYSTEM).strip()
-        or stocking.UNKNOWN_SYSTEM,
+        color_system=str(identity.color_system or stocking.UNKNOWN_SYSTEM).strip() or stocking.UNKNOWN_SYSTEM,
         forecast_qty=0,
     )
 
@@ -136,7 +133,6 @@ def _resolve_final_color(
     manual_catalog: stocking.ManualMappingCatalog,
     spu_catalog: SpuManualMappingCatalog,
 ) -> stocking.MatchDecision:
-    """SPU 人工规则是优先级 0；无规则时完全复用既有确定性匹配。"""
     spu_decision = spu_catalog.decision(forecast, fabric_name, index)
     if spu_decision is not None:
         return spu_decision
@@ -161,17 +157,10 @@ def _style_header(ws: Any, headers: Sequence[str]) -> None:
 def _autosize(ws: Any, minimum: int = 10, maximum: int = 45) -> None:
     for cells in ws.columns:
         length = max(len(str(cell.value or "")) for cell in cells)
-        ws.column_dimensions[get_column_letter(cells[0].column)].width = min(
-            max(length + 2, minimum), maximum
-        )
+        ws.column_dimensions[get_column_letter(cells[0].column)].width = min(max(length + 2, minimum), maximum)
 
 
-def _write_rows(
-    ws: Any,
-    headers: Sequence[str],
-    rows: Sequence[Mapping[str, Any]],
-    pending: bool = False,
-) -> None:
+def _write_rows(ws: Any, headers: Sequence[str], rows: Sequence[Mapping[str, Any]], pending: bool = False) -> None:
     _style_header(ws, headers)
     for row_index, row in enumerate(rows, 2):
         for column, header in enumerate(headers, 1):
@@ -188,31 +177,19 @@ def _write_rows(
     _autosize(ws)
 
 
-async def build_final_rows(
-    manual_mapping_path: Path,
-    spu_manual_mapping_path: Path,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+async def build_final_rows(manual_mapping_path: Path, spu_manual_mapping_path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     current_date = datetime.now()
     target_fabrics = tuple(stocking.TARGET_FABRICS)
     target_set = set(target_fabrics)
 
     governance_catalog = stocking.ColorMappingCatalog.from_runtime(strict=True)
     catalog_rows, catalog_source_audit = await stocking.load_catalog_from_feishu(
-        base_token=os.getenv(
-            "FABRIC_COLOR_CATALOG_BASE_TOKEN", stocking.DEFAULT_BASE_TOKEN
-        ),
-        table_id=os.getenv(
-            "FABRIC_COLOR_CATALOG_TABLE_ID", stocking.DEFAULT_CATALOG_TABLE_ID
-        ),
-        view_id=os.getenv(
-            "FABRIC_COLOR_CATALOG_VIEW_ID", stocking.DEFAULT_CATALOG_VIEW_ID
-        ),
+        base_token=os.getenv("FABRIC_COLOR_CATALOG_BASE_TOKEN", stocking.DEFAULT_BASE_TOKEN),
+        table_id=os.getenv("FABRIC_COLOR_CATALOG_TABLE_ID", stocking.DEFAULT_CATALOG_TABLE_ID),
+        view_id=os.getenv("FABRIC_COLOR_CATALOG_VIEW_ID", stocking.DEFAULT_CATALOG_VIEW_ID),
     )
     target_catalog = [row for row in catalog_rows if row.fabric_name in target_set]
-    index = stocking.CatalogIndex(
-        target_catalog,
-        source_record_count=catalog_source_audit.get("source_record_count"),
-    )
+    index = stocking.CatalogIndex(target_catalog, source_record_count=catalog_source_audit.get("source_record_count"))
 
     manual_catalog = stocking.load_manual_mapping_catalog(manual_mapping_path)
     spu_catalog = load_spu_manual_mapping_catalog(spu_manual_mapping_path)
@@ -227,24 +204,13 @@ async def build_final_rows(
     fabric_usage = fabric_base.get_fabric_price_data()
     purchase_order_data = fabric_base.get_purchase_order_data()
     system_forecast_data = fabric_base.get_system_forecast_data()
-    suggest_data = color_system.get_suggest_order_data_color(
-        resolver, current_date=current_date
-    )
+    suggest_data = color_system.get_suggest_order_data_color(resolver, current_date=current_date)
     operation_forecast_data = fabric_base.get_forecast_order_data()
-    effective_qty, _ = color_system._effective_sku_quantities(
-        resolver,
-        system_forecast_data,
-        suggest_data,
-        current_date,
-    )
+    effective_qty, _ = color_system._effective_sku_quantities(resolver, system_forecast_data, suggest_data, current_date)
 
     legacy_merge_map = fabric_base.get_fabric_color_merge_mapping()
     inventory_data, pending_data = fabric_base.get_inventory_data(legacy_merge_map)
-    inv_by_fabric, pend_by_fabric = fabric_base.get_inventory_by_fabric(
-        inventory_data,
-        pending_data,
-        fabric_params,
-    )
+    inv_by_fabric, pend_by_fabric = fabric_base.get_inventory_by_fabric(inventory_data, pending_data, fabric_params)
 
     usage_by_spu: MutableMapping[str, list[tuple[str, Mapping[str, Any]]]] = defaultdict(list)
     for (spu, fabric_name), usage_data in fabric_usage.items():
@@ -254,20 +220,13 @@ async def build_final_rows(
     total_agg: MutableMapping[str, dict[str, Any]] = defaultdict(_empty_bucket)
     color_agg: MutableMapping[tuple[str, str, str], dict[str, Any]] = defaultdict(_empty_bucket)
     pending_agg: MutableMapping[tuple[str, str, str, str], dict[str, Any]] = defaultdict(_empty_bucket)
-
     match_method_counts: MutableMapping[str, int] = defaultdict(int)
     unmatched_reason_counts: MutableMapping[str, int] = defaultdict(int)
 
     def add_usage(sku: str, qty: int, target: str, delta: int | None = None) -> None:
         if qty <= 0:
             return
-        forecast = _fallback_forecast(
-            sku,
-            forecast_by_sku,
-            resolver,
-            snapshot_by_sku,
-            governance_catalog,
-        )
+        forecast = _fallback_forecast(sku, forecast_by_sku, resolver, snapshot_by_sku, governance_catalog)
         spu = str(forecast.spu or "").strip()
         if not spu:
             return
@@ -292,16 +251,8 @@ async def build_final_rows(
             if missing:
                 total_bucket["缺失SPU"].add(spu)
 
-            # 方案B：只要 SPU 配置了该面料，就按当前 SKU 的最终飞书颜色拆分。
-            # 不再以“单件用量最大”作为是否允许拆色的条件。
-            decision = _resolve_final_color(
-                forecast,
-                fabric_name,
-                index,
-                governance_catalog,
-                manual_catalog,
-                spu_catalog,
-            )
+            # 方案B：SPU 配置了该面料即可拆色；不再限制为主面料。
+            decision = _resolve_final_color(forecast, fabric_name, index, governance_catalog, manual_catalog, spu_catalog)
             if decision.row:
                 row = decision.row
                 bucket = color_agg[row.identity]
@@ -320,12 +271,7 @@ async def build_final_rows(
                 continue
 
             reason = str(decision.reason or decision.reason_code or "待确认")
-            key = (
-                fabric_name,
-                forecast.color_system,
-                forecast.color_code,
-                reason,
-            )
+            key = (fabric_name, forecast.color_system, forecast.color_code, reason)
             bucket = pending_agg[key]
             bucket["systems"].add(forecast.color_system)
             bucket["codes"].add(forecast.color_code)
@@ -341,10 +287,8 @@ async def build_final_rows(
 
     for sku, qty in purchase_order_data.items():
         add_usage(sku, int(qty), "purchase")
-
     for (sku, delta), qty in effective_qty.items():
         add_usage(sku, int(qty), "sys_month_m", delta)
-
     for (sku, stat_date), qty in operation_forecast_data.items():
         delta = _month_delta(stat_date, current_date)
         if delta is not None:
@@ -431,9 +375,7 @@ async def build_final_rows(
             "SPU": "、".join(sorted(bucket["spus"])),
             "SKU": "、".join(sorted(bucket["skus"])),
         })
-    pending_rows.sort(key=lambda row: (
-        str(row["面料"]), str(row["颜色体系"]), str(row["原颜色编码"])
-    ))
+    pending_rows.sort(key=lambda row: (str(row["面料"]), str(row["颜色体系"]), str(row["原颜色编码"])))
 
     audit = {
         "生成时间": current_date.isoformat(timespec="seconds"),
@@ -489,47 +431,26 @@ def export_workbook(
     return output
 
 
-async def run(
-    output_dir: Path,
-    manual_mapping_path: Path,
-    spu_manual_mapping_path: Path,
-) -> Path:
-    rows = await build_final_rows(
-        manual_mapping_path=manual_mapping_path,
-        spu_manual_mapping_path=spu_manual_mapping_path,
-    )
+async def run(output_dir: Path, manual_mapping_path: Path, spu_manual_mapping_path: Path) -> Path:
+    rows = await build_final_rows(manual_mapping_path=manual_mapping_path, spu_manual_mapping_path=spu_manual_mapping_path)
     return export_workbook(*rows, output_dir=output_dir)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="生成最终版面料-颜色预计下单表（方案B）")
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path(os.getenv("FABRIC_COLOR_FORECAST_OUTPUT_DIR", "/opt/apps/pythondata/exports")),
-    )
+    parser.add_argument("--output-dir", type=Path, default=Path(os.getenv("FABRIC_COLOR_FORECAST_OUTPUT_DIR", "/opt/apps/pythondata/exports")))
     parser.add_argument(
         "--manual-mapping",
         type=Path,
-        default=Path(os.getenv(
-            "FABRIC_COLOR_MANUAL_MAPPING_PATH",
-            "/opt/apps/pythondata/shared_config/fabric_color_manual_mapping.csv",
-        )),
+        default=Path(os.getenv("FABRIC_COLOR_MANUAL_MAPPING_PATH", "/opt/apps/pythondata/shared_config/fabric_color_manual_mapping.csv")),
     )
     parser.add_argument(
         "--spu-manual-mapping",
         type=Path,
-        default=Path(os.getenv(
-            "FABRIC_COLOR_SPU_MANUAL_MAPPING_PATH",
-            str(DEFAULT_SPU_MANUAL_MAPPING_PATH),
-        )),
+        default=Path(os.getenv("FABRIC_COLOR_SPU_MANUAL_MAPPING_PATH", str(DEFAULT_SPU_MANUAL_MAPPING_PATH))),
     )
     args = parser.parse_args()
-    asyncio.run(run(
-        output_dir=args.output_dir,
-        manual_mapping_path=args.manual_mapping,
-        spu_manual_mapping_path=args.spu_manual_mapping,
-    ))
+    asyncio.run(run(output_dir=args.output_dir, manual_mapping_path=args.manual_mapping, spu_manual_mapping_path=args.spu_manual_mapping))
 
 
 if __name__ == "__main__":
