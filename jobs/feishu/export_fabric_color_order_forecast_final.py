@@ -13,6 +13,10 @@
 
 需求口径沿用现有生产面料预估：建议下单量按 SKU 预测颜色/尺码比例分摊，
 米数=数量×单件用量×单件损耗；单耗缺失仍沿用现有生产表的平均单耗兜底并显式标记。
+
+颜色拆分口径（方案B）：只要 SPU 在《面料核价表》中配置了目标面料，该面料就按当前 SKU
+解析出的最终飞书颜色拆分，不再要求该面料是该 SPU 单件用量最大的“主面料”。
+
 本模块只生成 Excel，不回写 MySQL/飞书。
 """
 from __future__ import annotations
@@ -214,7 +218,6 @@ async def build_final_rows(
     manual_catalog = stocking.load_manual_mapping_catalog(manual_mapping_path)
     spu_catalog = load_spu_manual_mapping_catalog(spu_manual_mapping_path)
 
-    # 与经过验证的 dry-run 使用同一 ForecastSku 构造逻辑。
     forecasts, forecast_audit = stocking.load_forecast_skus(governance_catalog)
     forecast_by_sku = {row.sku: row for row in forecasts}
     snapshot_rows = stocking._load_snapshot_rows()
@@ -223,7 +226,6 @@ async def build_final_rows(
 
     fabric_params = fabric_base.get_fabric_params()
     fabric_usage = fabric_base.get_fabric_price_data()
-    primary_fabric_by_spu = fabric_base.get_primary_fabric_by_spu(fabric_usage)
     purchase_order_data = fabric_base.get_purchase_order_data()
     system_forecast_data = fabric_base.get_system_forecast_data()
     suggest_data = color_system.get_suggest_order_data_color(
@@ -291,10 +293,8 @@ async def build_final_rows(
             if missing:
                 total_bucket["缺失SPU"].add(spu)
 
-            # 与现有面料预估一致：只有主面料拆具体颜色，其他面料只计总量。
-            if primary_fabric_by_spu.get(spu) != fabric_name:
-                continue
-
+            # 方案B：只要 SPU 配置了该面料，就按当前 SKU 的最终飞书颜色拆分。
+            # 不再以“单件用量最大”作为是否允许拆色的条件。
             decision = _resolve_final_color(
                 forecast,
                 fabric_name,
@@ -372,47 +372,35 @@ async def build_final_rows(
             "用量信息缺失SPU": "、".join(sorted(bucket["缺失SPU"])),
         }
 
-    color_rows: list[dict[str, Any]] = []
-    for identity, bucket in color_agg.items():
-        fabric_name, color_name, lx_code = identity
-        catalog_row = next(row for row in index.rows if row.identity == identity)
+    final_rows: list[dict[str, Any]] = []
+    for row in target_catalog:
+        bucket = color_agg.get(row.identity, _empty_bucket())
+        fabric_name, final_color, lingxing_color = row.identity
         params = fabric_params.get(fabric_name, {})
-        fabric_code = str(params.get("面料编号") or "").strip().upper()
+        fabric_code = str(params.get("面料编号") or "").strip()
         meters_per_roll = float(params.get("米数每条") or 0)
-        inventory_key = f"{fabric_code}-{lx_code}" if fabric_code and lx_code else ""
+        inventory_key = f"{fabric_code}-{lingxing_color}".upper() if fabric_code and lingxing_color else ""
         inventory_rolls = int(inventory_data.get(inventory_key, 0) or 0) if inventory_key else 0
         pending_rolls = int(pending_data.get(inventory_key, 0) or 0) if inventory_key else 0
-        inventory_status = (
-            "飞书颜色库存精确匹配"
-            if inventory_key
-            else "飞书颜色缺少领星新颜色缩写，未分配颜色库存"
-        )
-        color_rows.append({
+        final_rows.append({
             "面料": fabric_name,
-            "面料编号": fabric_code,
-            "最终飞书颜色": color_name,
-            "领星新颜色缩写": lx_code,
-            "飞书记录ID": "、".join(catalog_row.record_ids),
-            "原颜色体系": "、".join(sorted(x for x in bucket["systems"] if x)),
-            "原颜色编码": "、".join(sorted(x for x in bucket["codes"] if x)),
-            "匹配方式": "、".join(
-                method for method in (MATCH_SPU_MANUAL, *stocking.MATCH_METHOD_ORDER)
-                if method in bucket["methods"]
-            ),
-            "关联SPU数": len(bucket["spus"]),
-            "关联SKU数": len(bucket["skus"]),
-            "库存匹配键": inventory_key,
-            "库存归属状态": inventory_status,
+            "颜色": final_color,
+            "领星颜色": lingxing_color,
             "库存量/条": inventory_rolls,
             "库存量/米": _meters(inventory_rolls * meters_per_roll),
             "待到货量/条": pending_rolls,
             "待到货量/米": _meters(pending_rolls * meters_per_roll),
             **demand_fields(bucket),
+            "匹配方式": "、".join(sorted(bucket["methods"])),
+            "颜色体系": "、".join(sorted(bucket["systems"])),
+            "原颜色编码": "、".join(sorted(bucket["codes"])),
+            "SPU": "、".join(sorted(bucket["spus"])),
+            "SKU": "、".join(sorted(bucket["skus"])),
         })
 
-    color_rows.sort(key=lambda row: (
-        stocking.TARGET_FABRIC_ORDER.get(str(row["面料"]), 999),
-        str(row["最终飞书颜色"]),
+    final_rows.sort(key=lambda row: (
+        target_fabrics.index(str(row["面料"])) if str(row["面料"]) in target_fabrics else 999,
+        str(row["颜色"]),
     ))
 
     total_rows: list[dict[str, Any]] = []
@@ -426,7 +414,6 @@ async def build_final_rows(
         pending_rolls = int(pend_by_fabric.get(fabric_name, 0) or 0)
         total_rows.append({
             "面料": fabric_name,
-            "面料编号": str(params.get("面料编号") or ""),
             "库存量/条": inventory_rolls,
             "库存量/米": _meters(inventory_rolls * meters_per_roll),
             "待到货量/条": pending_rolls,
@@ -436,107 +423,69 @@ async def build_final_rows(
 
     pending_rows: list[dict[str, Any]] = []
     for (fabric_name, system, code, reason), bucket in pending_agg.items():
-        pending_rows.append({
+        row = {
             "面料": fabric_name,
             "颜色体系": system,
-            "原始颜色编码": code,
-            "未确认原因": reason,
-            "关联SPU数": len(bucket["spus"]),
-            "关联SKU数": len(bucket["skus"]),
-            "涉及SPU": "、".join(sorted(bucket["spus"])),
+            "原颜色编码": code,
+            "待确认原因": reason,
             **demand_fields(bucket),
-        })
-    pending_rows.sort(key=lambda row: (
-        stocking.TARGET_FABRIC_ORDER.get(str(row["面料"]), 999),
-        str(row["颜色体系"]),
-        str(row["原始颜色编码"]),
-    ))
+            "SPU": "、".join(sorted(bucket["spus"])),
+            "SKU": "、".join(sorted(bucket["skus"])),
+        }
+        pending_rows.append(row)
+    pending_rows.sort(key=lambda row: (str(row["面料"]), str(row["颜色体系"]), str(row["原颜色编码"])))
 
-    confirmed_system_meters = sum(
-        sum(float(v) for v in bucket["sys_month_m"])
-        for bucket in color_agg.values()
-    )
-    pending_system_meters = sum(
-        sum(float(v) for v in bucket["sys_month_m"])
-        for bucket in pending_agg.values()
-    )
-    primary_total = confirmed_system_meters + pending_system_meters
-    metrics = {
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "target_fabric_count": len(target_fabrics),
-        "color_output_row_count": len(color_rows),
-        "pending_output_row_count": len(pending_rows),
-        "confirmed_system_meters_4m": _meters(confirmed_system_meters),
-        "pending_system_meters_4m": _meters(pending_system_meters),
-        "primary_fabric_system_meters_4m": _meters(primary_total),
-        "confirmed_coverage_pct": (
-            round(confirmed_system_meters / primary_total * 100, 2)
-            if primary_total else 0.0
-        ),
-        "match_method_counts": dict(sorted(match_method_counts.items())),
-        "unmatched_reason_counts": dict(sorted(unmatched_reason_counts.items())),
-        "manual_mapping_audit": manual_catalog.audit(),
-        "spu_manual_mapping_audit": spu_catalog.audit(),
-        "forecast_audit": forecast_audit,
-        "catalog_source_audit": catalog_source_audit,
-        "inventory_policy": "颜色库存仅按面料编号+飞书领星新颜色缩写精确匹配；同一飞书颜色只分配一次",
-        "color_system_policy": "A2023/B2024仅使用SKU自身明确标签；飞书颜色和人工映射绝不反推颜色体系",
+    audit = {
+        "生成时间": current_date.isoformat(timespec="seconds"),
+        "颜色拆分口径": "方案B：SPU配置目标面料即按SKU最终飞书颜色拆分，不限制主面料",
+        "飞书颜色目录审计": catalog_source_audit,
+        "SKU主数据审计": forecast_audit,
+        "最终颜色行数": len(final_rows),
+        "面料总量行数": len(total_rows),
+        "待确认颜色行数": len(pending_rows),
+        "SPU人工规则数": len(spu_catalog.rows),
+        "匹配方式计数": dict(sorted(match_method_counts.items())),
+        "待确认原因计数": dict(sorted(unmatched_reason_counts.items())),
     }
-    return color_rows, total_rows, pending_rows, metrics
+    return final_rows, total_rows, pending_rows, audit
 
 
 def export_workbook(
-    color_rows: Sequence[Mapping[str, Any]],
+    final_rows: Sequence[Mapping[str, Any]],
     total_rows: Sequence[Mapping[str, Any]],
     pending_rows: Sequence[Mapping[str, Any]],
-    metrics: Mapping[str, Any],
+    audit: Mapping[str, Any],
     output_dir: Path,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
-    workbook = Workbook()
+    output = output_dir / f"最终面料颜色预计下单_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "最终面料颜色预计下单"
+    final_headers = list(final_rows[0].keys()) if final_rows else ["面料", "颜色", "领星颜色"]
+    _write_rows(ws, final_headers, final_rows)
 
-    color_ws = workbook.active
-    color_ws.title = "面料-颜色预计下单"
-    color_headers = list(color_rows[0].keys()) if color_rows else [
-        "面料", "面料编号", "最终飞书颜色", "领星新颜色缩写"
-    ]
-    _write_rows(color_ws, color_headers, color_rows)
+    ws_total = wb.create_sheet("面料总量")
+    total_headers = list(total_rows[0].keys()) if total_rows else ["面料"]
+    _write_rows(ws_total, total_headers, total_rows)
 
-    total_ws = workbook.create_sheet("面料总量")
-    total_headers = list(total_rows[0].keys()) if total_rows else ["面料", "面料编号"]
-    _write_rows(total_ws, total_headers, total_rows)
+    ws_pending = wb.create_sheet("待确认颜色")
+    pending_headers = list(pending_rows[0].keys()) if pending_rows else ["面料", "颜色体系", "原颜色编码", "待确认原因"]
+    _write_rows(ws_pending, pending_headers, pending_rows, pending=True)
 
-    pending_ws = workbook.create_sheet("待确认颜色")
-    pending_headers = list(pending_rows[0].keys()) if pending_rows else [
-        "面料", "颜色体系", "原始颜色编码", "未确认原因"
-    ]
-    _write_rows(pending_ws, pending_headers, pending_rows, pending=True)
+    ws_audit = wb.create_sheet("审计")
+    _style_header(ws_audit, ["项目", "值"])
+    for row_index, (key, value) in enumerate(audit.items(), 2):
+        ws_audit.cell(row_index, 1, key).border = BORDER
+        ws_audit.cell(row_index, 1).alignment = LEFT
+        if isinstance(value, (dict, list, tuple, set)):
+            value = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        ws_audit.cell(row_index, 2, value).border = BORDER
+        ws_audit.cell(row_index, 2).alignment = LEFT
+    _autosize(ws_audit)
 
-    summary_ws = workbook.create_sheet("核对摘要")
-    _style_header(summary_ws, ["指标", "值"])
-    row_index = 2
-    for key, value in metrics.items():
-        if isinstance(value, (dict, list, tuple)):
-            value = json.dumps(value, ensure_ascii=False, sort_keys=True)
-        summary_ws.cell(row_index, 1, key)
-        summary_ws.cell(row_index, 2, value)
-        for cell in summary_ws[row_index]:
-            cell.border = BORDER
-            cell.alignment = LEFT
-        row_index += 1
-    summary_ws.freeze_panes = "A2"
-    _autosize(summary_ws, maximum=80)
-
-    output = output_dir / f"面料-颜色预计下单表_最终版_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-    workbook.save(output)
-    logger.info(
-        "最终预计下单表完成：%s；飞书颜色 %d 行，面料总量 %d 行，待确认 %d 行，4月颜色覆盖率 %.2f%%",
-        output,
-        len(color_rows),
-        len(total_rows),
-        len(pending_rows),
-        float(metrics.get("confirmed_coverage_pct") or 0),
-    )
+    wb.save(output)
+    logger.info("最终面料颜色预计下单表已生成: %s", output)
     return output
 
 
@@ -552,33 +501,35 @@ async def run(
     return export_workbook(*rows, output_dir=output_dir)
 
 
-def main() -> Path:
-    parser = argparse.ArgumentParser(description="生成SPU人工映射收口后的最终面料-颜色预计下单表")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="生成最终版面料-颜色预计下单表")
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path(os.getenv("PROCUREMENT_EXPORT_DIR", "/opt/apps/pythondata/exports")),
+        default=Path(os.getenv("FABRIC_COLOR_FORECAST_OUTPUT_DIR", "/opt/apps/pythondata/exports")),
     )
     parser.add_argument(
         "--manual-mapping",
         type=Path,
-        default=stocking.DEFAULT_MANUAL_MAPPING_PATH,
-        help="历史四字段人工映射 CSV",
+        default=Path(os.getenv(
+            "FABRIC_COLOR_MANUAL_MAPPING_PATH",
+            "/opt/apps/pythondata/shared_config/fabric_color_manual_mapping.csv",
+        )),
     )
     parser.add_argument(
         "--spu-manual-mapping",
         type=Path,
-        default=DEFAULT_SPU_MANUAL_MAPPING_PATH,
-        help="SPU级人工映射 CSV；键=面料名+原始颜色编码+SPU",
+        default=Path(os.getenv(
+            "FABRIC_COLOR_SPU_MANUAL_MAPPING_PATH",
+            str(DEFAULT_SPU_MANUAL_MAPPING_PATH),
+        )),
     )
     args = parser.parse_args()
-    return asyncio.run(
-        run(
-            output_dir=args.output_dir,
-            manual_mapping_path=args.manual_mapping,
-            spu_manual_mapping_path=args.spu_manual_mapping,
-        )
-    )
+    asyncio.run(run(
+        output_dir=args.output_dir,
+        manual_mapping_path=args.manual_mapping,
+        spu_manual_mapping_path=args.spu_manual_mapping,
+    ))
 
 
 if __name__ == "__main__":
