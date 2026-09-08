@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 """Read-only trace for final business fabric-color usage.
 
-Reuses the same inputs and color-resolution logic as
-jobs.feishu.export_fabric_color_order_forecast_final, but records the SKU/SPU
-contributions behind selected final Feishu colors.
+Reuses the same inputs, Scheme B fabric-splitting policy, and color-resolution
+logic as jobs.feishu.export_fabric_color_order_forecast_final, but records the
+SKU/SPU contributions behind selected final Feishu colors.
 
 Example:
   python scripts/trace_final_fabric_color_usage.py \
@@ -67,7 +67,6 @@ async def run(
     resolver = ColorSystemResolver(snapshot_rows)
 
     fabric_usage = fabric_base.get_fabric_price_data()
-    primary_fabric_by_spu = fabric_base.get_primary_fabric_by_spu(fabric_usage)
     purchase_order_data = fabric_base.get_purchase_order_data()
     system_forecast_data = fabric_base.get_system_forecast_data()
     suggest_data = color_system.get_suggest_order_data_color(resolver, current_date=now)
@@ -86,7 +85,7 @@ async def run(
             sku, forecast_by_sku, resolver, snapshot_by_sku, governance_catalog
         )
         spu = str(forecast.spu or "").strip()
-        if not spu or primary_fabric_by_spu.get(spu) != fabric_name:
+        if not spu:
             return
         usage = fabric_usage.get((spu, fabric_name))
         if not usage:
@@ -170,7 +169,7 @@ async def run(
         r = matches[0]
         print(f"{fabric_name} | {color} | 领星缩写={r.identity[2]} | record_id={'、'.join(r.record_ids)}")
 
-    print("\n===== 用量汇总（与最终算法同口径） =====")
+    print("\n===== 用量汇总（与最终方案B算法同口径） =====")
     for color in colors:
         print(f"\n[{color}]")
         found = False
@@ -201,7 +200,7 @@ async def run(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="追溯最终面料颜色用量来源（只读）")
+    parser = argparse.ArgumentParser(description="追溯最终方案B面料颜色用量来源（只读）")
     parser.add_argument("--fabric", required=True)
     parser.add_argument("--color", action="append", required=True)
     parser.add_argument(
