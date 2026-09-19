@@ -334,6 +334,85 @@ lxpm_product_category_snapshot
 
 如果 `lxpm_product_category_snapshot` 不存在，流水线仍可继续，但“颜色-领星”字段为空。
 
+### SKU 颜色销量 → 17 个面料具体颜色用量（只读）
+
+`jobs/feishu/fabric_color_stocking.py` 在现有预测与面料映射后增加一层只读核对：
+
+```text
+预测对比表_SKU
+  + lxpm_product_category_snapshot（品名、颜色体系）
+  + 面料核价表（SPU → 面料、单件用量、单件损耗）
+  + 飞书当前有效面料颜色清单
+  → 17面料 × 飞书具体颜色 × 未来4个月预估米数
+```
+
+米数计算固定为：
+
+```text
+预估面料用量（米）= SKU未来4个月预估销量 × 单件用量 × 单件损耗
+```
+
+单件用量为空或 0 时不使用其他 SPU 均值，进入“用量参数缺失”。颜色未匹配
+但单件用量存在时仍计算米数，并进入“待人工确认SKU”。
+
+自动确认优先级固定为：
+
+1. SKU `颜色中文名` = 清单 `颜色`；
+2. SKU `颜色编码` = 清单 `领星新颜色缩写`；
+3. 飞书清单显式 `数字#颜色` / `数字-颜色` 色号解析；
+4. 使用 `颜色体系 + 颜色编码/中文名` 经 A2023/B2024 编制表精确消歧；
+5. 唯一的确定性中文核心/括号内别名；
+6. 已启用的历史人工确认映射。
+
+任一级出现多个候选都不会自动选择。波点、圆点、豹纹、印花、花色、格子、
+条纹、撞色、黑底、白底、底色、拼色受图案保护，不会强制归到纯色。
+
+全部确定性规则失败后，任务只在同一个面料的飞书清单中生成最多 3 个模糊
+候选。候选会处理全半角、括号、末尾“色”、业务后缀、显式色号、括号别名、
+常见简繁和标点差异，但只进入“模糊候选审核”，永不计入已确认颜色用量。
+默认分数阈值为高 90、中 80、低 70，高置信度还要求第一、第二候选分差至少
+10 分；可通过命令参数调整。
+
+为兼容当前主分支尚未把四个颜色字段持久化到 `预测对比表_SKU` 的情况，
+兼容读取会显式复用既有规则：`normalize_sku`、`parse_lingxing_color`、
+`get_fabric_price_data` 和 `ColorMappingCatalog`。这些上游处理会在“核对摘要”
+的 `source_adapter_disclosures` 单独列出；清单直接匹配本身仍保持字面精确。
+
+手工 dry-run：
+
+```bash
+python -m jobs.feishu.fabric_color_stocking --dry-run \
+  --as-of 2026-07-28 \
+  --output-dir /opt/apps/pythondata/exports
+```
+
+输出 Excel 包含“颜色用量总览”“飞书颜色用量”“自动归并SKU明细”
+“待人工确认SKU”“用量参数缺失”“飞书17面料颜色清单”“模糊候选审核”
+“优先补标清单”和“核对摘要”。飞书存在但没有需求的颜色也会以 0 用量输出。
+同目录另写 JSON 核对指标。任务只读 MySQL/飞书，不回写远端，也未加入
+`run_procurement_pipeline.sh` 的生产执行步骤。
+
+人工审核闭环文件为：
+
+```text
+config/fabric_color_manual_mapping.csv
+```
+
+审核键是 `面料名 + 原始颜色编码 + 原始颜色中文名 + 颜色体系`，目标使用
+飞书记录 ID 和原值共同校验。仅启用记录参与下一次确定性匹配，凭证不进入
+CSV 或代码。
+
+飞书清单资源坐标可用以下环境变量覆盖：
+
+```text
+FABRIC_COLOR_CATALOG_BASE_TOKEN
+FABRIC_COLOR_CATALOG_TABLE_ID
+FABRIC_COLOR_CATALOG_VIEW_ID
+FABRIC_COLOR_LINKED_TABLE_ID
+```
+
+飞书认证继续使用已有 `FEISHU_APP_ID` / `FEISHU_APP_SECRET` 环境变量，凭证不写入代码。
+
 ---
 
 ## 9. 其他生产入口
