@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "notes": "Manual-only mapping for forecast experiments. Do not auto-apply guessed mappings. Expand only after browse node is verified from Amazon Category Insights.",
+  "marketplace": "United States",
+  "mappings": {
+    "T恤": {
+      "browse_node_id": "1044544",
+      "browse_node_name": "Womens Tshirts",
+      "product_type": "SHIRT",
+      "confidence": "verified",
+      "source": "Amazon Category Insights backend example supplied by user"
+    }
+  }
+}
