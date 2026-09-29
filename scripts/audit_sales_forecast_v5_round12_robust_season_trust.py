@@ -109,8 +109,6 @@ def category_support(
                 continue
             if prev < 10 or cur < 10:
                 continue
-            # Robust decision statistic: each qualifying SPU gets one vote; extreme
-            # ratios are winsorized so a single explosive SKU cannot dominate.
             ratios.append(max(0.50, min(2.00, cur / prev)))
 
         cr1, cr3, cr5, hhi = r11.concentration(target_vals)
@@ -163,7 +161,6 @@ def apply_trust_gates(
         spu_f = r11.spu_history_features(actual, first_sale, str(r.get("SPU") or ""), target)
         c = cat_support.get((month, hs, cat), {})
 
-        # Defaults: preserve A7 unless a fixed trust gate says otherwise.
         p14 = a7
         p15 = a7
         p16 = a7
@@ -182,12 +179,8 @@ def apply_trust_gates(
                 sufficient = bool(c.get("类目信号充分", 0))
                 broad_rising = bool(c.get("类目广泛上涨", 0))
                 concentrated = bool(c.get("集中度风险", 0))
-
-                # A14 only tests SPU anomaly trust.
                 r14 = "ALLOW_NORMAL_SPU"
 
-                # A15: category may only veto. If cohort is too small, do NOT use
-                # category evidence either way; preserve the SPU-level A7 signal.
                 if sufficient and not broad_rising:
                     p15 = p16 = a3
                     r15 = "BLOCK_CATEGORY_NOT_BROAD"
@@ -195,8 +188,6 @@ def apply_trust_gates(
                 else:
                     r15 = "ALLOW_CATEGORY_BROAD" if sufficient else "KEEP_SMALL_COHORT"
                     if concentrated:
-                        # A16 never adds demand. It only halves the incremental A7
-                        # seasonal uplift above A3 when category representation is weak.
                         p16 = a3 + 0.50 * max(0.0, a7 - a3)
                         r16 = "HALF_UPLIFT_HIGH_CONCENTRATION"
                     else:
@@ -235,7 +226,7 @@ def monthly(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
-def rule_summary(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]]:
+def rule_summary(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for hs in ("H2", "H3"):
         hr = [r for r in rows if str(r.get("Horizon")) == hs]
@@ -269,7 +260,16 @@ def july_category(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 row[f"{name}_Bias%"] = m.get("Bias%")
                 row[f"{name}_WAPE"] = m.get("WAPE")
             sample = seg[0] if seg else {}
-            for k in ("类目_有效SPU数", "类目_SPU环比中位数", "类目_上涨SPU广度", "类目_类目广泛上涨", "类目_CR1", "类目_HHI", "类目_集中度风险", "类目_异常SPU_LY销量占比"):
+            for k in (
+                "类目_有效SPU数",
+                "类目_SPU环比中位数",
+                "类目_上涨SPU广度",
+                "类目_类目广泛上涨",
+                "类目_CR1",
+                "类目_HHI",
+                "类目_集中度风险",
+                "类目_异常SPU_LY销量占比",
+            ):
                 row[k] = sample.get(k)
             out.append(row)
     out.sort(key=lambda x: (x["Horizon"], -(abs(float(x.get(f"{A7}_Bias%") or 0)))))
