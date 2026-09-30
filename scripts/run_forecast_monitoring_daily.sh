@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================
-# 销量预测动态监控（影子系统 V2）
+# 销量预测动态监控（影子系统 V3）
 #
 # 只写 forecast_* 新表，不修改现有生产预测/采购表。
 # 1. 当前FBA库存每日快照
@@ -9,9 +9,11 @@
 # 4. NEW_VISIBLE breakout监控
 # 5. 飞书摘要
 #
-# V2数据源保护：
+# V2/V3数据保护：
 # - 自动选择最新产品表现源
-# - 产品表现数据落后>3天直接失败，不使用陈旧数据
+# - 产品表现数据落后>3天直接失败
+# - FBA msku/seller_sku 自动兼容
+# - NEW_VISIBLE 按 店铺×SPU 首销日期识别
 # ============================================
 
 set -euo pipefail
@@ -55,6 +57,7 @@ notify_failed() {
 if ! "$PYTHON" -m py_compile \
     "$PROJECT_DIR/jobs/forecast_monitoring/daily_monitor.py" \
     "$PROJECT_DIR/jobs/forecast_monitoring/daily_monitor_v2.py" \
+    "$PROJECT_DIR/jobs/forecast_monitoring/daily_monitor_v3.py" \
     >> "$LOG_FILE" 2>&1; then
     notify_failed "Python语法预检失败"
     exit 1
@@ -63,7 +66,7 @@ fi
 echo "✓ Python语法预检通过" >> "$LOG_FILE"
 
 set +e
-"$PYTHON" -m jobs.forecast_monitoring.daily_monitor_v2 --notify >> "$LOG_FILE" 2>&1
+"$PYTHON" -m jobs.forecast_monitoring.daily_monitor_v3 --notify >> "$LOG_FILE" 2>&1
 EXIT_CODE=$?
 set -e
 
