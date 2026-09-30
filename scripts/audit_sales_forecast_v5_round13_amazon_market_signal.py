@@ -163,8 +163,6 @@ def market_features(
     historical_support = ly_units is not None and ly_units >= 1.05
     historical_against = ly_units is not None and ly_units <= 0.95
 
-    # Demand-quality confirmation is auxiliary: require one traffic/search measure not
-    # to contradict when available, but units sold remains the primary market signal.
     confirms = [x for x in (ly_search, ly_clicks, ly_views) if x is not None]
     strong_support = historical_support and (not confirms or sum(x >= 1.00 for x in confirms) >= max(1, len(confirms) // 2))
 
@@ -215,7 +213,6 @@ def enrich_market(
 
 
 def apply_market_models(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Add A17/A18. Neither candidate can exceed A7."""
     out: List[Dict[str, Any]] = []
     for r in rows:
         x = dict(r)
@@ -238,7 +235,6 @@ def apply_market_models(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
             hist_support = bool(r.get("Amazon_历史强支持上涨", 0))
             current_weak = bool(r.get("Amazon_当前市场偏弱", 0))
 
-            # A17: external market can only brake an already existing uplift.
             if hist_against or current_weak:
                 p17 = min(a16, a3 + 0.25 * uplift)
                 r17 = "MARKET_STRONG_BRAKE"
@@ -248,10 +244,6 @@ def apply_market_models(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
             elif hist_support:
                 r17 = "MARKET_SUPPORT_KEEP_A16"
 
-            # A18 starts from A17, then may restore only part of A7 uplift when the
-            # internal breadth gate blocked it but the independent Amazon market says
-            # the target-month rise was real. Never exceed A7 and never restore when
-            # current visible market momentum is weak.
             p18 = p17
             r18 = r17
             if (
@@ -325,6 +317,7 @@ def mapping_coverage(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
         actual = sum(float(r.get("实际销量", 0) or 0) for r in hr)
         mapped = [r for r in hr if r.get("Amazon映射")]
         mapped_actual = sum(float(r.get("实际销量", 0) or 0) for r in mapped)
+        mapped_categories = sorted({str(r.get("品类")) for r in mapped})
         out.append({
             "Horizon": hs,
             "记录数": len(hr),
@@ -333,7 +326,7 @@ def mapping_coverage(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "实际销量": actual,
             "已映射实际销量": mapped_actual,
             "实际销量覆盖率": None if actual <= 0 else mapped_actual / actual,
-            "已映射品类": sorted({str(r.get("品类")) for r in mapped}),
+            "已映射品类": ",".join(mapped_categories),
         })
     return out
 
