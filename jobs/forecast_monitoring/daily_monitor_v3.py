@@ -2,12 +2,14 @@
 # -*- coding: utf-8 -*-
 """Forecast daily shadow monitoring V3.
 
-V3 keeps V2 freshness selection and adds two deployment-safety fixes discovered by
+V3 keeps V2 freshness selection and adds deployment-safety fixes discovered by
 source audit on 2026-09-30:
 1. FBA source uses `msku` (not `seller_sku`) on the current schema. Inventory snapshot
-   now auto-detects either field and uses the source table's own store_name when present.
+   auto-detects either field and uses the source table's own store_name when present.
 2. NEW_VISIBLE lifecycle is evaluated at store+SPU level. A SPU sold earlier in another
    shop must not make a later launch in the current shop look ESTABLISHED.
+3. The very first --dry-run is safe even before forecast_* tables exist: inventory
+   features remain NULL until a real inventory snapshot has been persisted.
 
 Still shadow-only: writes only forecast_* tables; never modifies production forecast or
 procurement tables.
@@ -15,13 +17,23 @@ procurement tables.
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Any, Dict, List, Mapping, Sequence, Tuple
+from typing import Dict, Tuple
 
 from common.database import db_cursor
 from jobs.forecast_monitoring import daily_monitor as base
 from jobs.forecast_monitoring import daily_monitor_v2 as v2
 
 _ORIGINAL_BUILD_FEATURE_ROWS = base.build_feature_rows
+_ORIGINAL_INVENTORY_BY_SPU = base.inventory_by_spu
+
+
+def safe_inventory_by_spu(snapshot_date: date):
+    if not base.table_exists(base.INVENTORY_SNAPSHOT_TABLE):
+        base.logger.info(
+            f"{base.INVENTORY_SNAPSHOT_TABLE} 尚不存在；本次特征构建库存字段保持NULL"
+        )
+        return {}
+    return _ORIGINAL_INVENTORY_BY_SPU(snapshot_date)
 
 
 def capture_inventory_snapshot(snapshot_date: date, dry_run: bool = False) -> int:
@@ -50,8 +62,6 @@ def capture_inventory_snapshot(snapshot_date: date, dry_run: bool = False) -> in
     else:
         raise RuntimeError(f"{base.FBA_TABLE} 既没有 msku 也没有 seller_sku")
 
-    # Current audited FBA schema already contains store_name. Prefer the source value;
-    # only fall back to store-list mapping for older schemas.
     if "store_name" in fba_cols:
         store_expr = "COALESCE(f.store_name,'')"
         store_join = ""
@@ -95,8 +105,6 @@ def capture_inventory_snapshot(snapshot_date: date, dry_run: bool = False) -> in
         inbound_shipped = base.num(r.get("inbound_shipped"))
         inbound_receiving = base.num(r.get("inbound_receiving"))
 
-        # Keep the project's currently approved inventory formulas. Store components so
-        # historical snapshots can be recomputed later if semantics are revised.
         total_inventory = fulfillable + reserved + transfers + inbound_shipped + inbound_receiving
         available_inventory = fulfillable + reserved + transfers + inbound_receiving
         key = base.md5_key([
@@ -145,7 +153,6 @@ def capture_inventory_snapshot(snapshot_date: date, dry_run: bool = False) -> in
 
 
 def load_first_sale_by_store_spu() -> Dict[Tuple[str, str], date]:
-    """First positive-sale month at shop+SPU grain using existing monthly history."""
     if not base.table_exists(base.MONTHLY_SALES_TABLE):
         base.logger.warning(f"{base.MONTHLY_SALES_TABLE} 不存在，店铺首销将无法识别")
         return {}
@@ -217,7 +224,8 @@ def build_feature_rows(snapshot_date: date):
 
 
 def install_patch() -> None:
-    v2.install_patch()  # freshness selector
+    v2.install_patch()
+    base.inventory_by_spu = safe_inventory_by_spu
     base.capture_inventory_snapshot = capture_inventory_snapshot
     base.build_feature_rows = build_feature_rows
 
