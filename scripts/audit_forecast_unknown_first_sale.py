@@ -122,7 +122,6 @@ def main() -> int:
         and text(r.get("forecastability")) == "UNKNOWN"
     ]
     unknown_keys = sorted({(text(r.get("store_name")), text(r.get("spu"))) for r in unknown_rows})
-    unknown_set = set(unknown_keys)
     print(f"UNKNOWN shop+SPU: {len(unknown_keys)}")
 
     monthly = load_monthly_rows()
@@ -151,10 +150,16 @@ def main() -> int:
             c["MONTHLY_EXACT_POSITIVE"] += 1
         else:
             c["MONTHLY_NO_EXACT"] += 1
+
         if (shop, spu) in prefix_positive:
             c["MONTHLY_SKU_PREFIX_MATCH"] += 1
-        if spu_any_shop.get(spu) - {shop}:
+
+        shops_with_spu = spu_any_shop.get(spu, set())
+        if not shops_with_spu:
+            c["MONTHLY_SPU_ABSENT_ALL_TARGET_SHOPS"] += 1
+        elif shops_with_spu - {shop}:
             c["SAME_SPU_OTHER_SHOP"] += 1
+
         if (shop, spu) in daily_recent:
             c["DAILY_RECENT_POSITIVE_100D"] += 1
         else:
@@ -165,7 +170,8 @@ def main() -> int:
                 "SPU": spu,
                 "monthly_exact": (shop, spu) in exact_positive,
                 "monthly_sku_prefix": (shop, spu) in prefix_positive,
-                "other_shops": sorted(spu_any_shop.get(spu, set()) - {shop}),
+                "monthly_spu_present_shops": sorted(shops_with_spu),
+                "other_shops": sorted(shops_with_spu - {shop}),
                 "daily_recent_first": str(daily_recent.get((shop, spu)) or ""),
             })
 
@@ -181,6 +187,7 @@ def main() -> int:
 
     print("\n=== 判读规则 ===")
     print("MONTHLY_NO_EXACT 高：销量统计_msku月度 对该店首销覆盖不足。")
+    print("MONTHLY_SPU_ABSENT_ALL_TARGET_SHOPS 高：月销量表四个目标店中完全没有该SPU正销量记录。")
     print("MONTHLY_SKU_PREFIX_MATCH 高但 exact 低：月销量表 SPU 字段/解析口径有问题。")
     print("DAILY_RECENT_POSITIVE_100D 高：日产品表现表可补充 NEW_VISIBLE 最近首销识别。")
     print("SAME_SPU_OTHER_SHOP 高：必须坚持 店铺×SPU，不可用全局SPU首销。")
