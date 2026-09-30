@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================
-# 销量预测动态监控（影子系统）
+# 销量预测动态监控（影子系统 V2）
 #
 # 只写 forecast_* 新表，不修改现有生产预测/采购表。
 # 1. 当前FBA库存每日快照
@@ -9,7 +9,9 @@
 # 4. NEW_VISIBLE breakout监控
 # 5. 飞书摘要
 #
-# 建议：安排在领星/产品表现/FBA源数据同步完成之后执行。
+# V2数据源保护：
+# - 自动选择最新产品表现源
+# - 产品表现数据落后>3天直接失败，不使用陈旧数据
 # ============================================
 
 set -euo pipefail
@@ -29,7 +31,6 @@ if [ ! -x "$PYTHON" ]; then
     exit 1
 fi
 
-# 防止上一次任务未结束时重复启动。
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') 已有forecast monitoring任务运行，本次跳过" >> "$LOG_FILE"
@@ -51,9 +52,9 @@ notify_failed() {
       2>/dev/null || true
 }
 
-# 先做语法检查，避免任何数据库写入后才发现代码错误。
 if ! "$PYTHON" -m py_compile \
     "$PROJECT_DIR/jobs/forecast_monitoring/daily_monitor.py" \
+    "$PROJECT_DIR/jobs/forecast_monitoring/daily_monitor_v2.py" \
     >> "$LOG_FILE" 2>&1; then
     notify_failed "Python语法预检失败"
     exit 1
@@ -61,9 +62,8 @@ fi
 
 echo "✓ Python语法预检通过" >> "$LOG_FILE"
 
-# 主任务内部会发送成功/异常摘要；失败则由本脚本补发失败通知。
 set +e
-"$PYTHON" -m jobs.forecast_monitoring.daily_monitor --notify >> "$LOG_FILE" 2>&1
+"$PYTHON" -m jobs.forecast_monitoring.daily_monitor_v2 --notify >> "$LOG_FILE" 2>&1
 EXIT_CODE=$?
 set -e
 
