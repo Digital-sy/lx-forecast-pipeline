@@ -39,13 +39,10 @@ from collections import defaultdict
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from common.database import db_cursor
 from scripts.amazon_category_insights_performance_adapter_v2 import (
     DEFAULT_SCHEMA,
     DEFAULT_TABLE,
-    _fetch_all,
-    _ident,
-    _match_browse_node,
-    add_months,
     load_monthly_market as load_l12m_market,
 )
 
@@ -57,6 +54,36 @@ PV_METRIC_PATHS = {
 
 MONTH_NUM = {calendar.month_abbr[i].lower(): i for i in range(1, 13)}
 MONTH_NUM.update({calendar.month_name[i].lower(): i for i in range(1, 13)})
+
+
+def _fetch_all(sql: str, params: Sequence[Any] = ()) -> List[Dict[str, Any]]:
+    """Read-only query helper local to V3 so the adapter does not depend on private V2 symbols."""
+    with db_cursor(dictionary=True) as cur:
+        cur.execute(sql, tuple(params))
+        return list(cur.fetchall())
+
+
+def _ident(name: str) -> str:
+    """Quote a trusted SQL identifier after conservative validation."""
+    if not re.fullmatch(r"[A-Za-z0-9_$\u4e00-\u9fff]+", str(name or "")):
+        raise ValueError(f"Unsafe SQL identifier: {name!r}")
+    return f"`{name}`"
+
+
+def _match_browse_node(series_id: Any, browse_node_ids: Sequence[str]) -> Optional[str]:
+    """Match only explicitly configured Browse Node IDs embedded in series_id."""
+    s = str(series_id or "")
+    for node in browse_node_ids:
+        node = str(node)
+        if f"_{node}_" in s:
+            return node
+    return None
+
+
+def add_months(d: date, delta: int) -> date:
+    y = d.year + (d.month - 1 + delta) // 12
+    m = (d.month - 1 + delta) % 12 + 1
+    return date(y, m, 1)
 
 
 def _month_from_label(label: Any) -> Optional[int]:
@@ -202,18 +229,15 @@ def load_monthly_market_24m(
     previous, previous_sources = _load_previous_year_comparison(schema, table, nodes)
 
     merged: Dict[Tuple[str, date], Dict[str, float]] = defaultdict(dict)
-    source_flag: Dict[Tuple[str, date, str], str] = {}
 
     # Previous-year comparison first; verified l12m wins on any overlap.
     for key, vals in previous.items():
         for metric, value in vals.items():
             merged[key][metric] = value
-            source_flag[(key[0], key[1], metric)] = "pv_ye_previous_window"
 
     for key, vals in current.items():
         for metric, value in vals.items():
             merged[key][metric] = value
-            source_flag[(key[0], key[1], metric)] = "l12m"
 
     filtered: Dict[Tuple[str, date], Dict[str, float]] = {}
     for (node, month), vals in sorted(merged.items()):
