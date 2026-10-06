@@ -50,7 +50,9 @@ from jobs.forecast_monitoring.daily_monitor_v4 import TARGET_SHOPS
 logger = get_logger("forecast_research_spu_daily")
 
 DEST_TABLE = "forecast_research_spu_daily_history"
-BUILD_VERSION = "spu_daily_v1"
+BUILD_VERSION = "spu_daily_v2_native_only_guarded"
+MAX_UNATTRIBUTED_SALES_SHARE = 0.01
+MAX_UNATTRIBUTED_SESSIONS_SHARE = 0.05
 
 OPTIONAL_FIELDS: Dict[str, Sequence[str]] = {
     "clicks": ("clicks", "click"),
@@ -217,6 +219,92 @@ def agg_expr(col: Optional[str], alias: str, kind: str = "sum") -> str:
     return f"SUM(COALESCE(p.`{col}`,0)) AS `{alias}`"
 
 
+def audit_native_spu_loss(profile: Dict[str, Any], start: date, end: date) -> Dict[str, Any]:
+    """Measure product signal excluded because native SPU is blank.
+
+    Historical research intentionally keeps NATIVE_SPU_ONLY when the source provides
+    native SPU. Rows without SPU are not force-mapped from current product metadata.
+    Fail closed if unattributed rows suddenly carry material sales/traffic, which would
+    indicate schema/grain drift or a source-quality incident.
+    """
+    if profile.get("spu_mode") != "NATIVE_SPU":
+        return {
+            "range": [str(start), str(end)],
+            "spu_mode": profile.get("spu_mode"),
+            "guard_applied": False,
+        }
+
+    table = profile["table"]
+    dcol = profile["date"]
+    store = profile["store"]
+    sales = profile["sales"]
+    sessions = profile["sessions"]
+    delete_col = profile.get("delete_flag")
+    delete_filter = f"AND COALESCE(p.`{delete_col}`,0)=0" if delete_col else ""
+
+    with db_cursor() as cursor:
+        cursor.execute(
+            f"""
+            SELECT
+              COUNT(*) AS total_rows,
+              SUM(CASE WHEN p.`spu` IS NULL OR TRIM(p.`spu`)='' THEN 1 ELSE 0 END)
+                AS unattributed_rows,
+              SUM(COALESCE(p.`{sales}`,0)) AS total_sales,
+              SUM(CASE WHEN p.`spu` IS NULL OR TRIM(p.`spu`)=''
+                       THEN COALESCE(p.`{sales}`,0) ELSE 0 END) AS unattributed_sales,
+              SUM(COALESCE(p.`{sessions}`,0)) AS total_sessions,
+              SUM(CASE WHEN p.`spu` IS NULL OR TRIM(p.`spu`)=''
+                       THEN COALESCE(p.`{sessions}`,0) ELSE 0 END) AS unattributed_sessions
+            FROM {table} p
+            WHERE p.`{dcol}` BETWEEN %s AND %s
+              AND p.`{store}` IN (%s,%s,%s,%s)
+              {delete_filter}
+            """,
+            (start, end, *TARGET_SHOPS),
+        )
+        row = cursor.fetchone() or {}
+
+    total_rows = int(row.get("total_rows", 0) or 0)
+    unattributed_rows = int(row.get("unattributed_rows", 0) or 0)
+    total_sales = float(row.get("total_sales", 0) or 0)
+    unattributed_sales = float(row.get("unattributed_sales", 0) or 0)
+    total_sessions = float(row.get("total_sessions", 0) or 0)
+    unattributed_sessions = float(row.get("unattributed_sessions", 0) or 0)
+
+    sales_share = unattributed_sales / total_sales if total_sales > 0 else 0.0
+    sessions_share = unattributed_sessions / total_sessions if total_sessions > 0 else 0.0
+    detail = {
+        "range": [str(start), str(end)],
+        "spu_mode": "NATIVE_SPU_ONLY",
+        "guard_applied": True,
+        "total_rows": total_rows,
+        "unattributed_rows": unattributed_rows,
+        "unattributed_row_rate": round(unattributed_rows / total_rows, 6) if total_rows else None,
+        "unattributed_sales": round(unattributed_sales, 2),
+        "unattributed_sales_share": round(sales_share, 6),
+        "unattributed_sessions": round(unattributed_sessions, 2),
+        "unattributed_sessions_share": round(sessions_share, 6),
+        "sales_share_limit": MAX_UNATTRIBUTED_SALES_SHARE,
+        "sessions_share_limit": MAX_UNATTRIBUTED_SESSIONS_SHARE,
+    }
+    logger.info("历史SPU身份月级护栏: " + json.dumps(detail, ensure_ascii=False))
+
+    failures = []
+    if sales_share > MAX_UNATTRIBUTED_SALES_SHARE:
+        failures.append(
+            f"无法归属SPU的销量占比{sales_share:.2%}>{MAX_UNATTRIBUTED_SALES_SHARE:.2%}"
+        )
+    if sessions_share > MAX_UNATTRIBUTED_SESSIONS_SHARE:
+        failures.append(
+            f"无法归属SPU的Sessions占比{sessions_share:.2%}>{MAX_UNATTRIBUTED_SESSIONS_SHARE:.2%}"
+        )
+    if failures:
+        raise RuntimeError(
+            f"{start}~{end} 历史SPU身份质量异常，停止写入研究表；" + "；".join(failures)
+        )
+    return detail
+
+
 def build_month(profile: Dict[str, Any], start: date, end: date, dry_run: bool) -> Dict[str, Any]:
     table = profile["table"]
     dcol = profile["date"]
@@ -255,6 +343,8 @@ def build_month(profile: Dict[str, Any], start: date, end: date, dry_run: bool) 
     """
     params: List[Any] = [start, end, *TARGET_SHOPS]
 
+    identity_guard = audit_native_spu_loss(profile, start, end)
+
     if dry_run:
         # Only estimate the grouped result on a small bounded sample, never write.
         sample_end = min(end, start + timedelta(days=2))
@@ -266,6 +356,7 @@ def build_month(profile: Dict[str, Any], start: date, end: date, dry_run: bool) 
             "range": [str(start), str(end)],
             "sample_range": [str(start), str(sample_end)],
             "sample_grouped_rows": n,
+            "identity_guard": identity_guard,
             "written": 0,
         }
 
@@ -314,6 +405,7 @@ def build_month(profile: Dict[str, Any], start: date, end: date, dry_run: bool) 
         row = c.fetchone() or {}
     return {
         "range": [str(start), str(end)],
+        "identity_guard": identity_guard,
         "affected": affected,
         "materialized_rows": int(row.get("n", 0) or 0),
         "shop_spu_n": int(row.get("shop_spu_n", 0) or 0),
