@@ -18,8 +18,9 @@ rule backtests, and Breakout V1 training.
 
 Leakage guard
 -------------
-Historical materialization requires the performance source's OWN `spu` column.
-It deliberately refuses to join today's product-management mapping to historical rows.
+Historical materialization prefers the performance source's own `spu` column.
+If that field is unavailable, it derives SPU only from the SKU string on the same
+historical row. It never joins today's product-management mapping to historical rows.
 That prevents a current mapping from being silently projected into the past.
 
 Inventory is NOT backfilled here. We only have true daily inventory snapshots from
