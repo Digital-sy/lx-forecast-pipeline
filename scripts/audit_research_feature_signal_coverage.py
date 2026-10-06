@@ -70,8 +70,9 @@ def main() -> int:
     print("OVERALL=" + json.dumps(out, ensure_ascii=False))
 
     print("\n=== MONTHLY_SIGNAL_COVERAGE ===")
+    # PyMySQL uses %-formatting internally; escape DATE_FORMAT percent signs as %%.
     month_expr = [
-        "DATE_FORMAT(dt,'%Y-%m') AS ym",
+        "DATE_FORMAT(dt,'%%Y-%%m') AS ym",
         "COUNT(*) AS rows_n",
         "SUM(sales_units>0) AS active_sales_rows",
     ]
@@ -84,7 +85,7 @@ def main() -> int:
         f"""
         SELECT {','.join(month_expr)}
         FROM `{DEST_TABLE}`
-        GROUP BY DATE_FORMAT(dt,'%Y-%m')
+        GROUP BY DATE_FORMAT(dt,'%%Y-%%m')
         ORDER BY ym
         """
     )
