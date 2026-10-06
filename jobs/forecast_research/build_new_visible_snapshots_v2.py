@@ -63,7 +63,7 @@ def load_special_low_price_spus() -> Set[str]:
         FROM `{base.MONTHLY_SALES_TABLE}`
         WHERE `SPU` IS NOT NULL AND TRIM(`SPU`)<>' '
           AND UPPER(TRIM(COALESCE(`SKU`,''))) LIKE 'LCS-%%'
-        """
+        """.replace("TRIM(`SPU`)<>' '", "TRIM(`SPU`)<>''")
     )
     out = {str(r.get("spu") or "").strip().upper() for r in rows}
     out.discard("")
