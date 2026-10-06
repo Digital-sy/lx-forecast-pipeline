@@ -8,6 +8,13 @@ Daily SPU history is the authoritative launch clock because it has exact positiv
 observations. Monthly history is used only as a veto when it proves the item sold in an
 earlier calendar month than the daily history can see.
 
+Business exclusions
+-------------------
+SPUs whose style code starts with ``LCS-`` are special low-price disposal/handling
+products rather than normal-selling launches. They remain in the raw SPU-day research
+history for factual reconciliation, but are explicitly ineligible for NEW_VISIBLE
+cohorts, snapshots, Breakout backtests, and future V1 model training.
+
 Observed audit on 2024-01-01..2026-10-05:
 - 194 monthly/daily month disagreements;
 - all 194 are DAILY_EARLIER (daily history sees sales earlier than the monthly table);
@@ -21,13 +28,19 @@ from __future__ import annotations
 import argparse
 import json
 from collections import defaultdict
-from datetime import date, datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timedelta
+from typing import Any, Dict
 
 from jobs.forecast_monitoring import daily_monitor as base
 from jobs.forecast_research import build_new_visible_snapshots as v1
 
-DATASET_VERSION = "new_visible_snapshot_v2_daily_first_priority"
+DATASET_VERSION = "new_visible_snapshot_v2_daily_first_priority_exclude_lcs"
+SPECIAL_LOW_PRICE_PREFIXES = ("LCS-",)
+
+
+def is_special_low_price_spu(spu: str) -> bool:
+    s = str(spu or "").strip().upper()
+    return any(s.startswith(prefix) for prefix in SPECIAL_LOW_PRICE_PREFIXES)
 
 
 def rebuild_cohorts(dry_run: bool = False) -> Dict[str, Any]:
@@ -63,8 +76,14 @@ def rebuild_cohorts(dry_run: bool = False) -> Dict[str, Any]:
         confidence = "DAILY_ONLY" if mf is None else "DAILY+MONTHLY_SAME_MONTH"
         eligible = True
         reason = None
+        special_low_price = is_special_low_price_spu(spu)
 
-        if fs < burn_cutoff:
+        # Business rule has highest priority: LCS-* is not a normal-selling launch.
+        if special_low_price:
+            eligible = False
+            reason = "SPECIAL_LOW_PRICE_SPU"
+            confidence = "BUSINESS_EXCLUDED_LCS"
+        elif fs < burn_cutoff:
             eligible = False
             reason = "LEFT_EDGE_BURN_IN"
         elif fs > label_cutoff:
@@ -90,6 +109,7 @@ def rebuild_cohorts(dry_run: bool = False) -> Dict[str, Any]:
 
         stats["total"] += 1
         stats["eligible"] += int(eligible)
+        stats["special_low_price_spu"] += int(special_low_price)
         stats["daily_only"] += int(mf is None)
         stats["daily_monthly_same"] += int(
             mf is not None and v1.month_floor(mf) == v1.month_floor(fs)
@@ -123,7 +143,10 @@ def rebuild_cohorts(dry_run: bool = False) -> Dict[str, Any]:
         "base_max": str(max_dt),
         "burn_cutoff": str(burn_cutoff),
         "label_cutoff": str(label_cutoff),
-        "rule": "daily first positive day authoritative; exclude only if monthly proves earlier sale",
+        "rule": (
+            "daily first positive day authoritative; exclude LCS-* special low-price SPUs; "
+            "exclude if monthly proves earlier sale"
+        ),
         **{k: int(v) for k, v in stats.items()},
     }
     if dry_run:
