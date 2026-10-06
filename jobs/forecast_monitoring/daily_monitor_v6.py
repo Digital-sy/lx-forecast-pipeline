@@ -2,11 +2,12 @@
 # -*- coding: utf-8 -*-
 """Forecast daily shadow monitoring V6.
 
-V6 keeps all V5 behavior and adds one business exclusion:
+V6 keeps all V5 behavior and applies business exclusions:
 - ``LCS-`` identifies special low-price handling SKU/MSKU rows, not normal-selling
   launches;
-- all SPUs mapped from audited LCS-* MSKUs are materialized in
-  ``forecast_special_spu_exclusion`` and excluded as a whole from NEW_VISIBLE alerts.
+- all SPUs mapped from audited LCS-* MSKUs are excluded as a whole;
+- all SPUs whose code starts with XH are also excluded as a whole;
+- materialized controls live in ``forecast_special_spu_exclusion``.
 
 Feature snapshots are still preserved as raw operational facts. Only breakout candidate
 selection/notification scope is filtered. Production forecast/procurement tables remain untouched.
@@ -21,13 +22,15 @@ from jobs.forecast_monitoring import daily_monitor as base
 from jobs.forecast_monitoring import daily_monitor_v5 as v5
 
 SPECIAL_EXCLUSION_TABLE = "forecast_special_spu_exclusion"
-SPECIAL_EXCLUSION_CODE = "LCS_SPECIAL_LOW_PRICE"
+LCS_EXCLUSION_CODE = "LCS_SPECIAL_LOW_PRICE"
+XH_EXCLUSION_CODE = "XH_PREFIX_EXCLUSION"
+XH_PREFIX = "XH"
 _ORIGINAL_BREAKOUT_WATCH = base.breakout_watch
 _ORIGINAL_MAYBE_NOTIFY = base.maybe_notify
 _SPECIAL_SPUS_CACHE: Set[str] | None = None
 
 
-def load_special_low_price_spus() -> Set[str]:
+def load_business_exclusion_spus() -> Set[str]:
     global _SPECIAL_SPUS_CACHE
     if _SPECIAL_SPUS_CACHE is not None:
         return _SPECIAL_SPUS_CACHE
@@ -42,9 +45,9 @@ def load_special_low_price_spus() -> Set[str]:
             f"""
             SELECT spu
             FROM `{SPECIAL_EXCLUSION_TABLE}`
-            WHERE exclusion_code=%s
+            WHERE exclusion_code IN (%s,%s)
             """,
-            (SPECIAL_EXCLUSION_CODE,),
+            (LCS_EXCLUSION_CODE, XH_EXCLUSION_CODE),
         )
         rows = cursor.fetchall()
 
@@ -55,31 +58,32 @@ def load_special_low_price_spus() -> Set[str]:
     }
     if not _SPECIAL_SPUS_CACHE:
         raise RuntimeError(
-            f"{SPECIAL_EXCLUSION_TABLE} 中没有 {SPECIAL_EXCLUSION_CODE}；拒绝未排除LCS SPU时继续"
+            f"{SPECIAL_EXCLUSION_TABLE} 业务排除清单为空；拒绝继续Breakout评分"
         )
     base.logger.info(
-        f"V6加载LCS特殊低价SPU排除清单: {len(_SPECIAL_SPUS_CACHE)} 个SPU"
+        f"V6加载业务SPU排除清单: {len(_SPECIAL_SPUS_CACHE)} 个SPU"
     )
     return _SPECIAL_SPUS_CACHE
 
-def is_special_low_price_spu(value: Any, excluded_spus: Set[str]) -> bool:
-    return base.text(value).upper() in excluded_spus
 
+def is_business_excluded_spu(value: Any, excluded_spus: Set[str]) -> bool:
+    spu = base.text(value).upper()
+    return spu in excluded_spus or spu.startswith(XH_PREFIX)
 
 def breakout_watch(rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
-    excluded_spus = load_special_low_price_spus()
+    excluded_spus = load_business_exclusion_spus()
     normal_rows = [
         r for r in rows
-        if not is_special_low_price_spu(r.get("spu"), excluded_spus)
+        if not is_business_excluded_spu(r.get("spu"), excluded_spus)
     ]
     excluded = len(rows) - len(normal_rows)
     if excluded:
         base.logger.info(
-            f"V6特殊低价SPU摘除: {excluded} feature rows; 不进入Breakout评分"
+            f"V6业务排除SPU摘除(LCS/XH): {excluded} feature rows; 不进入Breakout评分"
         )
     alerts = _ORIGINAL_BREAKOUT_WATCH(normal_rows)
     for r in alerts:
-        r["monitor_version"] = "RULE_V0_MONITOR_ONLY_EXCLUDE_LCS_MAPPED_SPU"
+        r["monitor_version"] = "RULE_V0_MONITOR_ONLY_EXCLUDE_LCS_XH_BUSINESS_SPU"
     return alerts
 
 
@@ -88,10 +92,10 @@ def maybe_notify(
     features: Sequence[Mapping[str, Any]],
     alerts: Sequence[Mapping[str, Any]],
 ) -> None:
-    excluded_spus = load_special_low_price_spus()
+    excluded_spus = load_business_exclusion_spus()
     normal_features = [
         r for r in features
-        if not is_special_low_price_spu(r.get("spu"), excluded_spus)
+        if not is_business_excluded_spu(r.get("spu"), excluded_spus)
     ]
     _ORIGINAL_MAYBE_NOTIFY(snapshot_date, normal_features, alerts)
 
