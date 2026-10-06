@@ -40,12 +40,7 @@ SPECIAL_LOW_PRICE_PREFIXES = ("LCS-",)
 
 
 def load_special_low_price_spus() -> Set[str]:
-    """Return SPUs mapped from LCS-* special handling SKU/MSKU rows.
-
-    `销量统计_msku月度` is the existing MSKU-month source and contains both SKU and SPU.
-    We intentionally exclude the whole SPU once any LCS-* SKU maps to it; no batch-level
-    modeling is attempted.
-    """
+    """Return SPUs mapped from LCS-* special handling SKU/MSKU rows."""
     if not base.table_exists(base.MONTHLY_SALES_TABLE):
         raise RuntimeError(
             f"无法执行LCS业务排除：{base.MONTHLY_SALES_TABLE} 不存在"
@@ -61,9 +56,10 @@ def load_special_low_price_spus() -> Set[str]:
         f"""
         SELECT DISTINCT TRIM(`SPU`) AS spu
         FROM `{base.MONTHLY_SALES_TABLE}`
-        WHERE `SPU` IS NOT NULL AND TRIM(`SPU`)<>' '
+        WHERE `SPU` IS NOT NULL
+          AND TRIM(`SPU`)<>''
           AND UPPER(TRIM(COALESCE(`SKU`,''))) LIKE 'LCS-%%'
-        """.replace("TRIM(`SPU`)<>' '", "TRIM(`SPU`)<>''")
+        """
     )
     out = {str(r.get("spu") or "").strip().upper() for r in rows}
     out.discard("")
@@ -72,9 +68,9 @@ def load_special_low_price_spus() -> Set[str]:
 
 def is_special_low_price_spu(spu: str, excluded_spus: Set[str]) -> bool:
     s = str(spu or "").strip().upper()
-    # Direct LCS-* SPU is retained as a defensive fallback, but the normal path is
-    # LCS SKU/MSKU -> mapped SPU from the monthly MSKU table.
-    return s in excluded_spus or any(s.startswith(prefix) for prefix in SPECIAL_LOW_PRICE_PREFIXES)
+    return s in excluded_spus or any(
+        s.startswith(prefix) for prefix in SPECIAL_LOW_PRICE_PREFIXES
+    )
 
 
 def rebuild_cohorts(dry_run: bool = False) -> Dict[str, Any]:
@@ -114,8 +110,6 @@ def rebuild_cohorts(dry_run: bool = False) -> Dict[str, Any]:
         reason = None
         special_low_price = is_special_low_price_spu(spu, special_low_price_spus)
 
-        # Business rule has highest priority: any SPU mapped from an LCS-* SKU is not a
-        # normal-selling launch and is excluded as a whole.
         if special_low_price:
             eligible = False
             reason = "SPECIAL_LOW_PRICE_SPU"
