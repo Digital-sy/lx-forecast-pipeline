@@ -107,6 +107,8 @@ def main() -> int:
         else:
             mismatch.append(rec)
 
+    monthly_only = [(k, d) for k, d in mmap.items() if k not in dmap]
+
     print("=" * 100)
     print("NEW_VISIBLE 首销冲突与cohort集中度审计（只读）")
     print("=" * 100)
@@ -130,6 +132,7 @@ def main() -> int:
         "same_calendar_month": len(aligned),
         "different_calendar_month": len(mismatch),
         "daily_key_missing_monthly": len(missing_monthly),
+        "monthly_key_missing_daily": len(monthly_only),
         "mismatch_rate_among_matched": round(len(mismatch) / (len(aligned)+len(mismatch)), 4)
             if (aligned or mismatch) else None,
         "direction": dict(by_dir),
@@ -141,8 +144,7 @@ def main() -> int:
     for (shop, direction), n in sorted(by_shop_dir.items()):
         print(json.dumps({"shop": shop, "direction": direction, "n": n}, ensure_ascii=False))
 
-    # Pull month-level sales from both sources for mismatches so we can see which source
-    # is carrying the supposedly earlier positive sales.
+    # Pull candidate-month signal from both sources for mismatches.
     details: List[Dict[str, Any]] = []
     for r in mismatch:
         shop, spu = r["shop"], r["spu"]
@@ -150,6 +152,7 @@ def main() -> int:
         md = r["monthly_first_month"]
         daily_month = month_floor(dd)
         monthly_month = month_floor(md)
+        month_labels = (monthly_month.strftime('%Y-%m'), daily_month.strftime('%Y-%m'))
 
         daily_month_rows = q(
             f"""
@@ -159,12 +162,11 @@ def main() -> int:
                    MIN(CASE WHEN sales_units>0 THEN dt END) AS first_positive_day
             FROM `{DAILY_TABLE}`
             WHERE store_name=%s AND spu=%s
-              AND dt >= %s AND dt < DATE_ADD(%s, INTERVAL 1 MONTH)
+              AND DATE_FORMAT(dt,'%%Y-%%m') IN (%s,%s)
             GROUP BY DATE_FORMAT(dt,'%%Y-%%m')
             """,
-            (shop, spu, monthly_month, daily_month),
+            (shop, spu, *month_labels),
         )
-        # Explicit monthly-table values in both candidate months.
         mvals = q(
             f"""
             SELECT DATE_FORMAT(`统计日期`,'%%Y-%%m') AS ym,
@@ -174,17 +176,17 @@ def main() -> int:
               AND DATE_FORMAT(`统计日期`,'%%Y-%%m') IN (%s,%s)
             GROUP BY DATE_FORMAT(`统计日期`,'%%Y-%%m')
             """,
-            (shop, spu, monthly_month.strftime('%Y-%m'), daily_month.strftime('%Y-%m')),
+            (shop, spu, *month_labels),
         )
         daily_by_ym = {str(x['ym']): x for x in daily_month_rows}
         monthly_by_ym = {str(x['ym']): x for x in mvals}
         rec = dict(r)
         rec.update({
-            "monthly_first_month_daily_sales": float(daily_by_ym.get(monthly_month.strftime('%Y-%m'), {}).get('sales',0) or 0),
-            "monthly_first_month_daily_sessions": float(daily_by_ym.get(monthly_month.strftime('%Y-%m'), {}).get('sessions',0) or 0),
-            "monthly_first_month_monthly_sales": float(monthly_by_ym.get(monthly_month.strftime('%Y-%m'), {}).get('sales',0) or 0),
-            "daily_first_month_daily_sales": float(daily_by_ym.get(daily_month.strftime('%Y-%m'), {}).get('sales',0) or 0),
-            "daily_first_month_monthly_sales": float(monthly_by_ym.get(daily_month.strftime('%Y-%m'), {}).get('sales',0) or 0),
+            "monthly_first_month_daily_sales": float(daily_by_ym.get(month_labels[0], {}).get('sales',0) or 0),
+            "monthly_first_month_daily_sessions": float(daily_by_ym.get(month_labels[0], {}).get('sessions',0) or 0),
+            "monthly_first_month_monthly_sales": float(monthly_by_ym.get(month_labels[0], {}).get('sales',0) or 0),
+            "daily_first_month_daily_sales": float(daily_by_ym.get(month_labels[1], {}).get('sales',0) or 0),
+            "daily_first_month_monthly_sales": float(monthly_by_ym.get(month_labels[1], {}).get('sales',0) or 0),
         })
         details.append(rec)
 
