@@ -119,7 +119,7 @@ def main() -> int:
         rows = [
             (
                 spu,
-                EXCLUSION_CODE,
+                LCS_CODE,
                 "LCS-* special low-price MSKU mapped SPU; business-rule whole-SPU exclusion",
                 table,
                 START,
