@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================
-# 销量预测动态监控（影子系统 V5）
+# 销量预测动态监控（影子系统 V6）
 #
 # 只写 forecast_* 新表，不修改现有生产预测/采购表。
 # 监控范围：JQ-US / RKZ-US / SY-US / MT-US
@@ -17,6 +17,7 @@
 # - 生命周期按 店铺×SPU 首销日期识别
 # - 无月度首销 + 30日销量>0 -> NEW_VISIBLE（日表现兜底）
 # - 无月度首销 + 30日销量=0 -> COLD_NO_HISTORY
+# - LCS-* 特殊低价处理SPU不进入Breakout评分/告警
 # - dry-run 不依赖 forecast_* 已存在
 # - flock 防止重复运行
 # ============================================
@@ -65,6 +66,7 @@ if ! "$PYTHON" -m py_compile \
     "$PROJECT_DIR/jobs/forecast_monitoring/daily_monitor_v3.py" \
     "$PROJECT_DIR/jobs/forecast_monitoring/daily_monitor_v4.py" \
     "$PROJECT_DIR/jobs/forecast_monitoring/daily_monitor_v5.py" \
+    "$PROJECT_DIR/jobs/forecast_monitoring/daily_monitor_v6.py" \
     >> "$LOG_FILE" 2>&1; then
     notify_failed "Python语法预检失败"
     exit 1
@@ -73,7 +75,7 @@ fi
 echo "✓ Python语法预检通过" >> "$LOG_FILE"
 
 set +e
-"$PYTHON" -m jobs.forecast_monitoring.daily_monitor_v5 --notify >> "$LOG_FILE" 2>&1
+"$PYTHON" -m jobs.forecast_monitoring.daily_monitor_v6 --notify >> "$LOG_FILE" 2>&1
 EXIT_CODE=$?
 set -e
 
