@@ -34,36 +34,47 @@ from typing import Any, Dict, Set
 from jobs.forecast_monitoring import daily_monitor as base
 from jobs.forecast_research import build_new_visible_snapshots as v1
 
-DATASET_VERSION = "new_visible_snapshot_v2_daily_first_priority_exclude_lcs_control_table"
+DATASET_VERSION = "new_visible_snapshot_v2_daily_first_priority_business_exclusions_v2"
 SPECIAL_EXCLUSION_TABLE = "forecast_special_spu_exclusion"
-SPECIAL_EXCLUSION_CODE = "LCS_SPECIAL_LOW_PRICE"
+LCS_EXCLUSION_CODE = "LCS_SPECIAL_LOW_PRICE"
+XH_EXCLUSION_CODE = "XH_PREFIX_EXCLUSION"
+XH_PREFIX = "XH"
 
 
-def load_special_low_price_spus() -> Set[str]:
-    """Load the materialized whole-SPU LCS business exclusion list."""
+def load_business_exclusions() -> Dict[str, Set[str]]:
+    """Load materialized business exclusion sets by code."""
     if not base.table_exists(SPECIAL_EXCLUSION_TABLE):
         raise RuntimeError(
             f"{SPECIAL_EXCLUSION_TABLE} 不存在；先运行 scripts/materialize_lcs_special_spu_exclusion.py"
         )
     rows = v1.q(
         f"""
-        SELECT spu
+        SELECT spu, exclusion_code
         FROM `{SPECIAL_EXCLUSION_TABLE}`
-        WHERE exclusion_code=%s
+        WHERE exclusion_code IN (%s,%s)
         """,
-        (SPECIAL_EXCLUSION_CODE,),
+        (LCS_EXCLUSION_CODE, XH_EXCLUSION_CODE),
     )
-    out = {str(r.get("spu") or "").strip().upper() for r in rows}
-    out.discard("")
-    if not out:
+    out = {"LCS": set(), "XH": set()}
+    for r in rows:
+        spu = str(r.get("spu") or "").strip().upper()
+        code = str(r.get("exclusion_code") or "")
+        if not spu:
+            continue
+        if code == LCS_EXCLUSION_CODE:
+            out["LCS"].add(spu)
+        elif code == XH_EXCLUSION_CODE:
+            out["XH"].add(spu)
+    if not out["LCS"]:
         raise RuntimeError(
-            f"{SPECIAL_EXCLUSION_TABLE} 中没有 {SPECIAL_EXCLUSION_CODE}；拒绝在未排除LCS SPU时继续"
+            f"{SPECIAL_EXCLUSION_TABLE} 中没有 {LCS_EXCLUSION_CODE}；拒绝未排除LCS SPU时继续"
         )
     return out
 
-def is_special_low_price_spu(spu: str, excluded_spus: Set[str]) -> bool:
-    return str(spu or "").strip().upper() in excluded_spus
 
+def is_xh_spu(spu: str, xh_spus: Set[str]) -> bool:
+    s = str(spu or "").strip().upper()
+    return s.startswith(XH_PREFIX) or s in xh_spus
 
 def rebuild_cohorts(dry_run: bool = False) -> Dict[str, Any]:
     bounds = v1.one(
@@ -86,7 +97,9 @@ def rebuild_cohorts(dry_run: bool = False) -> Dict[str, Any]:
         """
     )
     monthly = v1.load_monthly_first_sale()
-    special_low_price_spus = load_special_low_price_spus()
+    business_exclusions = load_business_exclusions()
+    lcs_spus = business_exclusions["LCS"]
+    xh_spus = business_exclusions["XH"]
 
     rows = []
     stats = defaultdict(int)
@@ -100,13 +113,23 @@ def rebuild_cohorts(dry_run: bool = False) -> Dict[str, Any]:
         confidence = "DAILY_ONLY" if mf is None else "DAILY+MONTHLY_SAME_MONTH"
         eligible = True
         reason = None
-        special_low_price = is_special_low_price_spu(spu, special_low_price_spus)
+        spu_u = spu.upper()
+        lcs_excluded = spu_u in lcs_spus
+        xh_excluded = is_xh_spu(spu, xh_spus)
+        special_business_excluded = lcs_excluded or xh_excluded
 
-        if special_low_price:
+        if special_business_excluded:
             eligible = False
-            reason = "SPECIAL_LOW_PRICE_SPU"
-            confidence = "BUSINESS_EXCLUDED_LCS_MAPPED_SPU"
-            excluded_launch_spus.add(spu.upper())
+            if lcs_excluded and xh_excluded:
+                reason = "BUSINESS_EXCLUDED_LCS_AND_XH"
+                confidence = "BUSINESS_EXCLUDED_LCS_AND_XH"
+            elif lcs_excluded:
+                reason = "SPECIAL_LOW_PRICE_SPU"
+                confidence = "BUSINESS_EXCLUDED_LCS_MAPPED_SPU"
+            else:
+                reason = "XH_PREFIX_SPU"
+                confidence = "BUSINESS_EXCLUDED_XH_PREFIX"
+            excluded_launch_spus.add(spu_u)
         elif fs < burn_cutoff:
             eligible = False
             reason = "LEFT_EDGE_BURN_IN"
@@ -129,7 +152,10 @@ def rebuild_cohorts(dry_run: bool = False) -> Dict[str, Any]:
 
         stats["total"] += 1
         stats["eligible"] += int(eligible)
-        stats["special_low_price_shop_spu"] += int(special_low_price)
+        stats["lcs_excluded_shop_spu"] += int(lcs_excluded)
+        stats["xh_excluded_shop_spu"] += int(xh_excluded)
+        stats["xh_incremental_shop_spu"] += int(xh_excluded and not lcs_excluded)
+        stats["business_excluded_shop_spu"] += int(special_business_excluded)
         stats["daily_only"] += int(mf is None)
         stats["daily_monthly_same"] += int(
             mf is not None and v1.month_floor(mf) == v1.month_floor(fs)
@@ -164,10 +190,12 @@ def rebuild_cohorts(dry_run: bool = False) -> Dict[str, Any]:
         "burn_cutoff": str(burn_cutoff),
         "label_cutoff": str(label_cutoff),
         "rule": (
-            "daily first positive day authoritative; exclude whole SPU using materialized LCS business control table; "
+            "daily first positive day authoritative; exclude whole SPU for LCS-mapped and XH-prefix business rules; "
             "exclude if monthly proves earlier sale"
         ),
-        "special_low_price_control_spu_n": len(special_low_price_spus),
+        "lcs_control_spu_n": len(lcs_spus),
+        "xh_control_spu_n": len(xh_spus),
+        "business_control_union_spu_n": len(lcs_spus | xh_spus),
         "special_low_price_launch_distinct_spu": len(excluded_launch_spus),
         **{k: int(v) for k, v in stats.items()},
     }
