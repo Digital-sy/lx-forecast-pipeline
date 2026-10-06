@@ -10,10 +10,9 @@ earlier calendar month than the daily history can see.
 
 Business exclusions
 -------------------
-``LCS-`` is a special low-price handling SKU/MSKU prefix, not a normal-selling product
-launch. The business rule is therefore NOT "SPU starts with LCS-". Instead, all SPUs
-that are ever mapped from an ``LCS-*`` SKU in ``销量统计_msku月度`` are excluded as a
-whole from NEW_VISIBLE cohorts, snapshots, Breakout backtests, and V1 model training.
+``LCS-`` is a special low-price handling MSKU prefix. Per business rule, any SPU mapped
+from an audited LCS-* MSKU is excluded as a whole. The mapping is materialized once in
+``forecast_special_spu_exclusion`` so model runs do not rescan the large ODS table.
 The raw SPU-day research history remains untouched for factual reconciliation.
 
 Observed audit on 2024-01-01..2026-10-05:
@@ -35,42 +34,35 @@ from typing import Any, Dict, Set
 from jobs.forecast_monitoring import daily_monitor as base
 from jobs.forecast_research import build_new_visible_snapshots as v1
 
-DATASET_VERSION = "new_visible_snapshot_v2_daily_first_priority_exclude_lcs_mapped_spu"
-SPECIAL_LOW_PRICE_PREFIXES = ("LCS-",)
+DATASET_VERSION = "new_visible_snapshot_v2_daily_first_priority_exclude_lcs_control_table"
+SPECIAL_EXCLUSION_TABLE = "forecast_special_spu_exclusion"
+SPECIAL_EXCLUSION_CODE = "LCS_SPECIAL_LOW_PRICE"
 
 
 def load_special_low_price_spus() -> Set[str]:
-    """Return SPUs mapped from LCS-* special handling SKU/MSKU rows."""
-    if not base.table_exists(base.MONTHLY_SALES_TABLE):
+    """Load the materialized whole-SPU LCS business exclusion list."""
+    if not base.table_exists(SPECIAL_EXCLUSION_TABLE):
         raise RuntimeError(
-            f"无法执行LCS业务排除：{base.MONTHLY_SALES_TABLE} 不存在"
+            f"{SPECIAL_EXCLUSION_TABLE} 不存在；先运行 scripts/materialize_lcs_special_spu_exclusion.py"
         )
-    cols = set(base.get_columns(base.MONTHLY_SALES_TABLE))
-    required = {"SKU", "SPU"}
-    if not required.issubset(cols):
-        raise RuntimeError(
-            f"无法执行LCS业务排除：{base.MONTHLY_SALES_TABLE} 缺字段 {sorted(required-cols)}"
-        )
-
     rows = v1.q(
         f"""
-        SELECT DISTINCT TRIM(`SPU`) AS spu
-        FROM `{base.MONTHLY_SALES_TABLE}`
-        WHERE `SPU` IS NOT NULL
-          AND TRIM(`SPU`)<>''
-          AND UPPER(TRIM(COALESCE(`SKU`,''))) LIKE 'LCS-%%'
-        """
+        SELECT spu
+        FROM `{SPECIAL_EXCLUSION_TABLE}`
+        WHERE exclusion_code=%s
+        """,
+        (SPECIAL_EXCLUSION_CODE,),
     )
     out = {str(r.get("spu") or "").strip().upper() for r in rows}
     out.discard("")
+    if not out:
+        raise RuntimeError(
+            f"{SPECIAL_EXCLUSION_TABLE} 中没有 {SPECIAL_EXCLUSION_CODE}；拒绝在未排除LCS SPU时继续"
+        )
     return out
 
-
 def is_special_low_price_spu(spu: str, excluded_spus: Set[str]) -> bool:
-    s = str(spu or "").strip().upper()
-    return s in excluded_spus or any(
-        s.startswith(prefix) for prefix in SPECIAL_LOW_PRICE_PREFIXES
-    )
+    return str(spu or "").strip().upper() in excluded_spus
 
 
 def rebuild_cohorts(dry_run: bool = False) -> Dict[str, Any]:
@@ -172,10 +164,10 @@ def rebuild_cohorts(dry_run: bool = False) -> Dict[str, Any]:
         "burn_cutoff": str(burn_cutoff),
         "label_cutoff": str(label_cutoff),
         "rule": (
-            "daily first positive day authoritative; exclude whole SPU if mapped from LCS-* SKU/MSKU; "
+            "daily first positive day authoritative; exclude whole SPU using materialized LCS business control table; "
             "exclude if monthly proves earlier sale"
         ),
-        "special_low_price_mapped_spu_master_n": len(special_low_price_spus),
+        "special_low_price_control_spu_n": len(special_low_price_spus),
         "special_low_price_launch_distinct_spu": len(excluded_launch_spus),
         **{k: int(v) for k, v in stats.items()},
     }
