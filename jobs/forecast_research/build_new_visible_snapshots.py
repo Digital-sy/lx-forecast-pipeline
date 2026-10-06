@@ -107,10 +107,10 @@ def one(sql: str, params=()):
     return rows[0] if rows else {}
 
 
-def safe_div(a: float, b: float) -> Optional[float]:
-    if b <= 0:
+def safe_div(a: Optional[float], b: Optional[float]) -> Optional[float]:
+    if a is None or b is None or b <= 0:
         return None
-    return a / b
+    return float(a) / float(b)
 
 
 def finite(v: Optional[float]) -> Optional[float]:
