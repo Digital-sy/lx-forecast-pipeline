@@ -25,7 +25,9 @@ from jobs.forecast_monitoring import daily_monitor_v2 as v2
 from jobs.forecast_monitoring.daily_monitor_v4 import TARGET_SHOPS
 
 TABLE = "forecast_special_spu_exclusion"
-EXCLUSION_CODE = "LCS_SPECIAL_LOW_PRICE"
+LCS_CODE = "LCS_SPECIAL_LOW_PRICE"
+XH_CODE = "XH_PREFIX_EXCLUSION"
+XH_PREFIX = "XH"
 START = date(2025, 3, 1)
 END = date(2025, 9, 30)
 
@@ -77,6 +79,25 @@ def main() -> int:
     if not spus:
         raise RuntimeError("LCS特殊低价SPU映射为空；为避免误清单，拒绝写入控制表")
 
+    # Direct business rule: every SPU whose code starts with XH is excluded.
+    # Use the already-materialized research SPU-day base instead of rescanning ODS.
+    xh_spus = set()
+    daily_table = "forecast_research_spu_daily_history"
+    if base.table_exists(daily_table):
+        with db_cursor() as c:
+            c.execute(
+                f"""
+                SELECT DISTINCT UPPER(TRIM(spu)) AS spu
+                FROM `{daily_table}`
+                WHERE UPPER(TRIM(spu)) LIKE 'XH%%'
+                """
+            )
+            xh_rows = list(c.fetchall())
+        xh_spus = {str(r.get("spu") or "").strip().upper() for r in xh_rows}
+        xh_spus.discard("")
+    else:
+        raise RuntimeError(f"{daily_table} 不存在；无法物化XH前缀排除清单")
+
     with db_cursor() as c:
         c.execute(
             f"""
@@ -94,7 +115,7 @@ def main() -> int:
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             """
         )
-        c.execute(f"DELETE FROM `{TABLE}` WHERE exclusion_code=%s", (EXCLUSION_CODE,))
+        c.execute(f"DELETE FROM `{TABLE}` WHERE exclusion_code=%s", (LCS_CODE,))
         rows = [
             (
                 spu,
@@ -115,10 +136,34 @@ def main() -> int:
             rows,
         )
 
+        c.execute(f"DELETE FROM `{TABLE}` WHERE exclusion_code=%s", (XH_CODE,))
+        xh_control_rows = [
+            (
+                spu,
+                XH_CODE,
+                "SPU prefix XH; business-rule whole-SPU exclusion",
+                daily_table,
+                START,
+                END,
+            )
+            for spu in sorted(xh_spus)
+        ]
+        if xh_control_rows:
+            c.executemany(
+                f"""
+                INSERT INTO `{TABLE}`
+                  (spu, exclusion_code, reason, source_table, source_start, source_end)
+                VALUES (%s,%s,%s,%s,%s,%s)
+                """,
+                xh_control_rows,
+            )
+
     print("MATERIALIZED=" + json.dumps({
         "table": TABLE,
-        "exclusion_code": EXCLUSION_CODE,
-        "spu_n": len(spus),
+        "lcs_exclusion_code": LCS_CODE,
+        "lcs_spu_n": len(spus),
+        "xh_spu_n": len(xh_spus),
+        "union_spu_n": len(spus | xh_spus),
         "source_table": table,
         "source_range": [str(START), str(END)],
         "month_counts": by_month,
