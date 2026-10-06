@@ -196,7 +196,7 @@ def rebuild_cohorts(dry_run: bool = False) -> Dict[str, Any]:
         "lcs_control_spu_n": len(lcs_spus),
         "xh_control_spu_n": len(xh_spus),
         "business_control_union_spu_n": len(lcs_spus | xh_spus),
-        "special_low_price_launch_distinct_spu": len(excluded_launch_spus),
+        "business_excluded_distinct_spu": len(excluded_launch_spus),
         **{k: int(v) for k, v in stats.items()},
     }
     if dry_run:
