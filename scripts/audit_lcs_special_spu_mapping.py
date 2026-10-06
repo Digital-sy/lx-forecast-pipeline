@@ -99,7 +99,7 @@ def main() -> int:
                 GROUP BY
                   p.`store_name`,
                   UPPER(TRIM(p.`msku`)),
-                  UPPER(TRIM(COALESCE(p.`spu`,''))
+                  UPPER(TRIM(COALESCE(p.`spu`,'')))
                 """,
                 (chunk_start, chunk_end, *TARGET_SHOPS),
             )
