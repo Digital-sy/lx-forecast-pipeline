@@ -108,32 +108,48 @@ def source_profile(snapshot_date: date) -> Dict[str, Any]:
     if missing:
         raise RuntimeError(f"产品表现源缺少历史研究必需映射: {missing}")
 
-    # Critical anti-leakage rule.
-    if "spu" not in set(columns):
-        raise RuntimeError(
-            f"{table} 没有原生spu字段。历史研究V1拒绝使用当前产品管理表回填历史SPU，"
-            "请先建立point-in-time SKU→SPU映射后再继续。"
-        )
+    # Critical anti-leakage rule:
+    # prefer the historical row's own SPU; otherwise derive SPU only from that same
+    # historical SKU string. Never join today's product-management mapping into the past.
+    if "spu" in set(columns):
+        spu_mode = "NATIVE_SPU"
+        spu_expr = "p.`spu`"
+    else:
+        sku_col = required["sku"]
+        if not sku_col:
+            raise RuntimeError(
+                f"{table} 既没有原生spu字段，也没有可用于历史安全推导的sku字段"
+            )
+        spu_mode = "SKU_PREFIX"
+        spu_expr = f"SUBSTRING_INDEX(p.`{sku_col}`,'-',1)"
 
     optional = {
         name: pick_optional(columns, candidates)
         for name, candidates in OPTIONAL_FIELDS.items()
     }
-    return {**source, "columns": columns, "spu": "spu", "optional": optional}
+    return {
+        **source,
+        "columns": columns,
+        "spu": "spu" if spu_mode == "NATIVE_SPU" else None,
+        "spu_mode": spu_mode,
+        "spu_expr": spu_expr,
+        "optional": optional,
+    }
 
 
 def probe_source_bounds(profile: Dict[str, Any]) -> Tuple[date, date]:
     table = profile["table"]
     dcol = profile["date"]
     store = profile["store"]
+    spu_expr = profile["spu_expr"]
     with db_cursor() as c:
         c.execute(
             f"""
-            SELECT `{dcol}` AS dt
-            FROM {table}
-            WHERE `{store}` IN (%s,%s,%s,%s)
-              AND `spu` IS NOT NULL AND TRIM(`spu`)<>''
-            ORDER BY `{dcol}` ASC
+            SELECT p.`{dcol}` AS dt
+            FROM {table} p
+            WHERE p.`{store}` IN (%s,%s,%s,%s)
+              AND {spu_expr} IS NOT NULL AND TRIM({spu_expr})<>''
+            ORDER BY p.`{dcol}` ASC
             LIMIT 1
             """,
             TARGET_SHOPS,
@@ -141,20 +157,19 @@ def probe_source_bounds(profile: Dict[str, Any]) -> Tuple[date, date]:
         first = c.fetchone()
         c.execute(
             f"""
-            SELECT `{dcol}` AS dt
-            FROM {table}
-            WHERE `{store}` IN (%s,%s,%s,%s)
-              AND `spu` IS NOT NULL AND TRIM(`spu`)<>''
-            ORDER BY `{dcol}` DESC
+            SELECT p.`{dcol}` AS dt
+            FROM {table} p
+            WHERE p.`{store}` IN (%s,%s,%s,%s)
+              AND {spu_expr} IS NOT NULL AND TRIM({spu_expr})<>''
+            ORDER BY p.`{dcol}` DESC
             LIMIT 1
             """,
             TARGET_SHOPS,
         )
         last = c.fetchone()
     if not first or not last:
-        raise RuntimeError("目标四店在产品表现源中找不到非空SPU历史")
+        raise RuntimeError("目标四店在产品表现源中找不到可用历史SPU身份")
     return _to_date(first["dt"]), _to_date(last["dt"])
-
 
 def _to_date(v: Any) -> date:
     if isinstance(v, datetime):
@@ -209,6 +224,7 @@ def build_month(profile: Dict[str, Any], start: date, end: date, dry_run: bool) 
     sales = profile["sales"]
     sessions = profile["sessions"]
     delete_col = profile.get("delete_flag")
+    spu_expr = profile["spu_expr"]
     opt = profile["optional"]
 
     delete_filter = f"AND COALESCE(p.`{delete_col}`,0)=0" if delete_col else ""
@@ -217,7 +233,7 @@ def build_month(profile: Dict[str, Any], start: date, end: date, dry_run: bool) 
         SELECT
           p.`{dcol}` AS dt,
           p.`{store}` AS store_name,
-          p.`spu` AS spu,
+          {spu_expr} AS spu,
           SUM(COALESCE(p.`{sales}`,0)) AS sales_units,
           SUM(COALESCE(p.`{sessions}`,0)) AS sessions,
           {agg_expr(opt.get('clicks'), 'clicks')},
@@ -232,9 +248,9 @@ def build_month(profile: Dict[str, Any], start: date, end: date, dry_run: bool) 
         FROM {table} p
         WHERE p.`{dcol}` BETWEEN %s AND %s
           AND p.`{store}` IN (%s,%s,%s,%s)
-          AND p.`spu` IS NOT NULL AND TRIM(p.`spu`)<>''
+          AND {spu_expr} IS NOT NULL AND TRIM({spu_expr})<>''
           {delete_filter}
-        GROUP BY p.`{dcol}`, p.`{store}`, p.`spu`
+        GROUP BY p.`{dcol}`, p.`{store}`, {spu_expr}
     """
     params: List[Any] = [start, end, *TARGET_SHOPS]
 
@@ -306,23 +322,24 @@ def build_month(profile: Dict[str, Any], start: date, end: date, dry_run: bool) 
 
 
 def recent_spu_coverage(profile: Dict[str, Any], as_of: date) -> Dict[str, Any]:
-    """Small 7-day source check: how many source rows carry native SPU."""
+    """Small 7-day source check for the selected point-in-time-safe SPU identity."""
     table = profile["table"]
     dcol = profile["date"]
     store = profile["store"]
+    spu_expr = profile["spu_expr"]
     delete_col = profile.get("delete_flag")
-    delete_filter = f"AND COALESCE(`{delete_col}`,0)=0" if delete_col else ""
+    delete_filter = f"AND COALESCE(p.`{delete_col}`,0)=0" if delete_col else ""
     start = as_of - timedelta(days=6)
     with db_cursor() as c:
         c.execute(
             f"""
             SELECT
               COUNT(*) AS total_rows,
-              SUM(CASE WHEN spu IS NOT NULL AND TRIM(spu)<>'' THEN 1 ELSE 0 END) AS spu_rows,
-              COUNT(DISTINCT CASE WHEN spu IS NOT NULL AND TRIM(spu)<>'' THEN spu END) AS spu_n
-            FROM {table}
-            WHERE `{dcol}` BETWEEN %s AND %s
-              AND `{store}` IN (%s,%s,%s,%s)
+              SUM(CASE WHEN {spu_expr} IS NOT NULL AND TRIM({spu_expr})<>'' THEN 1 ELSE 0 END) AS spu_rows,
+              COUNT(DISTINCT CASE WHEN {spu_expr} IS NOT NULL AND TRIM({spu_expr})<>'' THEN {spu_expr} END) AS spu_n
+            FROM {table} p
+            WHERE p.`{dcol}` BETWEEN %s AND %s
+              AND p.`{store}` IN (%s,%s,%s,%s)
               {delete_filter}
             """,
             (start, as_of, *TARGET_SHOPS),
@@ -332,12 +349,12 @@ def recent_spu_coverage(profile: Dict[str, Any], as_of: date) -> Dict[str, Any]:
     spu_rows = int(row.get("spu_rows", 0) or 0)
     return {
         "range": [str(start), str(as_of)],
+        "spu_mode": profile["spu_mode"],
         "total_rows": total,
-        "rows_with_native_spu": spu_rows,
-        "native_spu_rate": round(spu_rows / total, 6) if total else None,
+        "rows_with_spu_identity": spu_rows,
+        "spu_identity_rate": round(spu_rows / total, 6) if total else None,
         "distinct_spu": int(row.get("spu_n", 0) or 0),
     }
-
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -372,17 +389,18 @@ def main() -> int:
         "as_of_date": str(profile["as_of_date"]),
         "build_range": [str(start), str(end)],
         "target_shops": list(TARGET_SHOPS),
-        "native_spu_required": True,
+        "spu_identity_mode": profile["spu_mode"],
+        "historical_mapping_guard": "native SPU preferred; otherwise SKU prefix only; never current product-management join",
         "mapped_fields": {
             "date": profile["date"],
             "store": profile["store"],
-            "spu": profile["spu"],
+            "spu": profile["spu"] or "DERIVED_FROM_SKU_PREFIX",
             "sku": profile["sku"],
             "sales": profile["sales"],
             "sessions": profile["sessions"],
             **profile["optional"],
         },
-        "recent_native_spu_coverage": recent_spu_coverage(profile, profile["as_of_date"]),
+        "recent_spu_identity_coverage": recent_spu_coverage(profile, profile["as_of_date"]),
         "dry_run": bool(args.dry_run),
     }
     print("SPU_DAILY_HISTORY_PREFLIGHT=" + json.dumps(summary, ensure_ascii=False, default=str))
