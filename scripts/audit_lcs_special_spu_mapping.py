@@ -23,8 +23,8 @@ from jobs.forecast_monitoring import daily_monitor as base
 from jobs.forecast_monitoring import daily_monitor_v2 as v2
 from jobs.forecast_monitoring.daily_monitor_v4 import TARGET_SHOPS
 
-START = date(2025, 1, 1)
-END = date(2025, 12, 31)
+START = date(2025, 3, 1)
+END = date(2025, 9, 30)
 
 
 def month_windows(start: date, end: date):
@@ -66,111 +66,63 @@ def main() -> int:
         "scan_mode": "MONTHLY_CHUNKS",
     }, ensure_ascii=False))
 
-    # Aggregate in Python so MySQL never has to hold a full-year GROUP BY.
-    mapping: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
-    month_shop = defaultdict(lambda: {
-        "rows": 0, "mskus": set(), "spus": set(), "sales_units": 0.0, "sessions": 0.0
-    })
+    # We only need an SPU exclusion mapping. Avoid expensive SUM/MIN/MAX/GROUP BY
+    # over the large ODS table; fetch distinct raw MSKU->SPU pairs month by month.
+    mapping = {}
+    month_shop = defaultdict(lambda: {"mskus": set(), "spus": set()})
     all_mskus = set()
     all_spus = set()
-    total_rows = 0
-    total_sales = 0.0
-    total_sessions = 0.0
 
     for chunk_start, chunk_end in month_windows(START, END):
-        print(f"SCAN_MONTH={chunk_start}~{chunk_end}")
+        print(f"SCAN_MONTH={chunk_start}~{chunk_end}", flush=True)
         with db_cursor() as c:
             c.execute(
                 f"""
-                SELECT
+                SELECT DISTINCT
                   p.`store_name` AS shop,
-                  UPPER(TRIM(p.`msku`)) AS msku,
-                  UPPER(TRIM(COALESCE(p.`spu`,''))) AS spu,
-                  MIN(p.`dt`) AS first_dt,
-                  MAX(p.`dt`) AS last_dt,
-                  SUM(COALESCE(p.`volume`,0)) AS sales_units,
-                  SUM(COALESCE(p.`sessions_total`,0)) AS sessions,
-                  COUNT(*) AS rows_n
+                  p.`msku` AS msku,
+                  p.`spu` AS spu
                 FROM {table} p
                 WHERE p.`dt` BETWEEN %s AND %s
                   AND p.`store_name` IN (%s,%s,%s,%s)
-                  AND UPPER(TRIM(COALESCE(p.`msku`,''))) LIKE 'LCS-%%'
+                  AND p.`msku` LIKE 'LCS-%%'
+                  AND p.`spu` IS NOT NULL
+                  AND p.`spu` <> ''
                   {delete_filter}
-                GROUP BY
-                  p.`store_name`,
-                  UPPER(TRIM(p.`msku`)),
-                  UPPER(TRIM(COALESCE(p.`spu`,'')))
                 """,
                 (chunk_start, chunk_end, *TARGET_SHOPS),
             )
             rows = list(c.fetchall())
 
         ym = chunk_start.strftime("%Y-%m")
-        chunk_summary = {
-            "month": ym,
-            "mapping_rows": len(rows),
-            "distinct_msku": len({str(r.get("msku") or "") for r in rows}),
-            "distinct_spu": len({str(r.get("spu") or "") for r in rows if str(r.get("spu") or "").strip()}),
-            "sales_units": float(sum(float(r.get("sales_units") or 0) for r in rows)),
-            "sessions": float(sum(float(r.get("sessions") or 0) for r in rows)),
-        }
-        print("MONTH_RESULT=" + json.dumps(chunk_summary, ensure_ascii=False))
-
+        month_mskus = set()
+        month_spus = set()
         for r in rows:
             shop = str(r.get("shop") or "").strip()
             msku = str(r.get("msku") or "").strip()
             spu = str(r.get("spu") or "").strip()
-            rn = int(r.get("rows_n") or 0)
-            sales = float(r.get("sales_units") or 0)
-            sessions = float(r.get("sessions") or 0)
-            first_dt = r.get("first_dt")
-            last_dt = r.get("last_dt")
-
-            total_rows += rn
-            total_sales += sales
-            total_sessions += sessions
-            if msku:
-                all_mskus.add(msku)
-            if spu:
-                all_spus.add(spu)
-
-            ms = month_shop[(ym, shop)]
-            ms["rows"] += rn
-            if msku:
-                ms["mskus"].add(msku)
-            if spu:
-                ms["spus"].add(spu)
-            ms["sales_units"] += sales
-            ms["sessions"] += sessions
-
+            if not msku or not spu:
+                continue
             key = (shop, msku, spu)
-            if key not in mapping:
-                mapping[key] = {
-                    "shop": shop,
-                    "msku": msku,
-                    "spu": spu,
-                    "first_dt": first_dt,
-                    "last_dt": last_dt,
-                    "sales_units": sales,
-                    "sessions": sessions,
-                    "rows": rn,
-                }
-            else:
-                x = mapping[key]
-                if first_dt is not None and (x["first_dt"] is None or first_dt < x["first_dt"]):
-                    x["first_dt"] = first_dt
-                if last_dt is not None and (x["last_dt"] is None or last_dt > x["last_dt"]):
-                    x["last_dt"] = last_dt
-                x["sales_units"] += sales
-                x["sessions"] += sessions
-                x["rows"] += rn
+            mapping[key] = {"shop": shop, "msku": msku, "spu": spu}
+            all_mskus.add(msku)
+            all_spus.add(spu)
+            month_mskus.add(msku)
+            month_spus.add(spu)
+            month_shop[(ym, shop)]["mskus"].add(msku)
+            month_shop[(ym, shop)]["spus"].add(spu)
+
+        print("MONTH_RESULT=" + json.dumps({
+            "month": ym,
+            "mapping_rows": len(rows),
+            "distinct_msku": len(month_mskus),
+            "distinct_spu": len(month_spus),
+        }, ensure_ascii=False), flush=True)
 
     summary = {
-        "rows_n": total_rows,
         "distinct_lcs_msku": len(all_mskus),
         "distinct_mapped_spu": len(all_spus),
-        "sales_units": total_sales,
-        "sessions": total_sessions,
+        "distinct_shop_msku_spu": len(mapping),
     }
     print("SUMMARY=" + json.dumps(summary, ensure_ascii=False))
 
@@ -180,43 +132,18 @@ def main() -> int:
         print(json.dumps({
             "month": ym,
             "shop": shop,
-            "rows": r["rows"],
             "lcs_msku": len(r["mskus"]),
             "mapped_spu": len(r["spus"]),
-            "sales_units": r["sales_units"],
-            "sessions": r["sessions"],
         }, ensure_ascii=False))
 
     print("\n=== TOP_MAPPING ===")
-    top = sorted(
-        mapping.values(),
-        key=lambda r: (float(r["sales_units"]), float(r["sessions"])),
-        reverse=True,
-    )[:200]
-    blank_spu_rows = 0
-    top_distinct_spus = set()
-    for r in top:
-        spu = str(r.get("spu") or "").strip()
-        if not spu:
-            blank_spu_rows += 1
-        else:
-            top_distinct_spus.add(spu)
-        print(json.dumps({
-            "shop": r["shop"],
-            "msku": r["msku"],
-            "spu": spu,
-            "first_dt": str(r.get("first_dt") or ""),
-            "last_dt": str(r.get("last_dt") or ""),
-            "sales_units": float(r.get("sales_units") or 0),
-            "sessions": float(r.get("sessions") or 0),
-            "rows": int(r.get("rows") or 0),
-        }, ensure_ascii=False))
+    for r in sorted(mapping.values(), key=lambda x: (x["shop"], x["msku"], x["spu"]))[:200]:
+        print(json.dumps(r, ensure_ascii=False))
 
     print("\nAUDIT_DECISION=" + json.dumps({
         "lcs_found": len(all_mskus) > 0,
         "mapped_spu_found": len(all_spus) > 0,
-        "top_mapping_blank_spu_rows": blank_spu_rows,
-        "top_mapping_distinct_spu": len(top_distinct_spus),
+        "mapped_spu_count": len(all_spus),
         "next": (
             "use raw performance msku->native spu as whole-SPU exclusion source"
             if len(all_spus) > 0
