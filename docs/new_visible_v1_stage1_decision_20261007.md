@@ -435,3 +435,91 @@ NV-ML-V1-STAGE2-DIRECT30-CORE-Q75
 - 通过后才接库存、在途、生产20天 + 海运28天做采购回放。
 
 Stage1 保留作为风险/机会解释层，而不再作为完整数量预测的必经公式。
+
+
+## 18. DIRECT full-volume Quantile 首轮结果
+
+完整 future30 主架构仍冻结为：
+
+```text
+NV-ML-V1-STAGE2-DIRECT30-CORE
+```
+
+但 raw full-volume quantile 的 coverage 还未达到业务语义要求。
+
+### Q50
+
+Pooled launch-balanced：
+
+- coverage ≈ 0.433
+- WAPE ≈ 0.461
+- Bias ≈ -0.257
+
+分年龄 coverage：
+
+- Day7 ≈ 0.359
+- Day14 ≈ 0.395
+- Day30 ≈ 0.474
+- Day60 ≈ 0.418
+- Day90 ≈ 0.479
+
+Q50 的 pinball loss 明显优于 age-Q50 baseline，但整体偏低估，尤其 Day7/14。
+
+### Q75
+
+Pooled launch-balanced：
+
+- coverage ≈ 0.656
+- pinball loss 明显优于 age-Q75 baseline
+- aggregate Bias ≈ +0.049
+
+分年龄 coverage：
+
+- Day7 ≈ 0.611
+- Day14 ≈ 0.617
+- Day30 ≈ 0.685
+- Day60 ≈ 0.607
+- Day90 ≈ 0.701
+
+因此 raw Q75 暂不能解释为完整 future30 的 75% 安全需求线。
+
+Quantile crossing 很低（各 fold 约 0.2%~2.3%），后续继续使用：
+
+```text
+Q75 = max(Q75, Q50)
+```
+
+### 技术解释
+
+DIRECT 当前点模型使用 `regression_l1`，本质上更接近条件中位数。偏态销量分布下，中位数预测的总量 Bias 为负并不等同于模型失败；采购决策应通过 P50 / P75 分布表达风险，而不是强制 P50 aggregate Bias=0。
+
+## 19. DIRECT Quantile forward calibration
+
+下一步不更换模型，只审计 forward-only multiplicative calibration：
+
+```text
+ratio = actual_future30 / raw_quantile
+factor_q = prior mature OOS ratio 的 q 分位
+calibrated = raw × factor_q
+```
+
+比较：
+
+- RAW
+- GLOBAL factor
+- AGE factor（样本不足时 fallback GLOBAL）
+
+严格要求：
+
+```text
+calibration label_end_date < test_fold_start
+```
+
+优先判断 Day14 / Day30：
+
+- Q50 coverage 是否接近 50%
+- Q75 coverage 是否接近 75%
+- pinball loss 是否保持优势
+- forward fold 是否稳定
+
+若通过，则停止继续增加预测模型层，进入库存 / 在途 / 生产20天 + 海运28天的采购回放。
