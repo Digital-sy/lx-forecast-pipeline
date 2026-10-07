@@ -82,7 +82,26 @@ def safe_days(position: float, demand48: float):
     return 48.0 * position / demand48
 
 
+def table_exists(table_name: str) -> bool:
+    row = one(
+        "SELECT COUNT(*) AS n FROM information_schema.TABLES "
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s",
+        (table_name,),
+    )
+    return int(row.get("n", 0) or 0) > 0
+
+
 def main() -> int:
+    if not table_exists(PRED_TABLE):
+        raise RuntimeError(
+            f"{PRED_TABLE} 不存在；请先运行 scripts/score_new_visible_h48_shadow.py"
+        )
+    if not table_exists(INV_TABLE):
+        raise RuntimeError(
+            f"{INV_TABLE} 不存在；请先运行 "
+            "scripts/materialize_new_visible_inventory_position_shadow.py"
+        )
+
     pd = one(f"SELECT MAX(snapshot_date) AS d FROM {PRED_TABLE}").get("d")
     invd = one(f"SELECT MAX(snapshot_date) AS d FROM {INV_TABLE}").get("d")
     if not pd or not invd:
