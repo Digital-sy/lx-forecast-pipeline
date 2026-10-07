@@ -28,6 +28,18 @@ historical event precision and minimum alert count is selected. If none qualifie
 HIGH is disabled for that band.
 
 Then the selected band thresholds are carried untouched into the next time fold.
+
+Temporal maturity guard
+-----------------------
+A prior-fold daily snapshot may extend into the next calendar fold because a launch
+can be followed to age 120. Therefore "prior launch fold" alone is NOT sufficient.
+For a test fold starting at T, policy-selection history is restricted to rows whose
+PERSIST_750 outcome is fully knowable before T:
+
+    snapshot_date + 30 days < T
+
+This prevents policy selection from using future daily snapshots or labels that mature
+inside the test period.
 """
 from __future__ import annotations
 
@@ -227,6 +239,7 @@ def main() -> int:
         "threshold_grid": list(THRESHOLDS),
         "min_historical_alerts": MIN_ALERTS,
         "selection_unit": "prior daily OOS first-alert events by lifecycle band",
+        "policy_maturity_guard": "snapshot_date + 30d < test_fold_start",
         "test_folds": TEST_FOLDS,
         "no_db_write": True,
     }, ensure_ascii=False))
@@ -238,22 +251,48 @@ def main() -> int:
         t: [] for t in POLICY_PRECISION_TARGETS
     }
 
+    fold_dates = {
+        name: (pd.Timestamp(start), pd.Timestamp(end))
+        for name, start, end in base.TEST_FOLDS
+    }
+
     for test_fold in TEST_FOLDS:
         fold_idx = fwd.FOLD_ORDER.index(test_fold)
         prior_folds = fwd.FOLD_ORDER[:fold_idx]
-        history_rows = scored_all[scored_all["fold"].isin(prior_folds)].copy()
+        test_start, _test_end = fold_dates[test_fold]
+
+        # CRITICAL leakage guard:
+        # prior launch folds can have age60/90/120 snapshots extending into this test
+        # fold. Policy selection may only use daily rows whose 30-day label is fully
+        # mature before test_start.
+        history_candidates = scored_all[
+            scored_all["fold"].isin(prior_folds)
+        ].copy()
+        history_candidates["label_end_date"] = (
+            history_candidates["snapshot_date"] + pd.to_timedelta(30, unit="D")
+        )
+        history_rows = history_candidates[
+            history_candidates["label_end_date"] < test_start
+        ].copy()
+
         test_rows = scored_all[scored_all["fold"] == test_fold].copy()
         if history_rows.empty or test_rows.empty:
             continue
 
         print("DAILY_EVENT_FOLD_SCOPE=" + json.dumps({
             "test_fold": test_fold,
+            "test_fold_start": str(test_start.date()),
             "policy_source_folds": prior_folds,
+            "history_candidate_rows_before_maturity_guard": int(len(history_candidates)),
             "history_rows": int(len(history_rows)),
             "history_launches": int(history_rows["launch_key"].nunique()),
             "test_rows": int(len(test_rows)),
             "test_launches": int(test_rows["launch_key"].nunique()),
             "history_max_snapshot": str(history_rows["snapshot_date"].max().date()),
+            "history_max_label_end": str(history_rows["label_end_date"].max().date()),
+            "maturity_guard_pass": bool(
+                history_rows["label_end_date"].max() < test_start
+            ),
             "test_min_snapshot": str(test_rows["snapshot_date"].min().date()),
         }, ensure_ascii=False))
 
@@ -309,7 +348,7 @@ def main() -> int:
         }, ensure_ascii=False))
 
     print("\n=== DAILY_EVENT_POLICY_GUIDANCE ===")
-    print("1. 这是daily-event级前向阈值选择：测试fold从未参与自己的阈值选择。")
+    print("1. 这是daily-event级前向阈值选择：测试fold从未参与自己的阈值选择；且历史事件label必须在test fold开始前完整成熟。")
     print("2. 优先比较P50/P55/P60哪一档能在每个未来fold维持接近目标precision，同时保留足够recall和提前量。")
     print("3. 若P55/P60仍无法把最近fold first-alert precision稳定推到约50%，HIGH不应作为自动追单信号。")
     print("4. WATCH不在本轮重新优化；现有MEDIUM已明确只适合观察池，不作为采购动作。")
