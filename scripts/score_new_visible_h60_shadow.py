@@ -25,7 +25,8 @@ from scripts.materialize_new_visible_live_core import DEST_TABLE as CORE_TABLE
 
 HORIZON = 60
 PRED_TABLE = "forecast_new_visible_h60_prediction_daily"
-MODEL_VERSION = "DIRECT60_CORE_SHADOW_V1"
+H48_PRED_TABLE = "forecast_new_visible_h48_prediction_daily"
+MODEL_VERSION = "DIRECT60_CORE_SHADOW_V1_MONOTONIC_H48"
 QUANTILES = (0.50, 0.75)
 
 
@@ -38,6 +39,15 @@ def q(sql: str, params: Sequence[Any] = ()) -> List[Dict[str, Any]]:
 def one(sql: str, params: Sequence[Any] = ()) -> Dict[str, Any]:
     rows = q(sql, params)
     return rows[0] if rows else {}
+
+
+def table_exists(name: str) -> bool:
+    row = one(
+        "SELECT COUNT(*) AS n FROM information_schema.TABLES "
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s",
+        (name,),
+    )
+    return int(row.get("n", 0) or 0) > 0
 
 
 def ensure_table() -> None:
@@ -178,7 +188,25 @@ def main() -> int:
         models[qv] = model
         raw[qv] = np.maximum(np.expm1(model.predict(live[features])), 0.0)
 
+    h48_map = {}
+    if table_exists(H48_PRED_TABLE):
+        h48_rows = q(
+            f"SELECT snapshot_date,store_name,spu,checkpoint_validated,"
+            f"global_q50,age_q50,global_q75,age_q75 "
+            f"FROM {H48_PRED_TABLE} WHERE snapshot_date=%s",
+            (snapshot_date.date(),),
+        )
+        for x in h48_rows:
+            use_age = int(x.get("checkpoint_validated", 0) or 0) == 1
+            q50 = x.get("age_q50") if use_age else x.get("global_q50")
+            q75 = x.get("age_q75") if use_age else x.get("global_q75")
+            h48_map[(str(x.get("store_name") or ""), str(x.get("spu") or ""))] = (
+                float(q50 or 0), float(q75 or 0)
+            )
+
     rows = []
+    monotonic_adjusted_q50 = 0
+    monotonic_adjusted_q75 = 0
     for i, r in live.reset_index(drop=True).iterrows():
         age = int(r["age_days"])
         band = age_band(age)
@@ -216,6 +244,16 @@ def main() -> int:
             selected_q75 = vals[0.75]["global"]
             reason = "WATCH_ONLY_AGE_OUTSIDE_7_120"
 
+        h48_pair = h48_map.get((str(r["store_name"]), str(r["spu"])))
+        if h48_pair is not None:
+            before50, before75 = selected_q50, selected_q75
+            selected_q50 = max(selected_q50, h48_pair[0])
+            selected_q75 = max(selected_q75, h48_pair[1], selected_q50)
+            if selected_q50 > before50 + 1e-9:
+                monotonic_adjusted_q50 += 1
+            if selected_q75 > before75 + 1e-9:
+                monotonic_adjusted_q75 += 1
+
         rows.append({
             "snapshot_date": snapshot_date.date(),
             "as_of_date": as_of.date(),
@@ -251,6 +289,9 @@ def main() -> int:
         "calibration_history_rows": int(len(cal_history)),
         "global_factor_q50": factors[0.50]["global_factor"],
         "global_factor_q75": factors[0.75]["global_factor"],
+        "h48_rows_joined": len(h48_map),
+        "monotonic_adjusted_q50_rows": monotonic_adjusted_q50,
+        "monotonic_adjusted_q75_rows": monotonic_adjusted_q75,
         "dry_run": args.dry_run,
     }, ensure_ascii=False))
 
