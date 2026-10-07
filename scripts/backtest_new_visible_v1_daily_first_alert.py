@@ -34,7 +34,6 @@ Important
 from __future__ import annotations
 
 import json
-import math
 from collections import defaultdict
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -117,16 +116,6 @@ def pct(vals: Sequence[float], p: float) -> Optional[float]:
     if not vals:
         return None
     return round(float(np.quantile(np.asarray(vals, dtype=float), p)), 3)
-
-
-def binary_metrics(y: np.ndarray, pred: np.ndarray) -> Dict[str, Any]:
-    return {
-        "alerts": int(pred.sum()),
-        "alert_rate": round(float(pred.mean()), 6) if len(pred) else None,
-        "precision": round(float(precision_score(y, pred, zero_division=0)), 6) if len(y) else None,
-        "recall": round(float(recall_score(y, pred, zero_division=0)), 6) if len(y) else None,
-        "f1": round(float(f1_score(y, pred, zero_division=0)), 6) if len(y) else None,
-    }
 
 
 def select_thresholds(checkpoint_oos: pd.DataFrame, prior_folds: Sequence[str]) -> Dict[int, Dict[str, Any]]:
@@ -241,10 +230,13 @@ def first_events(rows: pd.DataFrame, flag: str) -> pd.DataFrame:
     alerts = rows[rows[flag].astype(int) == 1].copy()
     if alerts.empty:
         return alerts
+    # head(1) preserves one exact snapshot row. groupby.first() can independently
+    # choose the first non-null value per column and accidentally assemble a hybrid row.
     return (
         alerts.sort_values(["launch_key", "snapshot_date"])
-        .groupby("launch_key", as_index=False, sort=False)
-        .first()
+        .groupby("launch_key", sort=False, group_keys=False)
+        .head(1)
+        .reset_index(drop=True)
     )
 
 
