@@ -606,3 +606,106 @@ scripts/train_new_visible_v1_stage2_direct_h48.py
 - 2026H2 因 48 天 maturity window 样本减少属于正确右截断。
 
 H48 通过后，才进入 live inventory / inbound procurement shadow。由于 2026-09-30 前缺少可靠历史每日库存，不允许伪造历史库存做采购回测。
+
+
+## 22. DIRECT48 strict temporal OOS 结果
+
+H48 使用真实未来 48 天标签：
+
+```text
+future_sales_48d = snapshot+1 ... snapshot+48
+```
+
+现有 H30 snapshot 表未修改；H48 标签直接来自 `forecast_research_spu_daily_history`，并只保留完整 48 天未来窗口。
+
+所有 forward calibration fold 的 maturity guard 均通过。
+
+### RAW
+
+H48 raw quantile 仍明显低估：
+
+- Q50 pooled launch-balanced coverage ≈ 0.416
+- Q75 pooled launch-balanced coverage ≈ 0.618
+
+因此 raw H48 不作为采购语义输出。
+
+### GLOBAL calibration
+
+Pooled launch-balanced：
+
+- Q50 coverage ≈ 0.492
+- Q75 coverage ≈ 0.758
+- Q50 WAPE ≈ 0.487
+
+分年龄：
+
+- Day14：Q50 ≈ 0.458，Q75 ≈ 0.735
+- Day30：Q50 ≈ 0.540，Q75 ≈ 0.796
+
+### AGE calibration
+
+Pooled launch-balanced：
+
+- Q50 coverage ≈ 0.494
+- Q75 coverage ≈ 0.756
+- Q50 WAPE ≈ 0.489
+
+分年龄：
+
+- Day14：Q50 ≈ 0.505，Q75 ≈ 0.772
+- Day30：Q50 ≈ 0.496，Q75 ≈ 0.781
+
+因此从 pooled / lifecycle coverage 看，AGE 更贴近 Q50/Q75 的业务语义；GLOBAL 的 pinball/WAPE 略好且更简单。
+
+但 forward fold 内仍存在明显波动：
+
+- 2025H2 AGE Day14 Q50 ≈ 0.402、Q75 ≈ 0.709；
+- 2026H1 AGE Day14 Q50 ≈ 0.627、Q75 ≈ 0.822；
+- 2026H2 AGE Day30 仅 39 行，Q50 ≈ 0.333、Q75 ≈ 0.590。
+
+因此：
+
+```text
+DIRECT48
+= 需求预测研究通过
+= 可以进入 live procurement shadow
+= 尚不能作为自动追单 Champion
+```
+
+Shadow 阶段建议同时保留 GLOBAL / AGE 两套校准输出，观察真实 Day14/30 稳定性后再冻结最终线上校准方式。
+
+## 23. H48 procurement shadow 前置条件
+
+当前 live `forecast_feature_snapshot_daily` 与冻结 CORE 特征并不完全一致。
+
+训练 CORE 包含但 live feature snapshot 缺失的字段包括：
+
+- sales_3d / sales_prev_3d
+- sessions_3d / sessions_prev_3d
+- cvr_3d
+- sales_growth_3d / sessions_growth_3d
+- sales_positive_days_7 / sessions_positive_days_7
+- sales_up_days_7 / sessions_up_days_7
+- sales_slope_7 / sessions_slope_7
+- sales_cv_7 / sessions_cv_7
+- sales_max_day_share_7 / sessions_max_day_share_7
+
+因此禁止直接用缺失值替代后给 H48 live 打分。
+
+新增只读审计：
+
+```text
+scripts/audit_new_visible_h48_shadow_readiness.py
+```
+
+它检查：
+
+1. research daily history freshness；
+2. 当前 NEW_VISIBLE 范围；
+3. live feature schema 与冻结 CORE 的一致性；
+4. 当前真实 FBA inventory snapshot 覆盖；
+5. inbound shipped / receiving 等库存组件覆盖；
+6. LCS/XH business exclusion；
+7. 是否允许进入下一步 live CORE scorer。
+
+只有完成 live CORE 同口径特征构造后，才进入 H48 Q50/Q75 + 库存/在途采购 shadow。
