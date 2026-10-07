@@ -1045,3 +1045,51 @@ Gate:
 - unknown => blocked.
 
 No production procurement tables are modified.
+
+
+## 36. H60 fabric split and procurement action queue
+
+2026-10-06 fabric split:
+
+- 现货面料: 83
+- 定制面料: 15
+- UNKNOWN: 2
+
+The 11 H60 rows that remain below Q50 even after all pending inventory split into:
+
+- 8 stock-fabric rows;
+- 3 custom-fabric rows.
+
+Important rule:
+
+```text
+custom fabric + H48 CRITICAL
+!= wait silently for H90
+
+It enters emergency manual risk handling,
+but H90 normal procurement quantity remains blocked.
+```
+
+New action-queue script:
+
+```text
+scripts/build_new_visible_procurement_action_shadow.py
+```
+
+Output table:
+
+```text
+forecast_new_visible_procurement_action_shadow_daily
+```
+
+Action semantics:
+
+- STOCK P0: emergency lead-time action + H60 replenishment range shadow
+- STOCK P1: verify inbound ETA + H60 replenishment range
+- STOCK P2: safety-stock review
+- STOCK P3: covered / observe
+- CUSTOM P0/P1: urgent manual action, no H90 quantity release
+- CUSTOM P2/P3: hold for H90
+- UNKNOWN: blocked until fabric mapping is repaired
+
+No production PO quantity is released.
