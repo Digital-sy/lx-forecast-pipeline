@@ -35,4 +35,6 @@ run_step "h60_fabric_classification"   "$PYTHON" scripts/classify_new_visible_h6
 
 run_step "procurement_action_queue"   "$PYTHON" scripts/build_new_visible_procurement_action_shadow.py
 
+run_step "procurement_action_export"   "$PYTHON" scripts/export_new_visible_procurement_action_shadow.py
+
 echo "[$(date '+%F %T')] NEW_VISIBLE H48/H60 shadow pipeline complete" | tee -a "$LOG_FILE"
