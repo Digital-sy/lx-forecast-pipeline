@@ -1,0 +1,6 @@
+# Research-only ML dependencies for NEW_VISIBLE / Breakout modeling.
+# Keep separate from production runtime requirements.txt so production jobs are not
+# coupled to scikit-learn / LightGBM unless explicitly installed for research.
+
+scikit-learn>=1.5,<2
+lightgbm>=4.5,<5
