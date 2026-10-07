@@ -15,6 +15,8 @@ from jobs.feishu.color_system_resolver import ColorSystemResolver
 from jobs.feishu.fabric_merge_rule_loader import load_fabric_merge_maps
 from jobs.feishu import procurement_color_logic as logic
 from jobs.feishu import generate_fabric_forecast_color_system as fabric_detail
+from jobs.feishu import new_visible_procurement_bridge as nv_bridge
+from jobs.feishu import new_visible_procurement_overlay as nv_overlay
 
 logger = get_logger("procurement_report_lx_color")
 
@@ -256,6 +258,7 @@ def main() -> None:
     factory_map = base.read_last_factory()
     op_forecast_map = base.read_op_forecast_by_month()
     fabric_info = logic.read_fabric_info()
+    nv_recommendations = nv_bridge.load_recommendations(current_date)
 
     order_records, fabric_records = logic.build_reports(
         forecast_map=forecast_map,
@@ -265,9 +268,18 @@ def main() -> None:
         factory_map=factory_map,
         op_forecast_map=op_forecast_map,
     )
+    order_records, fabric_records, nv_summary = nv_overlay.apply_new_visible_overlay(
+        order_records=order_records,
+        forecast_map=forecast_map,
+        month_order=month_order,
+        fabric_info=fabric_info,
+        recommendations=nv_recommendations,
+    )
     logger.info(
         f"建议下单计算完成：{len(order_records)} 个颜色身份+店铺，"
-        f"{len(fabric_records)} 种定制面料"
+        f"{len(fabric_records)} 种定制面料；"
+        f"NEW_VISIBLE模式={nv_summary['mode']}，覆盖SPU+店铺={nv_summary['override_groups']}，"
+        f"Q50释放合计={nv_summary['allocated_q50_sum']}"
     )
 
     logic.save_order_suggest(order_records, month_order)
