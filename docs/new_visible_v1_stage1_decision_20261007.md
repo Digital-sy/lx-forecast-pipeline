@@ -104,3 +104,68 @@ NV-ML-V1-B-CORE LightGBM
 4. 研究 HIGH / MEDIUM / LOW 是否需要按 age 分层阈值。
 5. 阈值策略冻结后，再进入 all-daily-snapshot / first-alert / operational shadow 验证。
 6. 最终仍需验证采购价值，且不得在未通过 gate 前替换生产 V4 / A16。
+
+
+## 8. Daily first-alert 运营回放结论
+
+固定 checkpoint 阈值在 daily replay 下出现明显的 repeated-trigger / sequential-trigger 膨胀：
+
+- MEDIUM/WATCH 首次报警过宽，告警率过高，只适合作为观察池；
+- HIGH 明显优于 RULE V0，但 first-alert precision 仍不足以作为自动追单门槛；
+- 2consec（连续两天越线）是当前最合理的固定去抖规则：比 1of1 提高 first-alert precision，且基本不损失 useful recall；
+- 2of3 / 3of5 没有形成足够大的额外收益，不继续扩大确认规则搜索空间。
+
+因此正式业务语义暂定：
+
+```text
+WATCH
+= 值得运营/采购关注
+= 不触发自动追单
+
+Stage-1 HIGH / ACTION CANDIDATE
+= 高价值人工复核池
+= 不作为单独自动采购依据
+```
+
+## 9. Daily-event 阈值前向验证
+
+Daily-event 阈值策略已加入严格 label maturity guard：
+
+```text
+history snapshot_date + 30 days < test_fold_start
+```
+
+原因：按 launch 所属半年分 fold 时，H1 launch 的 Day60/90/120 snapshot 可能自然延伸进 H2；仅按 launch fold 过滤不足以防止 future-label leakage。
+
+修正后 P50/P55/P60 三种历史 precision target 仍未在未来 fold 稳定维持 50%+ first-alert precision。
+
+当前结论：
+
+- 不继续把 Stage-1 HIGH 优化成自动追单开关；
+- Stage-1 的核心价值冻结为 ranking / opportunity screening；
+- 采购动作必须进入 Stage-2 条件销量预测，并与库存、在途、补货周期组合。
+
+## 10. Stage-2 研究方向
+
+下一阶段模型：
+
+```text
+NV-ML-V1-STAGE2-COND30-CORE
+```
+
+目标：
+
+```text
+E(future_sales_30d | PERSIST_750)
+```
+
+首轮仅使用 CORE 特征，并采用同样的 strict temporal OOS / no-launch-overlap 规则。
+
+同时诊断：
+
+```text
+expected_opportunity_units
+= P(PERSIST_750) × E(future_sales_30d | PERSIST_750)
+```
+
+注意：这不是 NEW_VISIBLE 总销量预测；negative class 仍可能产生销量。后续若 Stage-2 条件销量有效，再补 negative/base-demand 组件和 P50/P75 quantile，最终形成可接库存/在途/供应链提前期的完整 future30 数量预测。
