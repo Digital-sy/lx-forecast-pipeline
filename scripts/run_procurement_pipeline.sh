@@ -3,10 +3,11 @@
 # 采购建议核心流水线
 # 1. 飞书运营预计下单量 → MySQL
 # 2. 系统预测 vs 运营预计 → 预测对比表 / 预测对比表_SKU
-# 3. 颜色体系建议下单量 + 面料详细预估 → MySQL / 飞书
-#    颜色名称来自 A2023/B2024 颜色编制表，不使用领星颜色名称
-# 4. 导出采购建议 Excel
-# 5. 导出面料-颜色预计下单 Excel
+# 3. 刷新 NEW_VISIBLE H48/H60 Procurement Champion
+# 4. 颜色体系建议下单量 + NEW_VISIBLE覆盖 → MySQL / 飞书
+# 5. NEW_VISIBLE颜色分摊/总量硬审计
+# 6. 导出采购建议 Excel
+# 7. 导出面料-颜色预计下单 Excel
 #
 # 任一步骤失败都会停止后续任务并发送飞书告警。
 # ============================================
@@ -17,6 +18,7 @@ PROJECT_DIR="${PROJECT_DIR:-/opt/apps/pythondata}"
 VENV_DIR="${VENV_DIR:-$PROJECT_DIR/venv}"
 PYTHON="${PYTHON:-$VENV_DIR/bin/python}"
 ML_PYTHON="${ML_PYTHON:-$PROJECT_DIR/venv-ml/bin/python}"
+export NEW_VISIBLE_PROCUREMENT_MODE="${NEW_VISIBLE_PROCUREMENT_MODE:-primary}"
 LOG_DIR="${LOG_DIR:-$PROJECT_DIR/logs}"
 LOG_FILE="${LOG_FILE:-$LOG_DIR/cron_procurement_pipeline.log}"
 
@@ -27,6 +29,10 @@ cd "$PROJECT_DIR" || {
 
 if [ ! -x "$PYTHON" ]; then
     echo "Python 解释器不存在或不可执行：$PYTHON" >&2
+    exit 1
+fi
+if [ "$NEW_VISIBLE_PROCUREMENT_MODE" = "primary" ] && [ ! -x "$ML_PYTHON" ]; then
+    echo "ML Python 解释器不存在或不可执行：$ML_PYTHON" >&2
     exit 1
 fi
 
@@ -123,7 +129,11 @@ echo "✓ Python 核心模块语法检查通过" >> "$LOG_FILE"
 
 run_module "1" "jobs.feishu.write_order_forecast_to_feishu" "同步运营预计下单量"
 run_module "2" "jobs.feishu.generate_forecast_comparison" "生成月度预测对比表（成熟款/展示层保持原逻辑）"
-run_script "3" "scripts/run_new_visible_h48_shadow_pipeline.sh" "刷新NEW_VISIBLE H48/H60采购Champion"
+if [ "$NEW_VISIBLE_PROCUREMENT_MODE" = "primary" ]; then
+    run_script "3" "scripts/run_new_visible_h48_shadow_pipeline.sh" "刷新NEW_VISIBLE H48/H60采购Champion"
+else
+    echo "[3/7] NEW_VISIBLE Champion已关闭，使用旧新品逻辑" >> "$LOG_FILE"
+fi
 run_module "4" "jobs.feishu.generate_procurement_report_named_colors" "生成中文颜色体系采购建议并覆盖NEW_VISIBLE新品"
 echo "[5/7] NEW_VISIBLE生产覆盖审计..." >> "$LOG_FILE"
 "$ML_PYTHON" "$PROJECT_DIR/scripts/audit_new_visible_production_overlay.py" >> "$LOG_FILE" 2>&1
