@@ -301,8 +301,10 @@ def feature_row(snapshot_date, as_of, shop, spu, fs, series):
         "store_name": shop,
         "spu": spu,
         "first_sale_day": fs,
-        "launch_month": fs.strftime("%Y-%m"),
-        "snapshot_month": as_of.strftime("%Y-%m"),
+        # Must match train_new_visible_v1_stage1.load_rows exactly:
+        # categorical month features are month-number strings, not YYYY-MM.
+        "launch_month": str(fs.month),
+        "snapshot_month": str(snapshot_date.month),
         "age_days": (as_of - fs).days,
         "sales_3d": sales3,
         "sales_prev_3d": sales_prev3,
