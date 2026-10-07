@@ -896,3 +896,88 @@ Risk tiers:
 - BLOCKED_DATA / WATCH_ONLY
 
 Standard PO sizing is intentionally withheld until the post-arrival review/coverage horizon is explicitly defined and validated.
+
+
+## 29. Live H48 risk shadow first full run
+
+2026-10-06 shadow completed successfully:
+
+- H48 predictions: 100 NEW_VISIBLE rows;
+- inventory position: 100/100 usable;
+- lead-time risk: 100 rows persisted.
+
+Inventory totals from production-aligned sources:
+
+- FBA sellable: 100,737
+- FBA inbound: 37,207
+- local available: 17,783
+- local pending: 79,935
+- on-hand position: 118,520
+- total inventory position: 235,662
+
+Initial risk counts before inbound-logic tightening:
+
+- CRITICAL_LT_SHORTAGE: 9
+- HIGH_LT_RISK: 17
+- INBOUND_DEPENDENT: 18
+- COVERED_Q75: 55
+- WATCH_ONLY: 1
+
+Representative critical examples included ZSY915, BQ101, ZQZ405, ZQZ410, ZSY926, KS052 and KZ422.
+
+## 30. Inventory transit and risk-tier corrections
+
+Repository audit found the more mature inventory-estimate implementation uses `实际在途` as the FBA transit quantity.
+
+The NEW_VISIBLE inventory-position shadow is corrected to:
+
+```text
+FBA inbound canonical:
+实际在途
+fallback only when absent:
+在途
+```
+
+The lead-time risk tier is also tightened:
+
+```text
+total position < Q50
+→ CRITICAL_LT_SHORTAGE
+
+Q50 <= total position < Q75
+→ HIGH_LT_RISK
+
+total position >= Q75 but on-hand < Q75
+→ INBOUND_DEPENDENT
+→ inbound timing must be verified
+
+on-hand >= Q75
+→ COVERED_Q75_ON_HAND
+```
+
+This prevents unarrived stock from being treated as already covering Q75.
+
+## 31. Standard replenishment horizons
+
+Current production procurement logic uses:
+
+```text
+stock fabric coverage = 2 months
+custom fabric coverage = 3 months
+```
+
+Therefore NEW_VISIBLE standard replenishment should not use H48 shortage gap as PO quantity.
+
+New research benchmark:
+
+```text
+scripts/train_new_visible_direct_procurement_horizons.py
+```
+
+Direct horizons:
+
+- H60: stock-fabric standard replenishment horizon;
+- H90: custom-fabric standard replenishment horizon;
+- H48 remains lead-time shortage / expedite / transfer-risk horizon.
+
+Each H60/H90 model uses true daily-history labels, strict temporal OOS, CORE features, Q50/Q75, and RAW/GLOBAL/AGE forward calibration.
