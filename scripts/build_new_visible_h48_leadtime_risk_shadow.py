@@ -166,13 +166,13 @@ def main() -> int:
             reason = "total inventory position below H48 Q50; normal sea PO cannot prevent lead-time shortage"
         elif total < q75:
             level = "HIGH_LT_RISK"
-            reason = "covers H48 Q50 but not Q75 safety demand"
-        elif on_hand < q50:
+            reason = "total position covers H48 Q50 but not Q75 safety demand"
+        elif on_hand < q75:
             level = "INBOUND_DEPENDENT"
-            reason = "on-hand below Q50 but total position covers Q75; timing of inbound is critical"
+            reason = "total position covers Q75 only after inbound/local-pending; inbound timing must be verified"
         else:
-            level = "COVERED_Q75"
-            reason = "current inventory position covers H48 Q75"
+            level = "COVERED_Q75_ON_HAND"
+            reason = "on-hand position alone covers H48 Q75"
 
         counts[level] = counts.get(level, 0) + 1
         out.append({
