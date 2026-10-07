@@ -283,7 +283,8 @@ def main() -> None:
     )
 
     logic.save_order_suggest(order_records, month_order)
-    logger.info(f"✓ 写入 {len(order_records)} 条记录到 `{logic.TABLE_ORDER_SUGGEST}`")
+    nv_overlay.persist_trace_fields(order_records)
+    logger.info(f"✓ 写入 {len(order_records)} 条记录到 `{logic.TABLE_ORDER_SUGGEST}`，含模型来源追踪字段")
     logic.save_fabric_usage(fabric_records)
     logger.info(f"✓ 写入 {len(fabric_records)} 条记录到 `{logic.TABLE_FABRIC_USAGE}`")
 
