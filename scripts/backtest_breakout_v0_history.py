@@ -26,6 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from common.database import db_cursor
 from jobs.forecast_monitoring import daily_monitor as base
 from jobs.forecast_research.build_new_visible_snapshots import SNAPSHOT_TABLE
+from jobs.forecast_research.build_new_visible_snapshots_v2 import DATASET_VERSION
 
 MONITOR_VERSION = "RULE_V0_HISTORY_NO_INVENTORY"
 
@@ -168,11 +169,15 @@ def main() -> int:
         f"""
         SELECT *
         FROM `{SNAPSHOT_TABLE}`
+        WHERE dataset_version=%s
         ORDER BY store_name, spu, snapshot_date
-        """
+        """,
+        (DATASET_VERSION,),
     )
     if not rows:
-        raise RuntimeError(f"{SNAPSHOT_TABLE} 为空")
+        raise RuntimeError(
+            f"{SNAPSHOT_TABLE} 当前数据版本 {DATASET_VERSION} 为空；先完整重建V2 snapshot"
+        )
 
     enriched: List[Dict[str, Any]] = []
     by_launch: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
@@ -194,6 +199,7 @@ def main() -> int:
             {
                 "snapshot_rows": len(enriched),
                 "launches": len(by_launch),
+                "dataset_version": DATASET_VERSION,
                 "monitor_version": MONITOR_VERSION,
                 "inventory_points_replayed": False,
                 "boundary": "raw future-outcome diagnostics; final breakout label not fixed yet",
