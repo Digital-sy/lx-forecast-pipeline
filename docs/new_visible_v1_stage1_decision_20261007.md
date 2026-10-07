@@ -1093,3 +1093,54 @@ Action semantics:
 - UNKNOWN: blocked until fabric mapping is repaired
 
 No production PO quantity is released.
+
+
+## 37. Training/live month-category parity correction
+
+During preparation of the 2026-09-01 historical replay, a categorical-encoding
+mismatch was found:
+
+- training rows encode launch_month / snapshot_month as month-number strings
+  such as "8", "9", "10";
+- the first live CORE materializer encoded them as "2026-08", "2026-10".
+
+Because OneHotEncoder(handle_unknown="ignore") silently ignores unseen categories,
+live scoring still ran but those two categorical features were effectively dropped.
+
+The live CORE materializer is corrected to match training exactly:
+
+- launch_month = str(first_sale_day.month)
+- snapshot_month = str(snapshot_date.month)
+
+Historical replay uses the corrected training-identical encoding.
+
+## 38. 2026-09-01 point-in-time procurement replay
+
+New script:
+
+scripts/replay_new_visible_procurement_asof_inventory.py
+
+Purpose:
+
+- issue date = configurable, initially 2026-09-01;
+- as-of data = issue date - 1 day;
+- uses frozen historical NEW_VISIBLE snapshot features at the as-of date;
+- H48/H60 training and calibration only use labels fully mature by the as-of date;
+- excludes live launch keys from training;
+- enforces H60 >= H48;
+- joins an external point-in-time inventory workbook;
+- does not fabricate historical inbound/pending inventory;
+- stock-fabric products only may receive H60 quantity outputs;
+- custom fabrics remain H90 quantity-blocked.
+
+For the 2026-09-01 replay, "need order within one month" is defined as:
+
+- normal lead time = 48 days;
+- next decision window = 30 days;
+- H60 Q50 daily run-rate estimates days of on-hand cover;
+- days_cover <= 78 => reaches reorder point by 2026-09-30;
+- latest order date = issue date + max(days_cover - 48, 0);
+- base planned lot = H60 Q50;
+- safety lot = H60 Q75.
+
+This rule is explicitly a historical shadow/replay and does not release production POs.
