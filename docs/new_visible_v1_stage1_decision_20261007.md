@@ -219,3 +219,63 @@ NV-ML-V1-STAGE2-QUANTILE-COND30-CORE-Q75
 - 同时检查 quantile crossing（P75 < P50）。
 
 Quantile 通过后，再补 negative/non-breakout base-demand 组件，形成完整 future30 总销量分布。
+
+
+## 13. Stage-2 Quantile 首轮结果
+
+Q50 与上一轮 Stage-2 `regression_l1` 条件销量点模型本质一致，均表示条件中位数，因此后续不再维护两套独立 P50 模型。
+
+### P50
+
+Pooled：
+
+- Row coverage = 0.4602
+- Launch-balanced coverage = 0.5125
+- Pinball loss 明显优于 age-P50 baseline
+- Day14 coverage = 0.5190
+- Day30 coverage = 0.5517
+
+因此 P50 已基本具备“条件常规销量”语义，优先以 launch-balanced coverage 判断。
+
+### P75
+
+Pooled：
+
+- Row coverage = 0.6458
+- Launch-balanced coverage = 0.6969
+- Pinball loss 显著优于 age-P75 baseline
+- Day14 coverage = 0.6709
+- Day30 coverage = 0.6897
+- Day60 coverage = 0.4835
+- Day90 coverage = 0.6914
+
+结论：
+
+1. Q75 的排序/损失表现优于简单 age-P75 baseline；
+2. 但 empirical coverage 明显低于 75%，说明上尾仍被低估；
+3. 因此 raw Q75 暂不能直接解释为“75%采购安全量”；
+4. quantile crossing 较低且随时间改善（约 9.2% → 3.6% → 3.5% → 2.0%），可通过 `P75=max(P75,P50)` 单调后处理解决。
+
+### 下一步
+
+新增 forward-only quantile calibration：
+
+```text
+actual / raw_quantile prediction
+→ prior mature OOS ratio quantile
+→ multiplicative calibration factor
+```
+
+并严格要求：
+
+```text
+calibration label_end_date < test_fold_start
+```
+
+优先比较：
+
+- RAW
+- GLOBAL calibration
+- AGE calibration（样本不足时回退 GLOBAL）
+
+P75 校准目标：coverage 接近 75%，同时 pinball loss 不明显恶化。
