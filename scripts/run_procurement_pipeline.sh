@@ -100,6 +100,16 @@ run_script() {
 }
 
 # 在修改数据库或飞书数据前，先检查核心模块是否存在语法错误。
+echo "[预检] Shell语法检查..." >> "$LOG_FILE"
+bash -n "$PROJECT_DIR/scripts/run_procurement_pipeline.sh" \
+        "$PROJECT_DIR/scripts/run_new_visible_h48_shadow_pipeline.sh" \
+        >> "$LOG_FILE" 2>&1
+SHELL_PREFLIGHT_EXIT=$?
+if [ "$SHELL_PREFLIGHT_EXIT" -ne 0 ]; then
+    fail_step "Shell语法预检" "$SHELL_PREFLIGHT_EXIT"
+fi
+echo "✓ Shell语法检查通过" >> "$LOG_FILE"
+
 echo "[预检] Python 核心模块语法检查..." >> "$LOG_FILE"
 "$PYTHON" -m py_compile \
     "$PROJECT_DIR/jobs/feishu/generate_forecast_comparison.py" \
@@ -136,7 +146,7 @@ else
 fi
 run_module "4" "jobs.feishu.generate_procurement_report_named_colors" "生成中文颜色体系采购建议并覆盖NEW_VISIBLE新品"
 echo "[5/7] NEW_VISIBLE生产覆盖审计..." >> "$LOG_FILE"
-"$ML_PYTHON" "$PROJECT_DIR/scripts/audit_new_visible_production_overlay.py" >> "$LOG_FILE" 2>&1
+"$PYTHON" "$PROJECT_DIR/scripts/audit_new_visible_production_overlay.py" >> "$LOG_FILE" 2>&1
 AUDIT_EXIT=$?
 if [ "$AUDIT_EXIT" -ne 0 ]; then
     fail_step "NEW_VISIBLE生产覆盖审计" "$AUDIT_EXIT"
