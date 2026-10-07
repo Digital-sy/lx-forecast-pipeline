@@ -981,3 +981,67 @@ Direct horizons:
 - H48 remains lead-time shortage / expedite / transfer-risk horizon.
 
 Each H60/H90 model uses true daily-history labels, strict temporal OOS, CORE features, Q50/Q75, and RAW/GLOBAL/AGE forward calibration.
+
+
+## 34. H60 live inventory coverage result
+
+2026-10-06 live H60 shadow persisted 100 NEW_VISIBLE rows.
+
+Coverage states:
+
+- BELOW_Q50_EVEN_WITH_PENDING: 11
+- Q50_DEPENDS_ON_PENDING: 25
+- Q50_COVERED_Q75_SHORT: 17
+- Q75_DEPENDS_ON_PENDING: 8
+- Q75_COVERED_ON_HAND: 38
+- WATCH_ONLY_AGE: 1
+
+Interpretation:
+
+- 11 rows remain below the H60 median-demand line even after counting all current pending inventory;
+- 25 rows require pending inventory merely to reach Q50;
+- 17 rows cover Q50 but not Q75;
+- 8 rows reach Q75 only if pending inventory arrives in time;
+- 38 rows already cover Q75 with on-hand inventory.
+
+Cross-horizon monotonicity was audited before and after correction:
+
+- before: Q50 violations=6, Q75 violations=2;
+- after H60=max(H60,H48) postprocessing: Q50 violations=0, Q75 violations=0.
+
+The H60 inventory-coverage table is:
+
+```text
+forecast_new_visible_h60_inventory_coverage_daily
+```
+
+Because ETA remains unknown, H60 gap outputs remain ranges rather than exact order quantities.
+
+## 35. Fabric-type gate for H60 shadow
+
+New script:
+
+```text
+scripts/classify_new_visible_h60_fabric_shadow.py
+```
+
+New table:
+
+```text
+forecast_new_visible_h60_fabric_shadow_daily
+```
+
+Fabric classification reuses production procurement logic from
+`jobs.feishu.procurement_color_logic.read_fabric_info`:
+
+- primary fabric = largest unit_usage × unit_loss contribution;
+- primary fabric present in `定制面料参数` => 定制面料;
+- otherwise => 现货面料.
+
+Gate:
+
+- 现货面料 => H60 stock-fabric shadow ready;
+- 定制面料 => hold for H90 research;
+- unknown => blocked.
+
+No production procurement tables are modified.
