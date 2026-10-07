@@ -781,3 +781,118 @@ The scorer:
 - writes only the new shadow prediction table.
 
 Production V4 and all current procurement tables remain untouched.
+
+
+## 25. Live CORE / Inventory / H48 scorer verification
+
+Live CORE materialization on 2026-10-06 succeeded:
+
+- 100 current NEW_VISIBLE shop×SPU;
+- 100/100 have exact positive daily first-sale dates;
+- 35 frozen CORE numeric features + categorical store/launch_month/snapshot_month are available;
+- live feature as-of date is 2026-10-05 while lifecycle/inventory snapshot date is 2026-10-06; this one-day source lag is stored explicitly and must not be hidden.
+
+Inventory-gap audit showed the apparent 85% coverage issue was mostly a source-selection problem:
+
+- 15 NEW_VISIBLE rows missing from forecast_inventory_snapshot_daily;
+- 14/15 have inventory in production procurement sources (FBA库存明细 / 库存预估表);
+- 1/15 (ZQZ414) has raw FBA rows but was absent from the diagnostic snapshot, and also has fallback/local inventory;
+- zero true-zero candidates were found.
+
+Therefore no missing inventory row is converted to zero.
+
+## 26. H48 live shadow semantics
+
+Current live cohort has no exact fixed checkpoint rows on the run date:
+
+- checkpoint_validated_rows = 0
+- 99 rows are ages 7..120 but between strict checkpoints
+- 1 row is age <7
+
+The scorer now separates:
+
+```text
+checkpoint_validated
+= exact age 7 / 14 / 30 / 60 / 90 only
+
+shadow_quantity_eligible
+= any age 7..120
+= allowed into quantity/risk shadow only
+
+action_eligible
+= exact Day14 / Day30
+= highest-confidence procurement checkpoint candidate
+```
+
+Interpolated ages are never relabeled as validated.
+
+For downstream risk shadow:
+
+- exact checkpoints may use AGE calibration;
+- interpolated ages use GLOBAL calibration as the more stable general calibration;
+- AGE output remains available as diagnostic.
+
+## 27. Inventory-position shadow
+
+New table:
+
+```text
+forecast_new_visible_inventory_position_daily
+```
+
+Builder:
+
+```text
+scripts/materialize_new_visible_inventory_position_shadow.py
+```
+
+Canonical inventory sources intentionally match current production procurement logic:
+
+```text
+FBA库存明细:
+FBA可售 + 在途
+
+库存预估表:
+本地可用量 + 本地待到货
+```
+
+`forecast_inventory_snapshot_daily` remains diagnostic only and is NOT added again, avoiding double-counting.
+
+## 28. H48 lead-time risk layer
+
+New table:
+
+```text
+forecast_new_visible_h48_leadtime_risk_daily
+```
+
+Builder:
+
+```text
+scripts/build_new_visible_h48_leadtime_risk_shadow.py
+```
+
+Important business distinction:
+
+```text
+H48 demand
+= demand occurring during normal 20d production + 28d sea-freight lead time
+```
+
+Therefore:
+
+```text
+H48 demand - current inventory position
+```
+
+is a lead-time shortage / expedite / transfer risk, NOT automatically a standard PO quantity. A normal sea PO placed today arrives after most/all of this 48-day demand has occurred.
+
+Risk tiers:
+
+- CRITICAL_LT_SHORTAGE: total inventory position < H48 Q50
+- HIGH_LT_RISK: covers Q50 but not Q75
+- INBOUND_DEPENDENT: on-hand below Q50, but total position covers Q75
+- COVERED_Q75: inventory position covers H48 Q75
+- BLOCKED_DATA / WATCH_ONLY
+
+Standard PO sizing is intentionally withheld until the post-arrival review/coverage horizon is explicitly defined and validated.
