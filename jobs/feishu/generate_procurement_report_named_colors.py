@@ -3,6 +3,7 @@
 """采购建议主入口：颜色名称来自 A2023/B2024 颜色编制表。"""
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -20,6 +21,14 @@ def _month_label(current_date: datetime, delta: int) -> str:
 
 
 async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
+    if os.getenv("SKIP_LEGACY_FABRIC_DETAIL_FEISHU", "").strip().lower() in {
+        "1", "true", "yes", "y"
+    }:
+        logger.info(
+            "跳过旧版飞书面料预估明细写入；流水线末尾将由最终业务21列表覆盖写入"
+        )
+        return
+
     m0 = _month_label(current_date, 0)
     m1 = _month_label(current_date, 1)
     m2 = _month_label(current_date, 2)
