@@ -53,6 +53,7 @@ def ensure_table() -> None:
               age_days INT NOT NULL,
               age_band_checkpoint INT DEFAULT NULL,
               checkpoint_validated TINYINT(1) NOT NULL DEFAULT 0,
+              shadow_quantity_eligible TINYINT(1) NOT NULL DEFAULT 0,
               action_eligible TINYINT(1) NOT NULL DEFAULT 0,
               raw_q50 DECIMAL(18,2) DEFAULT NULL,
               global_q50 DECIMAL(18,2) DEFAULT NULL,
@@ -194,9 +195,10 @@ def main() -> int:
         age = int(r["age_days"])
         band = age_band(age)
         checkpoint_validated = int(age in base.CHECKPOINT_AGES)
-        # Day14/30 are the primary replenishment decision checkpoints. Other
-        # validated checkpoints remain observational in shadow until live evidence
-        # is accumulated; interpolated ages are never labelled as validated.
+        shadow_quantity_eligible = int(7 <= age <= 120)
+        # Day14/30 remain the highest-confidence primary procurement checkpoints.
+        # Other ages 7..120 may enter quantity/risk shadow, but are not labelled
+        # validated and may never trigger automatic purchasing.
         action_eligible = int(age in (14, 30))
 
         values = {}
@@ -244,6 +246,7 @@ def main() -> int:
             "age_days": age,
             "age_band_checkpoint": band,
             "checkpoint_validated": checkpoint_validated,
+            "shadow_quantity_eligible": shadow_quantity_eligible,
             "action_eligible": action_eligible,
             "raw_q50": values[0.50]["raw"],
             "global_q50": values[0.50]["global"],
@@ -265,6 +268,7 @@ def main() -> int:
         "as_of_date": str(as_of.date()),
         "live_rows": len(live),
         "checkpoint_validated_rows": sum(x["checkpoint_validated"] for x in rows),
+        "shadow_quantity_eligible_rows": sum(x["shadow_quantity_eligible"] for x in rows),
         "primary_action_candidate_rows": sum(x["action_eligible"] for x in rows),
         "interpolated_shadow_rows": sum(
             x["reason_code"] == "H48_INTERPOLATED_AGE_SHADOW_ONLY" for x in rows
@@ -286,7 +290,7 @@ def main() -> int:
         print("LIVE_H48_SAMPLE=" + json.dumps({
             k: x.get(k) for k in (
                 "store_name","spu","age_days","age_band_checkpoint",
-                "checkpoint_validated","action_eligible",
+                "checkpoint_validated","shadow_quantity_eligible","action_eligible",
                 "global_q50","age_q50","global_q75","age_q75","reason_code"
             )
         }, ensure_ascii=False))
@@ -295,7 +299,7 @@ def main() -> int:
         ensure_table()
         cols = [
             "snapshot_date","as_of_date","store_name","spu","first_sale_day",
-            "age_days","age_band_checkpoint","checkpoint_validated","action_eligible",
+            "age_days","age_band_checkpoint","checkpoint_validated","shadow_quantity_eligible","action_eligible",
             "raw_q50","global_q50","age_q50",
             "raw_q75","global_q75","age_q75",
             "global_factor_q50","age_factor_q50",
