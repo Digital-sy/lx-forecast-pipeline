@@ -1144,3 +1144,51 @@ For the 2026-09-01 replay, "need order within one month" is defined as:
 - safety lot = H60 Q75.
 
 This rule is explicitly a historical shadow/replay and does not release production POs.
+
+
+## 39. Production procurement rollout decision
+
+Business acceptance on 2026-10-07 promotes the NEW_VISIBLE H48/H60 stack from
+shadow to the production **procurement recommendation** champion.
+
+Scope:
+- ESTABLISHED remains on the existing mature-product chain / A16 decision framework.
+- COLD_NO_HISTORY remains unchanged.
+- NEW_VISIBLE age 7..120 uses the new procurement recommendation bridge.
+- H48 is the lead-time / breakout risk signal.
+- H60 Q50 is the stock-fabric base replenishment lot once the 48-day lead-time
+  reorder point will be reached within the next 30 days.
+- H60 Q75 remains a safety reference.
+- custom fabrics remain H90 HOLD and release zero normal quantity.
+- UNKNOWN fabric or unusable inventory is blocked.
+- automatic PO creation remains disabled.
+
+Integration architecture:
+1. Existing monthly V4 forecast tables remain unchanged for monthly display and
+   color/month demand shape. Direct H60 is cumulative and is not written into a
+   single monthly forecast bucket.
+2. The NEW_VISIBLE model pipeline materializes
+   forecast_new_visible_procurement_recommendation_daily.
+3. The existing color procurement flow first builds its legacy color universe.
+4. NEW_VISIBLE recommendations then overlay only matching SPU+shop rows.
+5. The authoritative SPU Q50 lot is allocated to colors using legacy color net-need
+   weights, falling back to first-two-month demand weights.
+6. Largest-remainder allocation guarantees color sums equal the SPU recommendation.
+7. A hard post-write audit stops downstream exports on any mismatch.
+8. Rollback switch: NEW_VISIBLE_PROCUREMENT_MODE=off restores legacy NEW_VISIBLE
+   procurement behavior without changing ESTABLISHED logic.
+
+Production trace fields are persisted on 建议下单量表 and exposed in the Feishu
+order table / procurement Excel:
+- 预测模型
+- 新品动作状态
+- 新品H48风险
+- 新品H60_Q50
+- 新品H60_Q75
+- 新品最晚下单日
+- 新品推荐快照
+
+BQ106 is retained as the first operational acceptance case: the model moved from
+covered to a strong replenishment signal during the Sep-17 BD ramp and produced
+H60 Q50 close to the Sep-23 human replenishment decision, while preserving an
+elevated demand baseline after the activity peak.
