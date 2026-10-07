@@ -258,7 +258,8 @@ def main() -> int:
                 }, ensure_ascii=False))
                 for age in base.CHECKPOINT_AGES:
                     mask = ages == int(age)
-                    if (!mask.any()) continue;
+                    if not mask.any():
+                        continue
                     g = test.loc[mask].copy()
                     gw = stage2.launch_balanced_weights(g)
                     print("DIRECT48_CAL_FOLD_AGE=" + json.dumps({
