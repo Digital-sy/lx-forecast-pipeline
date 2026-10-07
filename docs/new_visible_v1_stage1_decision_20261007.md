@@ -523,3 +523,86 @@ calibration label_end_date < test_fold_start
 - forward fold 是否稳定
 
 若通过，则停止继续增加预测模型层，进入库存 / 在途 / 生产20天 + 海运28天的采购回放。
+
+
+## 20. DIRECT30 Quantile forward calibration 结论
+
+所有测试折均通过 maturity guard：
+
+```text
+calibration label_end_date < test_fold_start
+```
+
+### Q50
+
+Pooled launch-balanced：
+
+- RAW coverage ≈ 0.423
+- GLOBAL coverage ≈ 0.490
+- AGE coverage ≈ 0.491
+
+Day14 / Day30：
+
+- GLOBAL ≈ 0.457 / 0.549
+- AGE ≈ 0.481 / 0.485
+
+因此 Q50 的校准语义已经成立。若只看简单性与 pooled 指标，GLOBAL 略优；若优先 Day14/30 对称性，AGE 更贴近 50%。
+
+### Q75
+
+Pooled launch-balanced：
+
+- RAW coverage ≈ 0.642
+- GLOBAL coverage ≈ 0.761
+- AGE coverage ≈ 0.751
+
+Day14 / Day30：
+
+- GLOBAL ≈ 0.719 / 0.823
+- AGE ≈ 0.767 / 0.741
+
+因此 Q75 更适合 AGE calibration：它在最重要的 Day14 / Day30 更接近真正 75% coverage；GLOBAL 在 Day30 明显偏保守。
+
+当前 H30 研究冻结：
+
+```text
+DIRECT30 Q50:
+GLOBAL 或 AGE 都可用；AGE更贴近Day14/30对称coverage
+
+DIRECT30 Q75:
+AGE calibration
+
+Stage1:
+继续只做 opportunity ranking / explanation
+```
+
+但 H30 不直接作为采购补货主周期，因为返单供应链约为 20 天生产 + 28 天海运 = 48 天。
+
+## 21. 采购主周期切换到 DIRECT48
+
+不采用：
+
+```text
+Future48 = Future30 × 48/30
+```
+
+因为这会引入未验证的线性销量假设。
+
+新增独立 research-only 脚本：
+
+```text
+scripts/train_new_visible_v1_stage2_direct_h48.py
+```
+
+它：
+
+- 不修改现有 snapshot 表；
+- 复用冻结的 point-in-time CORE 特征；
+- 从 `forecast_research_spu_daily_history` 直接计算：
+  `future_sales_48d = snapshot+1 ... snapshot+48`；
+- 只保留完整 48 天未来窗口；
+- 使用 strict temporal OOS；
+- 同时输出 RAW / GLOBAL / AGE 的 Q50 / Q75 forward calibration；
+- 2026H2 因 48 天 maturity window 样本减少属于正确右截断。
+
+H48 通过后，才进入 live inventory / inbound procurement shadow。由于 2026-09-30 前缺少可靠历史每日库存，不允许伪造历史库存做采购回测。
