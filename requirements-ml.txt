@@ -1,6 +1,10 @@
-# Research-only ML dependencies for NEW_VISIBLE / Breakout modeling.
-# Keep separate from production runtime requirements.txt so production jobs are not
-# coupled to scikit-learn / LightGBM unless explicitly installed for research.
+# Research-only ML environment for NEW_VISIBLE / Breakout modeling.
+# Intentionally separate from production venv so production forecast/procurement jobs
+# are not coupled to scikit-learn / LightGBM or their transitive dependencies.
 
+-r requirements.txt
+
+numpy>=2,<3
+pandas>=2.2,<3
 scikit-learn>=1.5,<2
 lightgbm>=4.5,<5
