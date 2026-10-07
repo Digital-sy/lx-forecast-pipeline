@@ -109,7 +109,7 @@ def main():
     top = [x for x in out if x["coverage_status"] not in ("Q75_COVERED_ON_HAND","WATCH_ONLY_AGE")]
     top.sort(key=lambda x: (-x["q75_gap_if_all_pending_arrives"], -x["q75_gap_if_no_pending_arrives"]))
     for x in top[:30]:
-        print("H60_INVENTORY_COVERAGE_TOP=" + json.dumps(x, ensure_ascii=False))
+        print("H60_INVENTORY_COVERAGE_TOP=" + json.dumps(x, ensure_ascii=False, default=str))
 
     ensure_table()
     if out:
