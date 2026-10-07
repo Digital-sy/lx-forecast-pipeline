@@ -52,6 +52,7 @@ def ensure_table() -> None:
               first_sale_day DATE NOT NULL,
               age_days INT NOT NULL,
               age_band_checkpoint INT DEFAULT NULL,
+              checkpoint_validated TINYINT(1) NOT NULL DEFAULT 0,
               action_eligible TINYINT(1) NOT NULL DEFAULT 0,
               raw_q50 DECIMAL(18,2) DEFAULT NULL,
               global_q50 DECIMAL(18,2) DEFAULT NULL,
@@ -192,7 +193,11 @@ def main() -> int:
     for i, r in live.reset_index(drop=True).iterrows():
         age = int(r["age_days"])
         band = age_band(age)
-        action_eligible = int(band is not None)
+        checkpoint_validated = int(age in base.CHECKPOINT_AGES)
+        # Day14/30 are the primary replenishment decision checkpoints. Other
+        # validated checkpoints remain observational in shadow until live evidence
+        # is accumulated; interpolated ages are never labelled as validated.
+        action_eligible = int(age in (14, 30))
 
         values = {}
         for qv in QUANTILES:
@@ -222,11 +227,14 @@ def main() -> int:
         ):
             values[0.75]["age"] = values[0.50]["age"]
 
-        reason = (
-            "H48_SHADOW_ELIGIBLE"
-            if action_eligible
-            else "WATCH_ONLY_AGE_OUTSIDE_7_120"
-        )
+        if action_eligible:
+            reason = "H48_PRIMARY_PROCUREMENT_CHECKPOINT"
+        elif checkpoint_validated:
+            reason = "H48_VALIDATED_CHECKPOINT_OBSERVE"
+        elif band is not None:
+            reason = "H48_INTERPOLATED_AGE_SHADOW_ONLY"
+        else:
+            reason = "WATCH_ONLY_AGE_OUTSIDE_7_120"
         rows.append({
             "snapshot_date": snapshot_date.date(),
             "as_of_date": as_of.date(),
@@ -235,6 +243,7 @@ def main() -> int:
             "first_sale_day": pd.Timestamp(r["first_sale_day"]).date(),
             "age_days": age,
             "age_band_checkpoint": band,
+            "checkpoint_validated": checkpoint_validated,
             "action_eligible": action_eligible,
             "raw_q50": values[0.50]["raw"],
             "global_q50": values[0.50]["global"],
@@ -255,7 +264,11 @@ def main() -> int:
         "snapshot_date": str(snapshot_date.date()),
         "as_of_date": str(as_of.date()),
         "live_rows": len(live),
-        "action_eligible_rows": sum(x["action_eligible"] for x in rows),
+        "checkpoint_validated_rows": sum(x["checkpoint_validated"] for x in rows),
+        "primary_action_candidate_rows": sum(x["action_eligible"] for x in rows),
+        "interpolated_shadow_rows": sum(
+            x["reason_code"] == "H48_INTERPOLATED_AGE_SHADOW_ONLY" for x in rows
+        ),
         "training_rows": int(len(mature_train)),
         "training_launches": int(mature_train["launch_key"].nunique()),
         "calibration_history_rows": int(len(cal_history)),
@@ -273,6 +286,7 @@ def main() -> int:
         print("LIVE_H48_SAMPLE=" + json.dumps({
             k: x.get(k) for k in (
                 "store_name","spu","age_days","age_band_checkpoint",
+                "checkpoint_validated","action_eligible",
                 "global_q50","age_q50","global_q75","age_q75","reason_code"
             )
         }, ensure_ascii=False))
@@ -281,7 +295,7 @@ def main() -> int:
         ensure_table()
         cols = [
             "snapshot_date","as_of_date","store_name","spu","first_sale_day",
-            "age_days","age_band_checkpoint","action_eligible",
+            "age_days","age_band_checkpoint","checkpoint_validated","action_eligible",
             "raw_q50","global_q50","age_q50",
             "raw_q75","global_q75","age_q75",
             "global_factor_q50","age_factor_q50",
