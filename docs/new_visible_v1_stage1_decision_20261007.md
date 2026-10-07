@@ -709,3 +709,75 @@ scripts/audit_new_visible_h48_shadow_readiness.py
 7. 是否允许进入下一步 live CORE scorer。
 
 只有完成 live CORE 同口径特征构造后，才进入 H48 Q50/Q75 + 库存/在途采购 shadow。
+
+
+## 24. Live H48 shadow implementation
+
+Readiness audit confirmed two blockers on 2026-10-06 live snapshots:
+
+1. existing `forecast_feature_snapshot_daily` has only 18 of 38 frozen model inputs directly available and is missing the training CORE fields for 3-day windows, slope/CV/positive-days/up-days/max-day-share;
+2. current NEW_VISIBLE FBA snapshot coverage is 85/100 shop×SPU, so 15 missing rows must be distinguished between true no-inventory and mapping/source gaps before any procurement quantity is allowed.
+
+Therefore the implementation does not silently impute or treat missing inventory as zero.
+
+### New live CORE table
+
+```text
+forecast_new_visible_core_snapshot_daily
+```
+
+Materializer:
+
+```text
+scripts/materialize_new_visible_live_core.py
+```
+
+Properties:
+
+- scope starts from current NEW_VISIBLE lifecycle rows;
+- applies LCS/XH business exclusions;
+- exact first sale comes from the first positive daily sale;
+- all frozen CORE formulas mirror historical snapshot construction;
+- feature windows end at the freshest completed research-daily date;
+- rows without an exact daily first sale are not scored;
+- shadow-only, no production-table writes.
+
+### Inventory gap audit
+
+```text
+scripts/audit_new_visible_inventory_gaps.py
+```
+
+For every current NEW_VISIBLE row absent from the FBA inventory snapshot, it checks:
+
+- latest SKU→SPU product mapping;
+- raw FBA source;
+- fallback `FBA库存明细`;
+- local `库存预估表`.
+
+A missing inventory row is never automatically converted to zero. Mapping/snapshot failures remain blocked.
+
+### H48 live scorer
+
+```text
+scripts/score_new_visible_h48_shadow.py
+```
+
+Output table:
+
+```text
+forecast_new_visible_h48_prediction_daily
+```
+
+The scorer:
+
+- reads only the training-identical live CORE table;
+- refits DIRECT48 Q50/Q75 using only mature historical H48 labels;
+- excludes current live launch keys from training to preserve strict OOS-style discipline;
+- rebuilds strict historical OOS calibration residuals;
+- outputs RAW / GLOBAL / AGE-calibrated Q50/Q75;
+- maps live ages to the validated lifecycle bands 7/14/30/60/90;
+- age <7 or >120 remains watch-only;
+- writes only the new shadow prediction table.
+
+Production V4 and all current procurement tables remain untouched.
