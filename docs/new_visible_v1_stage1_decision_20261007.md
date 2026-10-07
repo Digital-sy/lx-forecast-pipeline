@@ -355,3 +355,83 @@ NV-ML-V1-STAGE2-MIXTURE30-RAW-P
 DIRECT 是必须保留的简单 benchmark。若 DIRECT 比 mixture 更稳、更准，则不为了架构整齐强制使用分类概率混合。
 
 优先评估 Day14 / Day30 的 WAPE、Bias 和 temporal stability。
+
+
+## 16. Base-demand / Full-volume 结果与架构选择
+
+### 数据事实
+
+PERSIST_750=0 并不等于“没销量”。
+
+全样本：
+
+- Negative rows：2872，future30 销量合计约 1,010,309
+- Positive rows：585，future30 销量合计约 1,006,424
+- Negative 销量占比 ≈ 50.1%
+- Positive 销量占比 ≈ 49.9%
+
+因此 Stage1×Positive-volume 只能解释约一半的真实销量，必须有 base-demand / full-volume 组件。
+
+### Negative conditional model
+
+`NV-ML-V1-STAGE2-BASE30-CORE` 明显优于 negative age-median：
+
+- launch-balanced WAPE：0.7884 → **0.4529**
+- Bias：-0.6334 → **-0.2393**
+
+说明 non-breakout/base-demand 本身可预测，不应被视为纯噪声。
+
+### Full future30：DIRECT vs MIXTURE
+
+Pooled launch-balanced：
+
+| Model | WAPE | Bias |
+|---|---:|---:|
+| DIRECT | **0.4607** | -0.2575 |
+| MIXTURE | 0.4722 | **-0.2065** |
+
+四个 temporal fold 中 DIRECT 的 WAPE 都低于 MIXTURE。
+
+按生命周期：
+
+- Day7：MIXTURE WAPE 0.5709，优于 DIRECT 0.6012；
+- Day14：两者几乎相同，MIXTURE 0.4821 vs DIRECT 0.4847；
+- Day30：DIRECT 0.4595，略优于 MIXTURE 0.4613；
+- Day60 / Day90：DIRECT 明显更优。
+
+因此当前主数量架构冻结为：
+
+```text
+Stage1:
+NV-ML-V1-B-CORE
+= opportunity ranking / explanation
+= 不强制进入数量公式
+
+Full future30 quantity:
+NV-ML-V1-STAGE2-DIRECT30-CORE
+= 当前完整销量主 challenger
+
+Positive / Negative conditional models:
+= 保留为诊断、解释和后续分层研究
+```
+
+不采用 MIXTURE 作为主数量模型，原因是它虽然 Bias 更小，但没有带来更低 WAPE，而且增加了对 Stage1 probability calibration 的依赖。
+
+## 17. Full-volume Quantile 下一步
+
+既然 DIRECT 被选为完整 future30 主架构，下一步直接在全部 NEW_VISIBLE 上训练：
+
+```text
+NV-ML-V1-STAGE2-DIRECT30-CORE-Q50
+NV-ML-V1-STAGE2-DIRECT30-CORE-Q75
+```
+
+目标：
+
+- Q50：完整 future30 常规需求线；
+- Q75：完整 future30 安全采购线候选；
+- 严格 temporal OOS；
+- 优先检查 Day14 / Day30；
+- 通过后才接库存、在途、生产20天 + 海运28天做采购回放。
+
+Stage1 保留作为风险/机会解释层，而不再作为完整数量预测的必经公式。
