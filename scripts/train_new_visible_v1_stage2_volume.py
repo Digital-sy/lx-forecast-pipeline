@@ -121,7 +121,8 @@ def volume_metrics(
     pred_sum = float(np.sum(w * pred))
     denom_w = float(np.sum(w))
 
-    ape = np.where(y > 0, abs_err / y, np.nan)
+    ape = np.full(len(y), np.nan, dtype=float)
+    np.divide(abs_err, y, out=ape, where=y > 0)
     finite_ape = ape[np.isfinite(ape)]
 
     return {
