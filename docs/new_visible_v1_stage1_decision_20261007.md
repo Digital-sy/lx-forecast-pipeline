@@ -169,3 +169,53 @@ expected_opportunity_units
 ```
 
 注意：这不是 NEW_VISIBLE 总销量预测；negative class 仍可能产生销量。后续若 Stage-2 条件销量有效，再补 negative/base-demand 组件和 P50/P75 quantile，最终形成可接库存/在途/供应链提前期的完整 future30 数量预测。
+
+
+## 11. Stage-2 条件销量首轮结果
+
+`NV-ML-V1-STAGE2-COND30-CORE` 在四个 temporal OOS fold 中均优于简单的同年龄正类中位数 baseline。
+
+Pooled 条件销量：
+
+| 指标 | Age-median baseline | LightGBM Stage-2 |
+|---|---:|---:|
+| Row WAPE | 0.4223 | **0.3375** |
+| Row Bias | -0.1911 | -0.1953 |
+| Launch-balanced WAPE | 0.3996 | **0.3072** |
+| Launch-balanced Bias | -0.0657 | -0.1329 |
+| Median APE | 0.2994 | **0.2129** |
+| P75 APE | 0.5135 | **0.3640** |
+
+按生命周期：
+
+- Day7 WAPE：0.2368 → 0.2298
+- Day14 WAPE：0.2643 → 0.2470
+- Day30 WAPE：0.4283 → 0.3574
+- Day60 WAPE：0.4629 → 0.3627
+- Day90 WAPE：0.5265 → 0.3863
+
+结论：
+
+1. Stage-2 条件销量模型成立，尤其 Day30/60/90 改善明显。
+2. 当前主要问题从“是否有预测能力”转成“系统性低估大赢家”：LightGBM 条件销量 Bias 仍偏负。
+3. 因此下一步不继续优化单点回归，而进入 P50/P75 quantile。
+4. `Stage1 probability × Stage2 conditional volume` 的 opportunity-units WAPE 仍 >1，不可直接解释为完整 future30 总销量；后续必须补 non-breakout/base-demand 组件。
+
+## 12. Stage-2 Quantile 下一步
+
+新增研究模型：
+
+```text
+NV-ML-V1-STAGE2-QUANTILE-COND30-CORE-Q50
+NV-ML-V1-STAGE2-QUANTILE-COND30-CORE-Q75
+```
+
+目标：
+
+- P50：条件销量中位数，偏向常规采购计划；
+- P75：条件销量上分位，研究缺货风险/安全采购量；
+- 严格检查 empirical coverage：P50 应接近 50%，P75 应接近 75%；
+- 优先看 Day14 / Day30，因为最接近真实补货动作窗口；
+- 同时检查 quantile crossing（P75 < P50）。
+
+Quantile 通过后，再补 negative/non-breakout base-demand 组件，形成完整 future30 总销量分布。
