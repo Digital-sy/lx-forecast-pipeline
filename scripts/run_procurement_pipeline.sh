@@ -16,6 +16,7 @@ set -u
 PROJECT_DIR="${PROJECT_DIR:-/opt/apps/pythondata}"
 VENV_DIR="${VENV_DIR:-$PROJECT_DIR/venv}"
 PYTHON="${PYTHON:-$VENV_DIR/bin/python}"
+ML_PYTHON="${ML_PYTHON:-$PROJECT_DIR/venv-ml/bin/python}"
 LOG_DIR="${LOG_DIR:-$PROJECT_DIR/logs}"
 LOG_FILE="${LOG_FILE:-$LOG_DIR/cron_procurement_pipeline.log}"
 
@@ -51,7 +52,7 @@ send_feishu_success() {
     "$PYTHON" "$PROJECT_DIR/scripts/notify_feishu.py" \
         --task "采购建议流水线" \
         --status "success" \
-        --detail "五个业务步骤全部完成，预测、颜色体系采购建议、中文颜色面料明细和两份 Excel 已更新" \
+        --detail "七个业务步骤全部完成；NEW_VISIBLE H48/H60 Champion、颜色体系采购建议、审计和两份 Excel 已更新；自动PO仍关闭" \
         --elapsed "${elapsed}s" \
         2>/dev/null || true
 }
@@ -69,13 +70,27 @@ run_module() {
     local module="$2"
     local description="$3"
 
-    echo "[${step_no}/5] ${description} (${module})..." >> "$LOG_FILE"
+    echo "[${step_no}/7] ${description} (${module})..." >> "$LOG_FILE"
     "$PYTHON" -m "$module" >> "$LOG_FILE" 2>&1
     local exit_code=$?
     if [ "$exit_code" -ne 0 ]; then
         fail_step "$module" "$exit_code"
     fi
-    echo "✓ [${step_no}/5] ${description}完成" >> "$LOG_FILE"
+    echo "✓ [${step_no}/7] ${description}完成" >> "$LOG_FILE"
+}
+
+run_script() {
+    local step_no="$1"
+    local script="$2"
+    local description="$3"
+
+    echo "[${step_no}/7] ${description} (${script})..." >> "$LOG_FILE"
+    PYTHON="$ML_PYTHON" bash "$PROJECT_DIR/$script" >> "$LOG_FILE" 2>&1
+    local exit_code=$?
+    if [ "$exit_code" -ne 0 ]; then
+        fail_step "$script" "$exit_code"
+    fi
+    echo "✓ [${step_no}/7] ${description}完成" >> "$LOG_FILE"
 }
 
 # 在修改数据库或飞书数据前，先检查核心模块是否存在语法错误。
@@ -95,6 +110,10 @@ echo "[预检] Python 核心模块语法检查..." >> "$LOG_FILE"
     "$PROJECT_DIR/jobs/feishu/generate_procurement_report_named_colors.py" \
     "$PROJECT_DIR/jobs/feishu/export_procurement_excel_color_system.py" \
     "$PROJECT_DIR/jobs/feishu/export_fabric_color_order_forecast.py" \
+    "$PROJECT_DIR/jobs/feishu/new_visible_procurement_bridge.py" \
+    "$PROJECT_DIR/jobs/feishu/new_visible_procurement_overlay.py" \
+    "$PROJECT_DIR/scripts/materialize_new_visible_procurement_recommendation.py" \
+    "$PROJECT_DIR/scripts/audit_new_visible_production_overlay.py" \
     >> "$LOG_FILE" 2>&1
 PREFLIGHT_EXIT=$?
 if [ "$PREFLIGHT_EXIT" -ne 0 ]; then
@@ -103,10 +122,18 @@ fi
 echo "✓ Python 核心模块语法检查通过" >> "$LOG_FILE"
 
 run_module "1" "jobs.feishu.write_order_forecast_to_feishu" "同步运营预计下单量"
-run_module "2" "jobs.feishu.generate_forecast_comparison" "生成预测对比表"
-run_module "3" "jobs.feishu.generate_procurement_report_named_colors" "生成中文颜色体系采购建议和面料预估"
-run_module "4" "jobs.feishu.export_procurement_excel_color_system" "导出颜色体系采购建议 Excel"
-run_module "5" "jobs.feishu.export_fabric_color_order_forecast" "导出面料-颜色预计下单 Excel"
+run_module "2" "jobs.feishu.generate_forecast_comparison" "生成月度预测对比表（成熟款/展示层保持原逻辑）"
+run_script "3" "scripts/run_new_visible_h48_shadow_pipeline.sh" "刷新NEW_VISIBLE H48/H60采购Champion"
+run_module "4" "jobs.feishu.generate_procurement_report_named_colors" "生成中文颜色体系采购建议并覆盖NEW_VISIBLE新品"
+echo "[5/7] NEW_VISIBLE生产覆盖审计..." >> "$LOG_FILE"
+"$ML_PYTHON" "$PROJECT_DIR/scripts/audit_new_visible_production_overlay.py" >> "$LOG_FILE" 2>&1
+AUDIT_EXIT=$?
+if [ "$AUDIT_EXIT" -ne 0 ]; then
+    fail_step "NEW_VISIBLE生产覆盖审计" "$AUDIT_EXIT"
+fi
+echo "✓ [5/7] NEW_VISIBLE生产覆盖审计完成" >> "$LOG_FILE"
+run_module "6" "jobs.feishu.export_procurement_excel_color_system" "导出颜色体系采购建议 Excel"
+run_module "7" "jobs.feishu.export_fabric_color_order_forecast" "导出面料-颜色预计下单 Excel"
 
 END_TIME=$(date '+%Y-%m-%d %H:%M:%S')
 END_TS=$(date +%s)
