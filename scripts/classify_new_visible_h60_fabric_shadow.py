@@ -191,6 +191,20 @@ def main() -> int:
             x, ensure_ascii=False, default=str
         ))
 
+    unknown = [x for x in out if x["shadow_status"] == "BLOCK_FABRIC_TYPE_UNKNOWN"]
+    for x in unknown:
+        print("H60_FABRIC_SHADOW_UNKNOWN=" + json.dumps(
+            {
+                "store_name": x["store_name"],
+                "spu": x["spu"],
+                "priority_tier": x["priority_tier"],
+                "h60_coverage_status": x["h60_coverage_status"],
+                "h48_risk_level": x["h48_risk_level"],
+            },
+            ensure_ascii=False,
+            default=str,
+        ))
+
     custom = [x for x in out if x["shadow_status"] == "CUSTOM_HOLD_H90_RESEARCH"]
     for x in custom[:20]:
         print("H60_FABRIC_SHADOW_CUSTOM_HOLD=" + json.dumps(
