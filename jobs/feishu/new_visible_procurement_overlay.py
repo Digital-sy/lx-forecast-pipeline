@@ -243,3 +243,67 @@ def apply_new_visible_overlay(
         "allocated_q50_sum": allocated_sum,
         "missing_groups": [],
     }
+
+
+def persist_trace_fields(order_records: Sequence[Mapping[str, Any]]) -> None:
+    """Persist model provenance fields onto the existing color recommendation table."""
+    from common.database import db_cursor
+
+    columns = [
+        ("预测模型", "VARCHAR(120) NOT NULL DEFAULT 'LEGACY_V4_MONTHLY'"),
+        ("新品动作状态", "VARCHAR(60) NOT NULL DEFAULT ''"),
+        ("新品H48风险", "VARCHAR(50) NOT NULL DEFAULT ''"),
+        ("新品H60_Q50", "DECIMAL(18,2) NOT NULL DEFAULT 0"),
+        ("新品H60_Q75", "DECIMAL(18,2) NOT NULL DEFAULT 0"),
+        ("新品最晚下单日", "DATE DEFAULT NULL"),
+        ("新品推荐快照", "DATE DEFAULT NULL"),
+    ]
+
+    with db_cursor() as cursor:
+        for name, definition in columns:
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA=DATABASE()
+                  AND TABLE_NAME='建议下单量表'
+                  AND COLUMN_NAME=%s
+                """,
+                (name,),
+            )
+            if not int(cursor.fetchone().get("cnt", 0) or 0):
+                cursor.execute(
+                    f"ALTER TABLE 建议下单量表 ADD COLUMN {name} {definition}"
+                )
+
+        sql = """
+            UPDATE 建议下单量表
+            SET 预测模型=%s,
+                新品动作状态=%s,
+                新品H48风险=%s,
+                新品H60_Q50=%s,
+                新品H60_Q75=%s,
+                新品最晚下单日=%s,
+                新品推荐快照=%s
+            WHERE SPU=%s
+              AND 颜色体系=%s
+              AND 颜色缩写=%s
+              AND 店铺=%s
+        """
+        payload = []
+        for row in order_records:
+            payload.append((
+                str(row.get("预测模型") or "LEGACY_V4_MONTHLY"),
+                str(row.get("新品动作状态") or ""),
+                str(row.get("新品H48风险") or ""),
+                float(row.get("新品H60_Q50") or 0),
+                float(row.get("新品H60_Q75") or 0),
+                row.get("新品最晚下单日"),
+                row.get("新品推荐快照"),
+                str(row.get("SPU") or ""),
+                str(row.get("颜色体系") or ""),
+                str(row.get("颜色缩写") or ""),
+                str(row.get("店铺") or ""),
+            ))
+        if payload:
+            cursor.executemany(sql, payload)
