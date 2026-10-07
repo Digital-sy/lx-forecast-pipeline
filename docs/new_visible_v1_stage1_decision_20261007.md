@@ -279,3 +279,79 @@ calibration label_end_date < test_fold_start
 - AGE calibration（样本不足时回退 GLOBAL）
 
 P75 校准目标：coverage 接近 75%，同时 pinball loss 不明显恶化。
+
+
+## 14. Stage-2 Quantile 校准结论
+
+Forward-only calibration 已通过 maturity guard，所有测试折都满足：
+
+```text
+calibration label_end_date < test_fold_start
+```
+
+### P50
+
+RAW P50 保持最佳业务语义：
+
+- pooled launch-balanced coverage ≈ 0.514
+- Day7 / Day14 / Day30 coverage ≈ 0.490 / 0.527 / 0.557
+
+GLOBAL / AGE 校准会把 P50 推高到约 0.55~0.57 coverage，没有必要。
+
+因此：
+
+```text
+P50 = RAW
+```
+
+### P75
+
+Pooled：
+
+- RAW row coverage ≈ 0.664，launch-balanced ≈ 0.722
+- GLOBAL row coverage ≈ 0.774，launch-balanced ≈ 0.824
+- AGE row coverage ≈ 0.770，launch-balanced ≈ 0.818
+
+但分年龄看：
+
+- RAW Day7 / Day14 / Day30 launch-balanced coverage ≈ 0.735 / 0.727 / 0.738，已经接近 75%
+- GLOBAL/AGE 把 Day14/30 推到约 0.87 / 0.82，明显过度保守
+- 真正失真的主要是 Day60，RAW coverage 只有约 0.44；Day90 RAW 约 0.69
+
+因此不采用统一 GLOBAL/AGE 校准层覆盖全部年龄。
+
+当前冻结：
+
+```text
+P50:
+RAW
+
+P75:
+Day7 / Day14 / Day30 = RAW
+Day60 / Day90 = research-only，暂不用于早期采购安全量
+```
+
+这避免为了修复晚期 lifecycle 而破坏真正关键的 Day14/30 补货窗口。
+
+## 15. Non-breakout / Base-demand 下一步
+
+Stage-1×Positive-volume 不能代表完整 future30，因为 target=0 的新品仍然产生销量。
+
+新增：
+
+```text
+NV-ML-V1-STAGE2-BASE30-CORE
+NV-ML-V1-STAGE2-DIRECT30-CORE
+NV-ML-V1-STAGE2-MIXTURE30-RAW-P
+```
+
+比较三条路线：
+
+1. negative/base-demand conditional model；
+2. two-component mixture：
+   `p × positive_volume + (1-p) × base_volume`；
+3. 直接对全部 NEW_VISIBLE 预测 future30 的 DIRECT LightGBM。
+
+DIRECT 是必须保留的简单 benchmark。若 DIRECT 比 mixture 更稳、更准，则不为了架构整齐强制使用分类概率混合。
+
+优先评估 Day14 / Day30 的 WAPE、Bias 和 temporal stability。
