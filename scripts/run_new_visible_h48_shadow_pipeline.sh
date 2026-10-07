@@ -25,11 +25,11 @@ run_step "inventory_position"   "$PYTHON" scripts/materialize_new_visible_invent
 
 run_step "leadtime_risk"   "$PYTHON" scripts/build_new_visible_h48_leadtime_risk_shadow.py
 
-echo "[$(date '+%F %T')] H48 shadow pipeline complete" | tee -a "$LOG_FILE"
-
-
 run_step "h60_prediction"   "$PYTHON" scripts/score_new_visible_h60_shadow.py
 
 run_step "horizon_monotonicity"   "$PYTHON" scripts/audit_new_visible_live_horizon_monotonicity.py
 
 run_step "h60_inventory_coverage"   "$PYTHON" scripts/build_new_visible_h60_inventory_coverage_shadow.py
+
+
+echo "[$(date '+%F %T')] NEW_VISIBLE H48/H60 shadow pipeline complete" | tee -a "$LOG_FILE"
