@@ -121,9 +121,13 @@ def read_prod_fba():
     if not required.issubset(c):
         raise RuntimeError(f"{FBA_FALLBACK_TABLE} missing columns: {sorted(required-c)}")
 
-    transit_col = "在途" if "在途" in c else None
     actual_col = "实际在途" if "实际在途" in c else None
-    transit_expr = f"SUM(COALESCE(x.{transit_col},0))" if transit_col else "0"
+    planned_col = "在途" if "在途" in c else None
+    # Match the more mature inventory-estimate implementation: actual transit is
+    # the canonical inbound quantity when available. Planned/accounting transit is
+    # retained only as a diagnostic fallback.
+    canonical_col = actual_col or planned_col
+    transit_expr = f"SUM(COALESCE(x.{canonical_col},0))" if canonical_col else "0"
     actual_expr = f"SUM(COALESCE(x.{actual_col},0))" if actual_col else "NULL"
 
     rows = q(
@@ -275,7 +279,7 @@ def main() -> int:
         "usable": sum(x["inventory_usable"] for x in output),
         "usable_rate": round(sum(x["inventory_usable"] for x in output)/len(output),6) if output else None,
         "status_counts": status_counts,
-        "source_rule": "FBA库存明细 + 库存预估表; diagnostic snapshot is comparison only",
+        "source_rule": "FBA可售 + 实际在途(缺失时回退在途) + 本地可用量 + 本地待到货; diagnostic snapshot is comparison only",
     }, ensure_ascii=False))
 
     totals = {
