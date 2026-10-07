@@ -76,6 +76,7 @@ def is_xh_spu(spu: str, xh_spus: Set[str]) -> bool:
     s = str(spu or "").strip().upper()
     return s.startswith(XH_PREFIX) or s in xh_spus
 
+
 def rebuild_cohorts(dry_run: bool = False) -> Dict[str, Any]:
     bounds = v1.one(
         f"SELECT MIN(dt) AS min_dt, MAX(dt) AS max_dt FROM `{v1.DAILY_TABLE}`"
@@ -226,6 +227,21 @@ def rebuild_cohorts(dry_run: bool = False) -> Dict[str, Any]:
     return summary
 
 
+def reset_snapshot_table_for_full_rebuild() -> int:
+    """Clear the research snapshot table before a full V2 rebuild.
+
+    The snapshot PK does not include dataset_version, so excluded launches from older
+    research versions can otherwise remain as stale rows. A full rebuild is cheap enough
+    to replace the research snapshot table contents atomically at the workflow level.
+    """
+    if not base.table_exists(v1.SNAPSHOT_TABLE):
+        return 0
+    before = v1.one(f"SELECT COUNT(*) AS n FROM `{v1.SNAPSHOT_TABLE}`")
+    with v1.db_cursor() as c:
+        c.execute(f"DELETE FROM `{v1.SNAPSHOT_TABLE}`")
+    return int(before.get("n", 0) or 0)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
@@ -272,6 +288,27 @@ def main() -> int:
     )
 
     v1.DATASET_VERSION = DATASET_VERSION
+
+    is_full_rebuild = (
+        not args.dry_run
+        and cohort_start is None
+        and cohort_end is None
+        and args.max_cohorts is None
+    )
+    if is_full_rebuild:
+        deleted = reset_snapshot_table_for_full_rebuild()
+        print(
+            "NEW_VISIBLE_SNAPSHOT_V2_RESET="
+            + json.dumps(
+                {
+                    "table": v1.SNAPSHOT_TABLE,
+                    "deleted_old_rows": deleted,
+                    "reason": "full rebuild clears stale rows because PK excludes dataset_version",
+                },
+                ensure_ascii=False,
+            )
+        )
+
     snap_summary = v1.build_snapshots(
         dry_run=args.dry_run,
         cohort_start=cohort_start,
