@@ -31,5 +31,6 @@ run_step "horizon_monotonicity"   "$PYTHON" scripts/audit_new_visible_live_horiz
 
 run_step "h60_inventory_coverage"   "$PYTHON" scripts/build_new_visible_h60_inventory_coverage_shadow.py
 
+run_step "h60_fabric_classification"   "$PYTHON" scripts/classify_new_visible_h60_fabric_shadow.py
 
 echo "[$(date '+%F %T')] NEW_VISIBLE H48/H60 shadow pipeline complete" | tee -a "$LOG_FILE"
