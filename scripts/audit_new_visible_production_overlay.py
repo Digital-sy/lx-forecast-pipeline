@@ -4,7 +4,7 @@
 
 Hard gate in primary mode:
 - sum(建议下单量表.建议下单量) by SPU+shop must exactly equal the approved
-  NEW_VISIBLE recommended_qty_q50;
+  NEW_VISIBLE current-release net Q50 gap quantity;
 - custom/blocked/no-order NEW_VISIBLE rows must sum to zero;
 - automatic PO must remain disabled.
 
@@ -54,6 +54,7 @@ def main() -> int:
     expected_sum = 0
     actual_sum = 0
     custom_or_block_positive = 0
+    semantic_violations: List[Dict[str, Any]] = []
 
     for key, rec in recs.items():
         expected = max(0, int(rec.get("recommended_qty_q50") or 0))
@@ -63,8 +64,35 @@ def main() -> int:
 
         fabric = str(rec.get("fabric_type") or "")
         status = str(rec.get("recommendation_status") or "")
+        gap_low = float(rec.get("q50_gap_low") or 0)
+
         if fabric != "现货面料" and got > 0:
             custom_or_block_positive += 1
+
+        # Semantic hard gate:
+        # - only ORDER_NOW_NET_Q50_GAP may release a current quantity;
+        # - released quantity must be ceil(net Q50 gap);
+        # - review/hold/block/no-order rows must release zero.
+        if status == "ORDER_NOW_NET_Q50_GAP":
+            expected_semantic = int(__import__("math").ceil(max(gap_low, 0.0)))
+            if expected != expected_semantic:
+                semantic_violations.append({
+                    "store_name": key[1],
+                    "spu": key[0],
+                    "status": status,
+                    "recommended_qty": expected,
+                    "q50_gap_low": gap_low,
+                    "expected_from_gap": expected_semantic,
+                })
+        elif expected != 0:
+            semantic_violations.append({
+                "store_name": key[1],
+                "spu": key[0],
+                "status": status,
+                "recommended_qty": expected,
+                "q50_gap_low": gap_low,
+                "expected_from_gap": 0,
+            })
 
         if got != expected:
             mismatches.append({
@@ -95,9 +123,13 @@ def main() -> int:
         "mismatch_groups": len(mismatches),
         "custom_or_block_positive_groups": custom_or_block_positive,
         "automatic_po_violation_rows": auto_po_bad,
+        "semantic_violation_rows": len(semantic_violations),
         "status": (
             "PASS"
-            if not mismatches and custom_or_block_positive == 0 and auto_po_bad == 0
+            if not mismatches
+            and custom_or_block_positive == 0
+            and auto_po_bad == 0
+            and not semantic_violations
             else "FAIL"
         ),
     }
@@ -105,6 +137,8 @@ def main() -> int:
 
     for row in mismatches[:50]:
         print("NV_PROD_OVERLAY_MISMATCH=" + json.dumps(row, ensure_ascii=False))
+    for row in semantic_violations[:50]:
+        print("NV_PROD_OVERLAY_SEMANTIC_VIOLATION=" + json.dumps(row, ensure_ascii=False))
 
     if scope["status"] != "PASS":
         raise RuntimeError(
