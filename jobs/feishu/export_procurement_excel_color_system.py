@@ -95,7 +95,9 @@ def build_order_sheet(wb: Workbook, rows: Sequence[Dict[str, Any]], months: Sequ
         "SPU", "颜色体系", "颜色缩写", "颜色汇总代码", "店铺", "工厂",
         "面料类型", "覆盖月数", "库存", "待到货",
         "预测模型", "新品动作状态", "新品H48风险",
-        "新品H60_Q50", "新品H60_Q75", "新品最晚下单日",
+        "新品H60_Q50", "新品H60_Q75",
+        "新品Q50缺口低", "新品Q50缺口高", "新品Q75缺口低", "新品Q75缺口高",
+        "新品数量口径", "新品最晚下单日",
     ]
     for month in months:
         headers.extend([f"{month}运营预计", f"{month}建议下单"])
@@ -112,6 +114,11 @@ def build_order_sheet(wb: Workbook, rows: Sequence[Dict[str, Any]], months: Sequ
             row.get("新品动作状态", ""), row.get("新品H48风险", ""),
             float(row.get("新品H60_Q50", 0) or 0),
             float(row.get("新品H60_Q75", 0) or 0),
+            float(row.get("新品Q50缺口低", 0) or 0),
+            float(row.get("新品Q50缺口高", 0) or 0),
+            float(row.get("新品Q75缺口低", 0) or 0),
+            float(row.get("新品Q75缺口高", 0) or 0),
+            row.get("新品数量口径", ""),
             row.get("新品最晚下单日", ""),
         ]
         for month in months:
