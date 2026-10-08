@@ -71,7 +71,10 @@ def main() -> int:
             "fabric_type": str(rec.get("fabric_type") or ""),
             "recommendation_status": str(rec.get("recommendation_status") or ""),
             "legacy_qty": int(before.get(key, 0)),
-            "champion_q50_qty": expected,
+            "champion_release_qty": expected,
+            "q50_gap_low": float(rec.get("q50_gap_low") or 0),
+            "q50_gap_high": float(rec.get("q50_gap_high") or 0),
+            "qty_basis": str(rec.get("qty_basis") or ""),
             "preview_color_sum": got,
             "delta_vs_legacy": got - int(before.get(key, 0)),
             "parity_ok": got == expected,
@@ -91,9 +94,9 @@ def main() -> int:
     for r in sorted(
         rows,
         key=lambda x: (
-            0 if x["recommendation_status"] == "ORDER_NOW_LT48" else
-            1 if x["recommendation_status"] == "ORDER_WITHIN_30D" else 2,
-            -x["champion_q50_qty"],
+            0 if x["recommendation_status"] == "ORDER_NOW_NET_Q50_GAP" else
+            1 if x["recommendation_status"] == "REVIEW_WITHIN_30D_NO_RELEASE" else 2,
+            -x["champion_release_qty"],
         ),
     )[:100]:
         print("NV_PROD_PREVIEW_ROW=" + json.dumps(r, ensure_ascii=False))
