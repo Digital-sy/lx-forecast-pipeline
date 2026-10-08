@@ -21,7 +21,7 @@ from common.database import db_cursor
 logger = get_logger("new_visible_procurement_bridge")
 
 TABLE = "forecast_new_visible_procurement_recommendation_daily"
-MODEL = "NV_PROCUREMENT_CHAMPION_V1_H48_H60_Q50"
+MODEL = "NV_PROCUREMENT_CHAMPION_V2_H48_H60_NET_GAP"
 DEFAULT_MAX_STALE_DAYS = 2
 
 RecommendationKey = Tuple[str, str]  # SPU, store
@@ -102,6 +102,7 @@ def load_recommendations(
           snapshot_date,as_of_date,store_name,spu,age_days,
           fabric_type,primary_fabric,h48_risk_level,h60_coverage_status,
           h60_q50,h60_q75,on_hand_position,total_inventory_position,
+          q50_gap_low,q50_gap_high,q75_gap_low,q75_gap_high,qty_basis,
           days_cover_q50,latest_order_date,recommendation_status,
           recommended_qty_q50,safety_qty_q75,override_active,
           source_action_type,model_version
