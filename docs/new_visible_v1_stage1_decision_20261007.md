@@ -1192,3 +1192,26 @@ BQ106 is retained as the first operational acceptance case: the model moved from
 covered to a strong replenishment signal during the Sep-17 BD ramp and produced
 H60 Q50 close to the Sep-23 human replenishment decision, while preserving an
 elevated demand baseline after the activity peak.
+
+
+## 40. Production quantity hotfix: net-gap semantics
+
+The first production preview exposed an integration semantic bug, not a forecast-model bug:
+V1 used the entire H60 Q50 cumulative demand as the current procurement quantity after
+the reorder-timing trigger fired. That double-counted inventory already in the position.
+
+V2 production bridge corrects this:
+- model version: NV_PROCUREMENT_CHAMPION_V2_H48_H60_NET_GAP
+- current released stock quantity =
+  ceil(max(H60_Q50 - total_inventory_position, 0))
+- q50_gap_low assumes all known pending inventory arrives
+- q50_gap_high assumes no pending inventory arrives
+- only rows whose current cover is <=48 days and q50_gap_low>0 release a quantity now
+- rows whose reorder point is within 30 days are REVIEW_WITHIN_30D_NO_RELEASE:
+  latest review/order date is retained, but current procurement quantity is zero
+- custom fabrics remain H90 HOLD
+- automatic PO remains disabled
+
+The post-write audit now validates the quantity semantic itself, not only color-allocation
+parity: only ORDER_NOW_NET_Q50_GAP may have positive current release quantity, and that
+quantity must equal ceil(q50_gap_low).
