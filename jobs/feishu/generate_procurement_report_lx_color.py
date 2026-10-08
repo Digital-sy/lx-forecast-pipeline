@@ -79,6 +79,11 @@ async def write_order_to_feishu(
         {"name": "新品H48风险", "type": "text"},
         {"name": "新品H60_Q50", "type": "number", "precision": 2},
         {"name": "新品H60_Q75", "type": "number", "precision": 2},
+        {"name": "新品Q50缺口低", "type": "number", "precision": 2},
+        {"name": "新品Q50缺口高", "type": "number", "precision": 2},
+        {"name": "新品Q75缺口低", "type": "number", "precision": 2},
+        {"name": "新品Q75缺口高", "type": "number", "precision": 2},
+        {"name": "新品数量口径", "type": "text"},
         {"name": "新品最晚下单日", "type": "text"},
         {"name": "统计月份", "type": "text"},
         {"name": "T月建议下单", "type": "number"},
@@ -113,6 +118,11 @@ async def write_order_to_feishu(
             "新品H48风险": record.get("新品H48风险", ""),
             "新品H60_Q50": float(record.get("新品H60_Q50", 0) or 0),
             "新品H60_Q75": float(record.get("新品H60_Q75", 0) or 0),
+            "新品Q50缺口低": float(record.get("新品Q50缺口低", 0) or 0),
+            "新品Q50缺口高": float(record.get("新品Q50缺口高", 0) or 0),
+            "新品Q75缺口低": float(record.get("新品Q75缺口低", 0) or 0),
+            "新品Q75缺口高": float(record.get("新品Q75缺口高", 0) or 0),
+            "新品数量口径": record.get("新品数量口径", ""),
             "新品最晚下单日": str(record.get("新品最晚下单日") or ""),
             "统计月份": current_date.strftime("%Y-%m"),
             "建议下单合计": record["建议下单合计"],
@@ -291,7 +301,7 @@ def main() -> None:
         f"建议下单计算完成：{len(order_records)} 个颜色身份+店铺，"
         f"{len(fabric_records)} 种定制面料；"
         f"NEW_VISIBLE模式={nv_summary['mode']}，覆盖SPU+店铺={nv_summary['override_groups']}，"
-        f"Q50释放合计={nv_summary['allocated_q50_sum']}"
+        f"净Q50缺口释放合计={nv_summary['allocated_q50_sum']}"
     )
 
     logic.save_order_suggest(order_records, month_order)
