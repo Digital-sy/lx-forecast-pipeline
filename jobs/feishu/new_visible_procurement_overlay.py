@@ -6,7 +6,7 @@ The legacy procurement engine still builds the color universe, inventory and mon
 shape. This overlay replaces ONLY validated NEW_VISIBLE SPU+shop procurement quantity.
 
 Rules:
-- stock NEW_VISIBLE: authoritative SPU lot = recommended H60 Q50 (or zero when not due);
+- stock NEW_VISIBLE: authoritative current-release lot = net H60 Q50 inventory gap;
 - custom NEW_VISIBLE: zero quantity (H90 HOLD);
 - blocked NEW_VISIBLE: zero quantity;
 - ages outside validated 7..120 are absent from the bridge and therefore keep legacy;
@@ -205,12 +205,17 @@ def apply_new_visible_overlay(
             # the authoritative audit trail is the recommendation bridge table.
             row["预测模型"] = str(
                 rec.get("model_version")
-                or "NV_PROCUREMENT_CHAMPION_V1_H48_H60_Q50"
+                or "NV_PROCUREMENT_CHAMPION_V2_H48_H60_NET_GAP"
             )
             row["新品动作状态"] = status
             row["新品H48风险"] = str(rec.get("h48_risk_level") or "")
             row["新品H60_Q50"] = float(rec.get("h60_q50") or 0)
             row["新品H60_Q75"] = float(rec.get("h60_q75") or 0)
+            row["新品Q50缺口低"] = float(rec.get("q50_gap_low") or 0)
+            row["新品Q50缺口高"] = float(rec.get("q50_gap_high") or 0)
+            row["新品Q75缺口低"] = float(rec.get("q75_gap_low") or 0)
+            row["新品Q75缺口高"] = float(rec.get("q75_gap_high") or 0)
+            row["新品数量口径"] = str(rec.get("qty_basis") or "")
             row["新品最晚下单日"] = rec.get("latest_order_date")
             row["新品推荐快照"] = rec.get("snapshot_date")
 
@@ -255,6 +260,11 @@ def persist_trace_fields(order_records: Sequence[Mapping[str, Any]]) -> None:
         ("新品H48风险", "VARCHAR(50) NOT NULL DEFAULT ''"),
         ("新品H60_Q50", "DECIMAL(18,2) NOT NULL DEFAULT 0"),
         ("新品H60_Q75", "DECIMAL(18,2) NOT NULL DEFAULT 0"),
+        ("新品Q50缺口低", "DECIMAL(18,2) NOT NULL DEFAULT 0"),
+        ("新品Q50缺口高", "DECIMAL(18,2) NOT NULL DEFAULT 0"),
+        ("新品Q75缺口低", "DECIMAL(18,2) NOT NULL DEFAULT 0"),
+        ("新品Q75缺口高", "DECIMAL(18,2) NOT NULL DEFAULT 0"),
+        ("新品数量口径", "VARCHAR(120) NOT NULL DEFAULT ''"),
         ("新品最晚下单日", "DATE DEFAULT NULL"),
         ("新品推荐快照", "DATE DEFAULT NULL"),
     ]
@@ -283,6 +293,11 @@ def persist_trace_fields(order_records: Sequence[Mapping[str, Any]]) -> None:
                 新品H48风险=%s,
                 新品H60_Q50=%s,
                 新品H60_Q75=%s,
+                新品Q50缺口低=%s,
+                新品Q50缺口高=%s,
+                新品Q75缺口低=%s,
+                新品Q75缺口高=%s,
+                新品数量口径=%s,
                 新品最晚下单日=%s,
                 新品推荐快照=%s
             WHERE SPU=%s
@@ -298,6 +313,11 @@ def persist_trace_fields(order_records: Sequence[Mapping[str, Any]]) -> None:
                 str(row.get("新品H48风险") or ""),
                 float(row.get("新品H60_Q50") or 0),
                 float(row.get("新品H60_Q75") or 0),
+                float(row.get("新品Q50缺口低") or 0),
+                float(row.get("新品Q50缺口高") or 0),
+                float(row.get("新品Q75缺口低") or 0),
+                float(row.get("新品Q75缺口高") or 0),
+                str(row.get("新品数量口径") or ""),
                 row.get("新品最晚下单日"),
                 row.get("新品推荐快照"),
                 str(row.get("SPU") or ""),
