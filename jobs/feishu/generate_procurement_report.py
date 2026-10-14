@@ -34,8 +34,8 @@ logger = get_logger('procurement_report')
 
 # ── 常量 ─────────────────────────────────────────────────────────────────
 # 含义：第1个月权重最高，越往后越低，让建议下单量前置
-COVERAGE_MONTHS_CUSTOM = 3   # 定制面料：覆盖未来3个月
-COVERAGE_MONTHS_STOCK  = 2   # 现货面料：覆盖未来2个月
+COVERAGE_MONTHS_CUSTOM = 3   # 定制面料：含本月，覆盖 T/T+1/T+2
+COVERAGE_MONTHS_STOCK  = 3   # 现货面料：含本月，覆盖 T/T+1/T+2
 
 TABLE_ORDER_SUGGEST = '建议下单量表'
 TABLE_FABRIC_USAGE  = '面料预计用量表'

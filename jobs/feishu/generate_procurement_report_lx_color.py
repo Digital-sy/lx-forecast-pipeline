@@ -266,7 +266,11 @@ async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
 def main() -> None:
     logger.info("=" * 70)
     logger.info("采购建议报告生成（未来月份 + 颜色体系感知）")
-    logger.info("  定制面料覆盖未来3个月 | 现货面料覆盖未来2个月")
+    logger.info(
+        "  自然月计划（含本月）：定制面料覆盖 %s 个月 | 现货面料覆盖 %s 个月",
+        logic.COVERAGE_MONTHS_CUSTOM,
+        logic.COVERAGE_MONTHS_STOCK,
+    )
     logger.info("=" * 70)
     current_date = datetime.now()
     resolver = ColorSystemResolver.from_database()

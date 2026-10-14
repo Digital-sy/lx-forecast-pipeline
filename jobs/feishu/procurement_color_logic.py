@@ -10,8 +10,10 @@ from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Sequence,
 
 from jobs.feishu.color_system_resolver import ColorSystemResolver
 
+# Calendar-month planning window: current month, next month and month after next.
+# This does not change the independent NEW_VISIBLE H48/H60 model horizons.
 COVERAGE_MONTHS_CUSTOM = 3
-COVERAGE_MONTHS_STOCK = 2
+COVERAGE_MONTHS_STOCK = 3
 TABLE_ORDER_SUGGEST = "建议下单量表"
 TABLE_FABRIC_USAGE = "面料预计用量表"
 

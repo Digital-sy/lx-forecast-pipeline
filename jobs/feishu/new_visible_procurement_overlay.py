@@ -10,7 +10,8 @@ Rules:
 - custom NEW_VISIBLE: zero quantity (H90 HOLD);
 - blocked NEW_VISIBLE: zero quantity;
 - ages outside validated 7..120 are absent from the bridge and therefore keep legacy;
-- color allocation is exact and sums back to the SPU recommendation.
+- color allocation is exact and sums back to the SPU recommendation;
+- monthly allocation uses the calendar planning window, not a new H90 forecast.
 
 No PO is created here.
 """
@@ -146,7 +147,8 @@ def apply_new_visible_overlay(
             for pos, idx in enumerate(indices)
         }
 
-        # If legacy net needs are all zero, fall back to first-2-month color demand.
+        # If legacy net needs are all zero, use the calendar-window color demand.
+        # Changing this allocation window never expands the approved H60 quantity.
         demand_weights: Dict[str, float] = {}
         for pos, idx in enumerate(indices):
             row = order_records[idx]
