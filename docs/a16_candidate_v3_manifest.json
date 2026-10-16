@@ -1,0 +1,56 @@
+{
+  "candidate": "a16_shop_cutoff_v3_20261016",
+  "base_commit": "97b868d75cde24e4d408399cdeecc292395d1b4a",
+  "sources": {
+    "scripts/audit_sales_forecast_horizons.py": {
+      "file_sha256": "8ec46e91af0f2cfb294b7affcfeaa2e235afd367bc626c3e5939d601a784dd0d",
+      "normalized_sha256": "ca4e01cafb418e6a5a72eb3911c641e872d221caf4d4fb9774287bf7c39fa919"
+    },
+    "scripts/audit_sales_forecast_v5_experiments.py": {
+      "file_sha256": "b4ccd87e2f0c06000e03ed7b0b640e541c0534bfc0285e8d7f1df847f0ad53fd",
+      "normalized_sha256": "b9b5c8b6d41af0b22c98f001051ea32826c40f42ca8e17c86f7ea7b6f6bc478e"
+    },
+    "scripts/audit_sales_forecast_v5_round3.py": {
+      "file_sha256": "d4aa421bf114f3b4f7ad49f54e26bb4f4f1b4969c9e6e82cf5576d3ae419baf9",
+      "normalized_sha256": "9a533022668a6ea2921d2e0801454a7f7807dc138067d01062ef5db33d817ac0"
+    },
+    "scripts/audit_sales_forecast_v5_round5_asymmetric.py": {
+      "file_sha256": "12ff95b192c1f3fbb54658fb8b81431b0bd8118d849e31e90a87fcfedffb5a61",
+      "normalized_sha256": "48cb474e89e14b41961094a722a34ef07b9ad1b6e7f521547c8deaf074d1f28e"
+    },
+    "scripts/audit_sales_forecast_v5_round6_segments.py": {
+      "file_sha256": "2a845d77b850810d3130e587eab93f02852fbc77db3e3932a61dc8fd2cb50cd7",
+      "normalized_sha256": "4e9461510cb523d2b5d67ee04105064c9d642c04a4e25187c5a823ba76d91315"
+    },
+    "scripts/audit_sales_forecast_v5_round7_router.py": {
+      "file_sha256": "7a64f3f404700c5707c878f3f7faf6e8bfb84ed4d8e3dd41c27f462bcb3a1cf4",
+      "normalized_sha256": "7429d9c6fb46d2f1a7a708f7a6dc33c21cc0af6858893d56303810316777546c"
+    },
+    "scripts/audit_sales_forecast_v5_round11_concentration_anomaly.py": {
+      "file_sha256": "8cbc1fb14163e7fe258c6bc7db45bd67b76cbbfd4361be07fe092805cfcd29ce",
+      "normalized_sha256": "608dcad6177cccfe28d9a108102e46b63c75b25bf2216c0a1fc2cccf7b7425c5"
+    },
+    "scripts/audit_sales_forecast_v5_round12_robust_season_trust.py": {
+      "file_sha256": "e34ba5d0595cf0c1d7a56c8f607189ff2f71dcfe5e1cfd7d4e2f813ea88583a3",
+      "normalized_sha256": "d8c06b5b0df37382cc88bb7b737256ed54903b2a2177f0ae503327d6317a38ae"
+    },
+    "jobs/feishu/forecast_sales_improved.py": {
+      "file_sha256": "1d3d5087d4f3f36a089fdbb9848a7c7c5f3d5bd6c27f3a523f7ca3f22941cc1a",
+      "normalized_sha256": "211eadfafc34953a09083bb04a9471160a4174d01c75f0b00a8516957047e97c"
+    }
+  },
+  "adapter_sha256": "afe3549b54629b519bce66f7c5b6932e786190552934704a5818c393eaafd72a",
+  "test_months": [
+    "2025-10",
+    "2025-11",
+    "2025-12",
+    "2026-01",
+    "2026-02",
+    "2026-03"
+  ],
+  "regression_months": [
+    "2026-07",
+    "2026-08",
+    "2026-09"
+  ]
+}
