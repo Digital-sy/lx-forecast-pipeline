@@ -52,7 +52,9 @@ def pred_label(d):
 def dump_csv(path, rows):
     if not rows:
         return
-    cols = list(rows[0])
+    # Summary rows are heterogeneous: OVERALL has no dimension keys, while
+    # shop/month/horizon/age groups do. Never drop columns from later rows.
+    cols = list(dict.fromkeys(k for row in rows for k in row))
     with path.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         writer.writeheader()
@@ -153,6 +155,90 @@ def demand_band(actual):
     if actual < 1000: return "200-999"
     return "1000+"
 
+def rebuild_summary_from_detail(output):
+    """Recreate grouped score and coverage reports from saved CSV; NO SQL or replay."""
+    detail_path = output / "old_spu_detail_all_coverage.csv"
+    if not detail_path.is_file():
+        raise FileNotFoundError(f"未找到历史回放明细：{detail_path}")
+    required = {
+        "age_class", "horizon", "target_month", "shop", "spu", "actual_row_present",
+        "actual", "pred_v4_replay", "baseline_last_completed_month",
+        "baseline_last_year_same_target", "abs_error_v4", "season_CURRENT_METADATA",
+        "actual_sales_band",
+    }
+    with detail_path.open(encoding="utf-8-sig", newline="") as fh:
+        reader = csv.DictReader(fh)
+        missing = required.difference(reader.fieldnames or [])
+        if missing:
+            raise ValueError(f"历史回放明细缺字段：{sorted(missing)}")
+        detail = list(reader)
+    if not detail:
+        raise ValueError("历史回放明细为空，拒绝覆盖原报告")
+    for r in detail:
+        for col in ("actual", "pred_v4_replay", "baseline_last_completed_month",
+                    "baseline_last_year_same_target", "actual_row_present", "abs_error_v4"):
+            r[col] = int(r[col])
+        if r["actual_row_present"] not in (0, 1):
+            raise ValueError("实际销量可观测标记异常")
+    mature = [r for r in detail if r["age_class"] in
+              ("OLD_12P", "OLD_6_TO_11", "ESTABLISHED_4_TO_5")]
+    scored = [r for r in mature if r["actual_row_present"] == 1]
+    scored_12 = [r for r in scored if r["age_class"] == "OLD_12P"]
+    dimensions = [[], ["horizon"], ["target_month", "horizon"],
+                  ["shop", "horizon"], ["age_class", "horizon"],
+                  ["actual_sales_band", "horizon"],
+                  ["season_CURRENT_METADATA", "horizon"]]
+    def grouped(rows_, fields):
+        buckets = defaultdict(list)
+        for r in rows_:
+            buckets[tuple(r[k] for k in fields)].append(r)
+        for key, sub in sorted(buckets.items()):
+            yield key, sub
+    summary = []
+    coverage = []
+    for scope, sub_scored, sub_all in (("OLD_12P", scored_12,
+                                       [r for r in mature if r["age_class"] == "OLD_12P"]),
+                                      ("ESTABLISHED_OBSERVED_4P", scored, mature)):
+        for fields in dimensions:
+            group_label = "+".join(fields) if fields else "OVERALL"
+            for key, seg in grouped(sub_scored, fields):
+                attrs = dict(zip(fields, key))
+                for model, col in (("V4_回放", "pred_v4_replay"),
+                                   ("上月延续", "baseline_last_completed_month"),
+                                   ("去年同月", "baseline_last_year_same_target")):
+                    summary.append(dict(scope=scope, group_by=group_label,
+                                        **attrs, model=model, **metrics(seg, col)))
+            for key, seg in grouped(sub_all, fields):
+                n_obs = sum(r["actual_row_present"] == 1 for r in seg)
+                coverage.append(dict(scope=scope, group_by=group_label,
+                                     **dict(zip(fields, key)),
+                                     candidate_rows=len(seg), observed_rows=n_obs,
+                                     unknown_rows=len(seg) - n_obs,
+                                     observed_rate=n_obs / len(seg),
+                                     forecast_units_with_unknown_actual=sum(
+                                         r["pred_v4_replay"] for r in seg
+                                         if r["actual_row_present"] == 0)))
+    # Finish computations and validation before modifying report files.
+    if not summary or not coverage:
+        raise ValueError("无可汇总的成熟品记录，拒绝覆盖原报告")
+    top = sorted(scored_12, key=lambda r: r["abs_error_v4"], reverse=True)[:100]
+    dump_csv(output / "summary_old_accuracy.csv", summary)
+    dump_csv(output / "top100_old_spu_errors.csv", top)
+    dump_csv(output / "coverage_by_dimension.csv", coverage)
+    print(f"[REBUILD] 未连接数据库；从 {len(detail):,} 条已有明细重建分组报告。", flush=True)
+    for label, seg in (("老品12个月以上", scored_12), ("成熟4个月以上", scored)):
+        print("\n===", label, "===")
+        for h in ("H1", "H2", "H3"):
+            matched = [r for r in seg if r["horizon"] == h]
+            if not matched:
+                continue
+            m = metrics(matched, "pred_v4_replay")
+            print(h, "样本", m["rows"], "WAPE", ratio(m["wape"]),
+                  "Bias", ratio(m["bias"]), "观测覆盖由coverage_by_dimension.csv提供")
+    print("[REBUILD] 已输出 summary_old_accuracy.csv / coverage_by_dimension.csv / top100_old_spu_errors.csv")
+    return 0
+
+
 def main():
     p = argparse.ArgumentParser(description="老品SPU销量预测准确率（历史回放，仅只读）")
     p.add_argument("--months", default="2026-07,2026-08,2026-09", help="已完成自然月，逗号分隔YYYY-MM")
@@ -160,7 +246,11 @@ def main():
     p.add_argument("--sales-start", default="2024-01", help="用于证实老品历史的起始月；越早越完整")
     p.add_argument("--timeout-ms", type=int, default=60000, help="数据库只读单查询最大毫秒数")
     p.add_argument("--output-dir", default="reports_analysis/old_spu_accuracy_readonly")
+    p.add_argument("--rebuild-summary-only", action="store_true",
+                   help="只读本地已生成的明细CSV，重建分组报告；不查询数据库、不重跑模型")
     args = p.parse_args()
+    if args.rebuild_summary_only:
+        return rebuild_summary_from_detail(Path(args.output_dir))
     months = sorted(set(parsed_month(z.strip()) for z in args.months.split(',') if z.strip()))
     horizons = sorted(set(int(z.strip()) for z in args.horizons.split(',') if z.strip()))
     if not months or not horizons or any(h not in (1,2,3) for h in horizons):
