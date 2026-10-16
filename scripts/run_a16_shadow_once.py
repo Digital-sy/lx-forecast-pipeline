@@ -97,10 +97,10 @@ def read_sources(issue):
             c.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY")
         month_sql = (
             "SELECT /*+ MAX_EXECUTION_TIME(60000) */ "
-            "\`店铺\`,\`SKU\`,\`SPU\`,\`统计日期\`,\`销量\` "
-            "FROM \`销量统计_msku月度\` "
-            "WHERE \`店铺\`=%s AND \`统计日期\` >= %s AND \`统计日期\` < %s "
-            "AND \`SKU\` IS NOT NULL AND \`SPU\` IS NOT NULL"
+            "`店铺`,`SKU`,`SPU`,`统计日期`,`销量` "
+            "FROM `销量统计_msku月度` "
+            "WHERE `店铺`=%s AND `统计日期` >= %s AND `统计日期` < %s "
+            "AND `SKU` IS NOT NULL AND `SPU` IS NOT NULL"
         )
         sales, ep1 = guarded_select(conn, "monthly", month_sql,
                                     (SHOP, "2024-01-01", cutoff.isoformat()))
@@ -110,7 +110,7 @@ def read_sources(issue):
             "FROM ods_db.ods_lx_product_management WHERE spu IS NOT NULL"
         )
         catalog, ep2 = guarded_select(conn, "catalog", catalog_sql, ())
-        season_sql = "SELECT \`SPU\`,\`季节\` FROM \`SPU季节表\`"
+        season_sql = "SELECT `SPU`,`季节` FROM `SPU季节表`"
         season, ep3 = guarded_select(conn, "season", season_sql, ())
         conn.rollback()
     finally:
