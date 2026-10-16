@@ -19,11 +19,12 @@
 
 服务器当前工作分支可能不是main，且保留未提交的生产修改。因此严禁 git pull、git checkout、git reset --hard、git clean -fd。
 
-从本分支仅复制白名单四个新文件，遇到本地同名不同内容即停止：
+从本分支仅复制白名单五个新文件，遇到本地同名不同内容即停止：
 - docs/a16_candidate_v3_manifest.json
 - scripts/a16_candidate_v3.py
 - scripts/run_a16_shadow_once.py
 - tests/test_a16_shadow_once.py
+- tests/test_a16_candidate_v3.py
 
 执行前确认业务时间为2026年10月；否则重新申请当月签发范围。获取代码后先进行 Python 语法检查、单元测试，PASS后再人工单次读取与预测。
 
