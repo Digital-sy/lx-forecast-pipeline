@@ -31,7 +31,7 @@ from jobs.feishu.generate_forecast_comparison import extract_spu_from_sku
 
 SHOPS = ("JQ-US", "MT-US", "RKZ-US", "SY-US")
 
-def add_month(d, offset):
+def add_months(d, offset):
     n = d.year * 12 + d.month - 1 + offset
     return date(n // 12, n % 12 + 1, 1)
 
