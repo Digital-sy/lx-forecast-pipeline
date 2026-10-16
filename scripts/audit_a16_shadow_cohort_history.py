@@ -111,15 +111,15 @@ def fetch_monthly(cohort):
         names = sorted(cohort)
         placeholders = ",".join(["%s"] * len(names))
         sql = (
-            "SELECT /*+ MAX_EXECUTION_TIME(60000) */ \`SPU\`, "
-            "DATE_FORMAT(\`统计日期\`, '%%Y-%%m') AS month_key, "
-            "SUM(\`销量\`) AS total_units, COUNT(*) AS source_rows, "
-            "SUM(CASE WHEN \`销量\` IS NULL THEN 1 ELSE 0 END) AS null_rows, "
-            "SUM(CASE WHEN \`销量\` < 0 THEN 1 ELSE 0 END) AS negative_rows "
-            "FROM \`销量统计_msku月度\` "
-            "WHERE \`店铺\`=%s AND \`统计日期\` >= %s AND \`统计日期\` < %s "
-            f"AND \`SPU\` IN ({placeholders}) "
-            "GROUP BY \`SPU\`, DATE_FORMAT(\`统计日期\`, '%%Y-%%m')"
+            "SELECT /*+ MAX_EXECUTION_TIME(60000) */ `SPU`, "
+            "DATE_FORMAT(`统计日期`, '%%Y-%%m') AS month_key, "
+            "SUM(`销量`) AS total_units, COUNT(*) AS source_rows, "
+            "SUM(CASE WHEN `销量` IS NULL THEN 1 ELSE 0 END) AS null_rows, "
+            "SUM(CASE WHEN `销量` < 0 THEN 1 ELSE 0 END) AS negative_rows "
+            "FROM `销量统计_msku月度` "
+            "WHERE `店铺`=%s AND `统计日期` >= %s AND `统计日期` < %s "
+            f"AND `SPU` IN ({placeholders}) "
+            "GROUP BY `SPU`, DATE_FORMAT(`统计日期`, '%%Y-%%m')"
         )
         params = ("JQ-US", "2024-01-01", "2026-10-01", *names)
         with conn.cursor() as c:
