@@ -1,0 +1,62 @@
+{
+  "protocol": "a7-down-sensitivity-v1",
+  "audit_commit": "ee0c3ae01fad57de77b0b1fab85b65b846935066",
+  "file_sha256": {
+    "monthly_and_seasons": "1951f218bc79b68be17cbfce78c9e4ec9c6750e97bc2bbf1e539697b45a4ac67",
+    "categories_and_daily": "33d572e19fc701e6100e2c2a7a2aa97327ecaa55204a0b1c4d868ffd87aadb1a",
+    "old_truth_classification": "d44ebca42a2ba6b961542ed7b5aecb8bf42e1eff7b1e2ad6d608ce41fd8c1190",
+    "fresh_truth_classification": "599ef0b4335f40103f28e781f4bb6a0174bdb2b85e6545c982406f65f9754313",
+    "historical_outputs": "d70822d96b1a2cda57268adbeff8214f36e1df8c4a485cc7cf3c35b1e4fc55c2",
+    "historical_calibration": "50c44a353e8b8f9195185ea5c5f9c0dbfca2578ae91b189664cefb73d24b27bc",
+    "truth_conflicts": "b25cad01336da66e4e3b642dbb432320ba9e527f1ac351b0831cbc9fc6f60615",
+    "original_reconstructed_input": "adee343e8e52a56c6c9c70566e1d64534170815f5df4185167d83cf439962698",
+    "original_predictions": "c19096c9a35f6e39b34fe2fd60772025b0a47a30f78366e0cadfad6e0f5e3234",
+    "original_meta": "ddf2420b6842a247583b2e8865df5e7f2d24e6dd74f0cde358b1c6977c083ab0",
+    "original_trace": "ce7b19ca16432bee342e9e5f99adc8c511ea3aab9c6a08d6a1876ccc07c06e0a",
+    "bounded_operating_evidence": "8894e7fc43e5107977f4f7ae373d7beb429e5a7dd0162761943208ae23a781bf"
+  },
+  "components": {
+    "mapping": {
+      "rows": 36768,
+      "sha256": "1bc5aff9b23d05ce9c8cecbf2c0252d2e335fedb15762e96ad2f1fe0186ed537"
+    },
+    "seasons": {
+      "rows": 1538,
+      "sha256": "04d16950d53aaa85bdf6f2733e6aeab2be91eb30d934a8cfe39b321d428440ef"
+    },
+    "categories": {
+      "rows": 97273,
+      "sha256": "c5804b47d2908f5013733893b8d7b008ffadfd850e342c8bfafd0a740c1c3717"
+    }
+  },
+  "report_months": [
+    "2025-10",
+    "2025-11",
+    "2025-12",
+    "2026-01",
+    "2026-02",
+    "2026-03",
+    "2026-07",
+    "2026-08",
+    "2026-09"
+  ],
+  "horizons": [
+    2,
+    3
+  ],
+  "weights": [
+    1,
+    0.5,
+    0
+  ],
+  "model_parameters_changed": "gamma_down multiplied by weight only",
+  "calibration": "Reuse archived cutoff-specific choices; observed monthly training labels strictly before cutoff; no reselection",
+  "truth_policy": "observed monthly plus previously confirmed daily zero; unknown stays null; conflicts flagged",
+  "protection": "union(frozen lifecycle declining, three observed positive strictly decreasing pre-cutoff months)",
+  "minimum_protection_items": 30,
+  "minimum_affected_months": 3,
+  "bootstrap_seed": 20261019,
+  "bootstrap_draws": 200,
+  "classification": "RECONSTRUCTED_RETROSPECTIVE_SENSITIVITY",
+  "business_gate": "confirmation required in execution receipt before run"
+}
