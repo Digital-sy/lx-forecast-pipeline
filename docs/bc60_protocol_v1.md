@@ -68,3 +68,34 @@ Sessions are not deduplicated visitors summed across variants. Ratios must be re
 from validated numerators/denominators. Missing budget, supply or activity stays UNKNOWN
 and does not by itself block B1. New products remain in the list but are not modified
 by an established-product candidate; unresolved new-product windows block overall PASS.
+
+## Locked implementation notes (before effects)
+
+The exact lock is `bc60_design_lock_v1.json`. Issue dates are Apr 2, Jun 2 and Aug 2,
+2026; available-through dates are Mar 31, May 31 and Jul 31 (assumed two-day lag).
+Day 1 is the day AFTER issue. Prediction recursively covers two bridge days plus 60
+scored days. The three scored windows do not overlap. No hyperparameter selection is
+performed on these results. Their history has already been researched: all remain replay.
+
+Actual schema inspection found DWD/DWS only begin June 2026; ODS supplies the bounded
+Jan 1–Oct 1 historical daily facts. ODS January records were acquired/backfilled later;
+no claim of point-in-time access. A previous authorized monthly archive supplies
+observed positive-month eligibility, not unverified negative eligibility. Only >=4
+observed positive months qualifies the established candidate; absence is UNKNOWN or
+insufficient evidence, not a claim about production NEW_VISIBLE qualification.
+
+MLForecast 1.0.2 rejects null target inputs. Therefore unknown days stay null in the
+archive, while training is split into contiguous observed segments of >=56 days.
+Lags never bridge missing calendar dates. Prediction requires such a segment ending
+on the available cutoff. This is an implementation of the locked missing-history
+rule, not zero imputation. All eligible context objects are considered, not only core.
+
+Daily recursive training has ONE-day labels fully observed by the available cutoff.
+No incomplete 60-day labels enter training, tuning or model selection. No random split.
+Traffic uses lagged 28-day sums/means and order-count/session-event ratios; session
+events are not deduplicated visitors. Future covariates use fixed cutoff-available
+means, never actual future traffic/advertising. Budget/stock/activity remain UNKNOWN.
+
+The primary positive-actual hit denominator includes missing-model-output products.
+WAPE/Bias necessarily use scored pairs and disclose output/truth coverage. A secondary
+common-output comparison is explicit and cannot establish full-core business acceptance.
