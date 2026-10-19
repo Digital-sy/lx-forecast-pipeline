@@ -140,6 +140,22 @@ def make_segments(hist, qualified):
     return (pd.concat(result,ignore_index=True) if result else pd.DataFrame()),terminal,idmap
 
 
+def build_universe(d,m,lock,issue_text):
+    issue=pd.Timestamp(issue_text);cutoff=issue-pd.Timedelta(days=2)
+    selection=d[d.ds.le(cutoff)&d.ds.gt(cutoff-pd.Timedelta(days=90))]
+    life=lifecycle(m,issue);cores=[]
+    for shop in lock['shops']:
+        ss=selection[selection.shop.eq(shop)]
+        rank=ss[ss.mapped].groupby(['shop','spu']).agg(selection_qty=('y','sum'),selection_days=('ds','nunique'),
+            invalid_selection_days=('sales_state',lambda x:int((~x.isin(['OBSERVED','EXPLICIT_ZERO'])).sum()))).reset_index()
+        selected=select_core(rank,float(ss.y.sum()),lock['core_fraction'])
+        selected=selected.merge(life,on=['shop','spu'],how='left',validate='one_to_one')
+        selected['lifecycle']=selected.lifecycle.fillna('UNKNOWN');selected['maturity']=selected.maturity.fillna('UNKNOWN')
+        selected['category']='UNKNOWN';selected['issue_date']=issue_text
+        selected['shop_selection_total']=float(ss.y.sum());cores.append(selected)
+    return pd.concat(cores,ignore_index=True)
+
+
 def run(inputs, config, out, allow_exogenous=False):
     from lightgbm import LGBMRegressor
     from mlforecast import MLForecast
@@ -153,23 +169,18 @@ def run(inputs, config, out, allow_exogenous=False):
     dump(out/'run_manifest.json',{'started_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),
       'config_sha256':sha(config),'source_sha256':sha(__file__),'inputs':{p.name:sha(p) for p in inputs.glob('*.parquet')},
       'modelnames':modelnames,'status':'RUNNING'})
+    # Freeze every period's complete universe and core list before the first model fit.
+    universes={x:build_universe(d,m,lock,x) for x in lock['issue_dates']}
+    pre=pd.concat(universes.values(),ignore_index=True)
+    pre.to_csv(out/'pre_effect_universe.csv',index=False,encoding='utf-8-sig')
+    dump(out/'pre_effect_cohort_manifest.json',{'frozen_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        'universe_sha256':sha(out/'pre_effect_universe.csv'),'core_counts':pre[pre.is_core].groupby(['issue_date','shop']).size().to_dict().__str__()})
     for issue_text in lock['issue_dates']:
         issue=pd.Timestamp(issue_text);cutoff=issue-pd.Timedelta(days=2)
         hist=d[d.ds.le(cutoff)].copy();selection=hist[hist.ds.gt(cutoff-pd.Timedelta(days=90))]
         life=lifecycle(m,issue)
         qualified=set(map(tuple,life.loc[life.lifecycle.eq('ESTABLISHED'),['shop','spu']].to_numpy()))
-        cores=[]
-        for shop in lock['shops']:
-            ss=selection[selection.shop.eq(shop)]
-            rank=ss[ss.mapped].groupby(['shop','spu']).agg(selection_qty=('y','sum'),selection_days=('ds','nunique'),
-                   invalid_selection_days=('sales_state',lambda x:int((~x.isin(['OBSERVED','EXPLICIT_ZERO'])).sum()))).reset_index()
-            selected=select_core(rank,float(ss.y.sum()),lock['core_fraction'])
-            selected=selected.merge(life,on=['shop','spu'],how='left',validate='one_to_one')
-            selected['lifecycle']=selected.lifecycle.fillna('UNKNOWN');selected['maturity']=selected.maturity.fillna('UNKNOWN')
-            selected['category']='UNKNOWN';selected['issue_date']=issue_text
-            selected['shop_selection_total']=float(ss.y.sum())
-            cores.append(selected)
-        universe=pd.concat(cores,ignore_index=True);all_core.append(universe)
+        universe=universes[issue_text];all_core.append(universe)
         core=universe[universe.is_core].copy()
         train,terminal,idmap=make_segments(hist,qualified)
         forecasts={};days=pd.date_range(cutoff+pd.Timedelta(days=1),issue+pd.Timedelta(days=60))
