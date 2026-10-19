@@ -56,6 +56,10 @@ def prepare(archive, monthly_archive, out):
     df['ds']=pd.to_datetime(df.ds)
     numeric=[c for c in df if c not in ['ds','shop','spu','min_created_at','max_sync']]
     for c in numeric: df[c]=pd.to_numeric(df[c],errors='coerce')
+    feature_invalid={}
+    for c in ['ad_spend','ad_clicks','ad_orders','listing_sessions_sum','order_qty']:
+        feature_invalid[c]=int(df[c].lt(0).sum())
+        df[c]=df[c].where(df[c].ge(0))  # negative counts are UNKNOWN, never zero.
     if df.duplicated(['ds','shop','spu']).any(): raise ValueError('DUPLICATE_SOURCE_GRAIN')
     df['mapped']=df.spu.notna()&~df.spu.isin(INVALID_SPU)&~df.spu.astype(str).str.contains('[,，;；]',regex=True)
     df['sales_state']=np.select([df.null_qty.gt(0)|df.y.isna(),df.negative_qty.gt(0)|df.date_mismatch.gt(0)|df.deleted_rows.gt(0),df.y.eq(0)],['UNKNOWN','INVALID','EXPLICIT_ZERO'],default='OBSERVED')
@@ -80,7 +84,8 @@ def prepare(archive, monthly_archive, out):
              'max_countries_per_object_day':int(df.country_count.max()),
              'classification':'RECONSTRUCTED_HISTORICAL_REPLAY',
              'monthly_source_limitation':'previous authorized archive excludes missing SKU; never infer ineligible solely from absence',
-             'raw_receipts':receipts,'monthly_archive_sha256':sha(monthly_archive)}
+             'raw_receipts':receipts,'monthly_archive_sha256':sha(monthly_archive),
+             'negative_covariates_preserved_as_unknown':feature_invalid}
     daily_part=df.groupby(['shop','ds']).agg(objects=('spu','size'),units=('y','sum')).reset_index()
     daily_part.to_csv(out/'partition_coverage.csv',index=False,encoding='utf-8-sig')
     expected=pd.date_range('2026-01-01','2026-10-01')

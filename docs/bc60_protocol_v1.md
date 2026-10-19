@@ -99,3 +99,11 @@ means, never actual future traffic/advertising. Budget/stock/activity remain UNK
 The primary positive-actual hit denominator includes missing-model-output products.
 WAPE/Bias necessarily use scored pairs and disclose output/truth coverage. A secondary
 common-output comparison is explicit and cannot establish full-core business acceptance.
+
+Source quality handling before effects: invalid negative advertising counts are kept
+in raw evidence but become missing covariates, never zeros. No candidate may use them
+as physical negative clicks/orders. ODS is the single daily truth/feature definition;
+other layers and monthly truth are reconciliation references, not silently mixed
+replacements. Found mapping conflicts remain explicitly flagged; no string-based SKU
+repair, source JOIN or demand multiplication is performed. Reconstructed feature
+experiments do not establish historical advertising attribution finality.
