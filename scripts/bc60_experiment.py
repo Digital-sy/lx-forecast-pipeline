@@ -61,7 +61,7 @@ def prepare(archive, monthly_archive, out):
         feature_invalid[c]=int(df[c].lt(0).sum())
         df[c]=df[c].where(df[c].ge(0))  # negative counts are UNKNOWN, never zero.
     if df.duplicated(['ds','shop','spu']).any(): raise ValueError('DUPLICATE_SOURCE_GRAIN')
-    df['mapped']=df.spu.notna()&~df.spu.isin(INVALID_SPU)&~df.spu.astype(str).str.contains('[,，;；]',regex=True)
+    df['mapped']=df.spu.notna()&~df.spu.isin(INVALID_SPU)&~df.spu.astype(str).str.contains('[|,，;；]',regex=True)
     df['sales_state']=np.select([df.null_qty.gt(0)|df.y.isna(),df.negative_qty.gt(0)|df.date_mismatch.gt(0)|df.deleted_rows.gt(0),df.y.eq(0)],['UNKNOWN','INVALID','EXPLICIT_ZERO'],default='OBSERVED')
     df['category']='UNKNOWN'
     df['source_asof']=df['ds'].dt.strftime('%Y-%m-%d')
