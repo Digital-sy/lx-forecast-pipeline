@@ -98,7 +98,7 @@ can run. Failure affects that issue's diagnostic; it does not authorize refittin
 
 ## Verification performed before actual effects
 
-`tests/test_bc60_v2_b1.py` contains six synthetic tests; all passed with zero model
+`tests/test_bc60_v2_b1.py` initially contained six synthetic tests, all passed with zero model
 fits. They check raw targets and shifted features; identifier exclusion; reversed
 requested-ID order; 62 callback steps; first-step D0/D1 equality; distinct output
 and feedback; lag/rolling provenance transitions; unchanged history and restored
@@ -110,3 +110,31 @@ The saved feature trace includes all terminal context series at every step,
 per-feature observed and future-feedback source counts, cutoff proxy dates and
 value, raw output, clipped scored output and actual recursive feedback. Signed
 error growth is explicitly an arithmetic identity, not causal attribution.
+
+## Native representation correction after the first bounded run
+
+The first run preserved three unchanged fitted checkpoints before forecasting,
+then stopped its feature audit. It produced no successful D1 path and is retained
+as failure evidence. A bounded checkpoint inspection stopped in the before
+callback, before an estimator prediction. Lag alignment was exact; the discrepancy
+was comparing float32 rolling features against an unrounded float64 mean.
+
+Installed `utilsforecast/processing.py:702–713` converts integer target arrays to
+float32. Installed `mlforecast/grouped_array.py:166–175` casts each appended feedback
+array to the existing state dtype. These are representation rules of the original
+path, not target normalization or a V2 model change.
+
+The correction affects only the independent checker: it mirrors the native lag
+dtype and casts appended feedback within its audit buffer. The installed dependency
+is coreforecast 0.0.18. Its [versioned rolling implementation](https://raw.githubusercontent.com/Nixtla/coreforecast/v0.0.18/include/coreforecast/rolling.h)
+uses a sequential accumulator of the native type T and divides in that type;
+`MeanUpdate` recomputes the trailing window. The checker mirrors those arithmetic
+operations, because float64 accumulation followed by a float32 cast can differ by
+one float32 unit. Model inputs,
+fitted parameters, cutoff proxy, callback return, clipped scored predictions and
+the 1e−8 D0 reproduction threshold are unchanged. The trace now records both the
+callback feedback and native stored representation plus their rounding difference.
+
+A seventh no-fit synthetic regression exercises integer history through all 62
+steps on both paths. Recovery must load the three saved checkpoints, use a new
+output directory, and perform zero additional fits.

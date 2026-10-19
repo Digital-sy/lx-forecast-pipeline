@@ -20,7 +20,7 @@ class NeverFitPredictor(BaseEstimator):
         return x.lag1.to_numpy()+.25*x.rolling_mean_lag1_window_size7.to_numpy()-3
 
 
-def fixture():
+def fixture(integer_target=False):
     from mlforecast import MLForecast
     from mlforecast.lag_transforms import RollingMean
     history = pd.DataFrame([
@@ -29,6 +29,8 @@ def fixture():
         for uid, offset, shop in [("synthetic_b", 20, 1), ("synthetic_a", 5, 0)]
         for j, day in enumerate(pd.date_range("1999-10-01", periods=70))
     ])
+    if integer_target:
+        history["y"] = history.y.astype(np.int64)
     model = MLForecast(models={"B1": NeverFitPredictor()}, freq="D", lags=[1,7,14,28],
                        lag_transforms={1: [RollingMean(7), RollingMean(28)]},
                        date_features=["dayofweek", "month", "dayofyear"])
@@ -89,6 +91,20 @@ class B1CallbackTests(unittest.TestCase):
         terminal["synthetic_a"].loc[terminal["synthetic_a"].index[-1], "sales_state"] = "UNKNOWN"
         with self.assertRaisesRegex(ValueError, "28_KNOWN"):
             RecursionTrace("D1", list(terminal), terminal, idmap, cutoff, issue)
+
+    def test_integer_history_native_float32_62_step_regression(self):
+        model, _, _, terminal, idmap, cutoff, issue = fixture(integer_target=True)
+        d0, f0, checks0 = predict_traced(model, "D0", terminal, idmap, cutoff, issue)
+        d1, f1, checks1 = predict_traced(model, "D1", terminal, idmap, cutoff, issue)
+        self.assertEqual(checks0["native_recursive_state_dtype"], "float32")
+        self.assertEqual(checks1["native_recursive_state_dtype"], "float32")
+        self.assertEqual(len(d1), 124)
+        self.assertTrue(f1.recursive_feedback.eq(f1.cutoff_known28_mean).all())
+        np.testing.assert_array_equal(f1.recursive_feedback_native.to_numpy(), f1.recursive_feedback.to_numpy().astype(np.float32))
+        self.assertTrue(f0.recursive_feedback.eq(f0.model_output_nonnegative).all())
+        np.testing.assert_allclose(d0[d0.relative_day.eq(-1)].forecast, d1[d1.relative_day.eq(-1)].forecast, rtol=0, atol=1e-8)
+        self.assertLessEqual(checks0["feature_max_abs_difference"], 1e-8)
+        self.assertLessEqual(checks1["feature_max_abs_difference"], 1e-8)
 
     def test_misaligned_series_and_unclipped_feedback_rejected_or_detected(self):
         model, _, _, terminal, idmap, cutoff, issue = fixture()

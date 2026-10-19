@@ -100,6 +100,7 @@ class RecursionTrace:
         self.proxy = self.state.mean(axis=1)
         self.rows, self.captured, self.pending = [], [], None
         self.feature_max_abs_difference = 0.0
+        self.native_dtype = None
 
     def before(self, x):
         if self.pending is not None:
@@ -109,6 +110,14 @@ class RecursionTrace:
         if len(x) != len(self.order):
             raise ValueError("CALLBACK_ID_COUNT")
         np.testing.assert_array_equal(x.shop_code.to_numpy(), self.shop_codes)
+        # MLForecast 1.0.2 converts integer targets to float32; append preserves
+        # that dtype. Mirror representation in the independent audit buffer only.
+        # The estimator, callback return and scored output remain unchanged.
+        if self.native_dtype is None:
+            self.native_dtype = x.lag1.to_numpy().dtype
+            if self.native_dtype not in (np.dtype("float32"), np.dtype("float64")):
+                raise ValueError("UNEXPECTED_NATIVE_LAG_DTYPE")
+            self.state = self.state.astype(self.native_dtype)
         step = len(self.captured) + 1
         record = x.copy(deep=True).reset_index(drop=True)
         record["unique_id"] = self.order
@@ -124,6 +133,7 @@ class RecursionTrace:
             self._verify(record[calendar].to_numpy(), np.full(len(self.order), value))
         record["relative_day"] = step - 2
         record["cutoff_known28_mean"] = self.proxy
+        record["recursive_state_dtype"] = str(self.native_dtype)
         record["proxy_first_date"] = self.cutoff - pd.Timedelta(days=27)
         record["proxy_last_date"] = self.cutoff
         record["future_feedback_kind"] = ("MODEL_OUTPUT" if self.mode == "D0"
@@ -138,7 +148,12 @@ class RecursionTrace:
             record[f"{name}_source_date"] = self.cutoff + pd.Timedelta(days=step-lag)
         for width in ROLLING:
             name = f"rolling_mean_lag1_window_size{width}"
-            expected = self.state[:, -width:].mean(axis=1)
+            # coreforecast 0.0.18 MeanUpdate recomputes the tail window using a
+            # sequential accumulator of native type T, including float32.
+            expected = np.zeros(len(self.order), dtype=self.native_dtype)
+            for offset in range(-width, 0):
+                expected += self.state[:, offset]
+            expected /= self.native_dtype.type(width)
             self._verify(record[name].to_numpy(), expected)
             record[f"{name}_expected"] = expected
             record[f"{name}_observed_n"] = max(0, width-step+1)
@@ -166,10 +181,13 @@ class RecursionTrace:
         self.pending["model_output_raw"] = raw
         self.pending["model_output_nonnegative"] = scored
         self.pending["recursive_feedback"] = feedback
+        native_feedback = feedback.astype(self.native_dtype)
+        self.pending["recursive_feedback_native"] = native_feedback
+        self.pending["native_feedback_rounding_difference"] = native_feedback.astype(float)-feedback
         self.pending["negative_clipped"] = raw < 0
         self.rows.append(self.pending)
         self.pending = None
-        self.state = np.concatenate([self.state[:, -27:], feedback[:, None]], axis=1)
+        self.state = np.concatenate([self.state[:, -27:], native_feedback[:, None]], axis=1)
         return feedback
 
     def finish(self, returned, template, horizon=62):
@@ -198,6 +216,7 @@ def predict_traced(model, mode, terminal, idmap, cutoff, issue_date):
     output, features = trace.finish(returned, template)
     checks = {"steps": len(trace.captured), "context_series": len(order),
               "feature_max_abs_difference": trace.feature_max_abs_difference,
+              "native_recursive_state_dtype": str(trace.native_dtype),
               "no_identifier_model_features": True,
               "observed_history_never_replaced": True,
               "proxy_uses_cutoff_known28_only": True,
@@ -357,6 +376,9 @@ def run(archive, out, config=None, models_from=None, v2_config=None):
     versions = {name: importlib.metadata.version(name) for name in lock["candidate_libraries"]}
     if versions != lock["candidate_libraries"]:
         raise ValueError("ORIGINAL_LIBRARY_LOCK_MISMATCH")
+    auxiliary_versions = {name: importlib.metadata.version(name) for name in ("coreforecast", "utilsforecast")}
+    if auxiliary_versions["coreforecast"] != "0.0.18":
+        raise ValueError("AUDITED_COREFORECAST_ARITHMETIC_VERSION_MISMATCH")
     effects = archive/"effects_v1"
     original_manifest = json.loads((effects/"run_manifest.json").read_text(encoding="utf-8"))
     if (original_manifest["source_sha256"] != ORIGINAL_SOURCE_SHA256
@@ -392,6 +414,7 @@ def run(archive, out, config=None, models_from=None, v2_config=None):
                 "diagnostic_source_sha256": original.sha(__file__), "input_hashes": hashes,
                 "v2_config_sha256": original.sha(v2_config),
                 "original_artifact_hashes": artifacts, "versions": versions,
+                "auxiliary_versions": auxiliary_versions,
                 "callback_documentation": MODEL_CALLBACK_DOC,
                 "frozen_core_issue_n": len(core), "original_b1_missing_core_issue_n": int(original_missing),
                 "max_model_fits": 3, "actual_model_fits": 0, "issues": [], "errors": [],
