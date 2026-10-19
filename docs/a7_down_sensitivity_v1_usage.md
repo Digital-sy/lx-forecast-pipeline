@@ -28,6 +28,19 @@ python scripts/a7_down_sensitivity_v1.py --inventory /authorized/source_inventor
 
 所有输出是重建历史诊断，不是独立OOS，不证明资料当时可获取。原未来批次尚无实销真值，标记验收不能解释为准确率改善。
 
+## 既有实验结果的独立复核
+
+```sh
+python -m unittest discover -s tests -p 'test_assess_a7_down_sensitivity_v1.py' -v
+python scripts/assess_a7_down_sensitivity_v1.py --run-dir /authorized/completed_sensitivity_directory --output /authorized/new_assessment_directory
+```
+
+此步骤不调用任何预测器，也不搜索参数。独立从明细计算高低估、分母、共同评分集与保护组；门槛采用整数分子及精确有理数比较，不按显示精度判断。P1、P2和并集及各DOWN子集按同一共同评分集合输出，原群体不变。重点商品保持真实店铺，不将其他店铺误归JQ-US。
+
+全部H2/H3合并统计的实销分母是评价样本标签的和，同一目标月实际值可在两个Horizon重复出现；它不是去重后的公司销量总额。高低估件数也是样本误差累计，不是已产生的采购或库存损失。未知真值不参与误差计算但保留覆盖统计。不得横向比较不同模型各自覆盖分母的指标来替代共同样本比较。
+
+独立复核产物包含`assessment`、`comparisons`、`coverage`、`outcomes`、`top_risk`、`focus_metrics`、`focus_coverage`、`focus_detail`和`missing_candidates`的JSON/CSV，全部只在本地。数值不通过不等于证据等级已变高，也不自动触发新网格或模型迁移。
+
 ## 产物
 
 验证：`validation_summary.json`、`baseline_details.json/csv`、`contexts.json/csv`、`original_batch_tagged.json/csv`。
