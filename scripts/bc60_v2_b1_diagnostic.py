@@ -11,6 +11,7 @@ import datetime as dt
 import importlib.metadata
 import json
 import pathlib
+import shutil
 import time
 
 import numpy as np
@@ -52,6 +53,23 @@ def require_hash(path, expected):
     if actual != expected:
         raise ValueError(f"HASH_MISMATCH:{pathlib.Path(path).name}")
     return actual
+
+
+def persist_checkpoint(model, directory, recovery_source=None, expected_hashes=None):
+    """Recovery copies verified saved artifacts, avoiding 1.0.2 load/resave bug."""
+    directory = pathlib.Path(directory)
+    directory.mkdir()
+    if recovery_source is None:
+        model.save(directory)
+    else:
+        recovery_source = pathlib.Path(recovery_source)
+        if not expected_hashes or set(expected_hashes) - {"ts.pkl", "models.pkl", "intervals.pkl"}:
+            raise ValueError("UNEXPECTED_CHECKPOINT_FILES")
+        for name, expected in expected_hashes.items():
+            require_hash(recovery_source/name, expected)
+            shutil.copyfile(recovery_source/name, directory/name)
+            require_hash(directory/name, expected)
+    return {p.name: original.sha(p) for p in directory.iterdir() if p.is_file()}
 
 
 def future_template(model, terminal, horizon=62):
@@ -299,20 +317,27 @@ def stage_scores(daily):
 
 def summarize_stages(scores):
     rows = []
+    def full_core_metric(group):
+        values = original.metric(group)
+        values["scored_positive_truth_n"] = values["positive_truth_n"]
+        values["positive_truth_n"] = int(group.actual.gt(0).sum())
+        values["scored_zero_actual_n"] = values["zero_actual_n"]
+        values["zero_actual_n"] = int(group.actual.eq(0).sum())
+        return values
     slices = [(["model", "stage"], "overall"),
                         (["issue_date", "model", "stage"], "issue"),
                         (["shop", "model", "stage"], "shop")]
     slices += [([dimension, "model", "stage"], dimension) for dimension in ("lifecycle", "maturity") if dimension in scores]
     for dims, label in slices:
         for keys, group in scores.groupby(dims, dropna=False):
-            rows.append({"slice": label, "scope": "FULL_FROZEN_CORE", **dict(zip(dims, keys)), **original.metric(group),
+            rows.append({"slice": label, "scope": "FULL_FROZEN_CORE", **dict(zip(dims, keys)), **full_core_metric(group),
                          "hit_count": int(group.judgment.eq("HIT").sum()), "miss_count": int(group.judgment.eq("MISS").sum()),
                          "unjudged_count": int(group.judgment.eq("UNJUDGED").sum()),
                          "missing_output_count": int(group.prediction.isna().sum())})
     if "original_b1_available" in scores:
         for (model, stage), group in scores[scores.original_b1_available].groupby(["model", "stage"]):
             rows.append({"slice": "overall", "scope": "SECONDARY_ORIGINAL_369_B1_OUTPUTS", "model": model,
-                         "stage": stage, **original.metric(group),
+                         "stage": stage, **full_core_metric(group),
                          "hit_count": int(group.judgment.eq("HIT").sum()), "miss_count": int(group.judgment.eq("MISS").sum()),
                          "unjudged_count": int(group.judgment.eq("UNJUDGED").sum()),
                          "missing_output_count": int(group.prediction.isna().sum())})
@@ -423,6 +448,20 @@ def run(archive, out, config=None, models_from=None, v2_config=None):
                 "d1_feedback": "EACH_SERIES_28_KNOWN_DAYS_ENDING_AT_CUTOFF_MEAN",
                 "bridge_relative_days": [-1, 0], "all_claims_descriptive": True}
     write_json(out/"diagnostic_manifest.json", manifest)
+    # Always retain an A2 view computed directly from the unchanged V1 forecast,
+    # even if a later diagnostic interface check blocks D0/D1 execution.
+    archived_grids = []
+    for issue in lock["issue_dates"]:
+        grid = full_core_daily(core[core.issue_date.eq(issue)], issue,
+                               {"D0": archived_daily[archived_daily.issue_date.eq(issue)]}, daily, "NOT_RUN")
+        grid = grid[grid.model.eq("D0")].copy()
+        grid["model"] = "B1_ARCHIVED"
+        grid["source_daily_sha256"] = hashes["daily.parquet"]
+        grid["diagnostic_source_sha256"] = manifest["diagnostic_source_sha256"]
+        archived_grids.append(grid)
+    archived_stage_scores = stage_scores(pd.concat(archived_grids, ignore_index=True))
+    archived_stage_scores.to_csv(out/"archived_stage_scores.csv", index=False, encoding="utf-8-sig")
+    summarize_stages(archived_stage_scores).to_csv(out/"archived_stage_summary.csv", index=False, encoding="utf-8-sig")
     all_daily = []
     for issue in lock["issue_dates"]:
         cutoff = pd.Timestamp(issue)-pd.Timedelta(days=2)
@@ -464,9 +503,9 @@ def run(archive, out, config=None, models_from=None, v2_config=None):
                 elapsed = time.monotonic()-started
                 issue_manifest.update({"fit_mode": "ORIGINAL_B1_CONFIG_ONCE", "fit_seconds": elapsed})
             # Persist the fitted estimator BEFORE either recursive prediction.
-            model_dir.mkdir()
-            model.save(model_dir)
-            model_hashes = {p.name: original.sha(p) for p in model_dir.iterdir() if p.is_file()}
+            model_hashes = persist_checkpoint(model, model_dir,
+                               recovery_source=saved if models_from else None,
+                               expected_hashes=metadata["model_files"] if models_from else None)
             write_json(model_dir/"checkpoint.json", {"fingerprint": fingerprint,
                        "model_files": model_hashes, "saved_before_predictions": True, "created_at": utc_now()})
             issue_manifest["model_files"] = model_hashes

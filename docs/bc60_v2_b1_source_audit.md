@@ -138,3 +138,13 @@ callback feedback and native stored representation plus their rounding differenc
 A seventh no-fit synthetic regression exercises integer history through all 62
 steps on both paths. Recovery must load the three saved checkpoints, use a new
 output directory, and perform zero additional fits.
+
+The first recovery also exposed a public 1.0.2 load/resave defect before prediction:
+`forecast.py:1010` reads `_cs_df`, but `load` at lines 1027–1037 only creates that
+attribute when interval artifacts exist. The corrected recovery copies and verifies
+the already-saved checkpoint files instead of saving the loaded object again. It
+does not patch private model attributes. An eighth no-fit synthetic test exercises
+public save, public load, verified copying and both complete 62-step paths. Test
+fixture state injection is confined to synthetic tests. The final recovery retains
+both earlier failed directories, and an archive-only A2 stage table is written
+before prediction so that this descriptive result is available even on a blocker.

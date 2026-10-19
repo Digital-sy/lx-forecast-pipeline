@@ -1,5 +1,7 @@
 """Synthetic only: no estimator fit, production inputs, database, or network."""
 import unittest
+import pathlib
+import tempfile
 
 import numpy as np
 import pandas as pd
@@ -8,7 +10,7 @@ from sklearn.base import BaseEstimator
 from scripts.bc60_v2_b1_diagnostic import (
     FEATURES, RecursionTrace, compare_archived, curve_diagnostics,
     full_core_daily, future_template, predict_traced, stage_scores,
-    summarize_stages,
+    summarize_stages, persist_checkpoint,
 )
 
 
@@ -106,6 +108,25 @@ class B1CallbackTests(unittest.TestCase):
         self.assertLessEqual(checks0["feature_max_abs_difference"], 1e-8)
         self.assertLessEqual(checks1["feature_max_abs_difference"], 1e-8)
 
+    def test_public_checkpoint_load_predict_with_verified_copy_no_refit(self):
+        from mlforecast import MLForecast
+        model, _, _, terminal, idmap, cutoff, issue = fixture(integer_target=True)
+        # Supply the synthetic fitted-object fixture's interval marker solely so
+        # public save can run. Actual implementation never sets private fields.
+        model._cs_df = None
+        with tempfile.TemporaryDirectory(prefix="bc60_b1_checkpoint_") as temporary:
+            root = pathlib.Path(temporary)
+            hashes = persist_checkpoint(model, root/"original")
+            loaded = MLForecast.load(root/"original")
+            self.assertFalse(hasattr(loaded, "_cs_df"))
+            copied = persist_checkpoint(loaded, root/"recovered", root/"original", hashes)
+            self.assertEqual(copied, hashes)
+            d0, _, _ = predict_traced(loaded, "D0", terminal, idmap, cutoff, issue)
+            d1, _, _ = predict_traced(loaded, "D1", terminal, idmap, cutoff, issue)
+            self.assertEqual(len(d0), 124)
+            self.assertEqual(len(d1), 124)
+            np.testing.assert_allclose(d0[d0.relative_day.eq(-1)].forecast, d1[d1.relative_day.eq(-1)].forecast, rtol=0, atol=1e-8)
+
     def test_misaligned_series_and_unclipped_feedback_rejected_or_detected(self):
         model, _, _, terminal, idmap, cutoff, issue = fixture()
         _, order = future_template(model, terminal)
@@ -150,6 +171,8 @@ class B1CallbackTests(unittest.TestCase):
         summaries = summarize_stages(scores)
         overall = summaries[(summaries.slice.eq("overall")) & summaries.scope.eq("FULL_FROZEN_CORE")]
         self.assertTrue(overall.fixed_core_n.eq(2).all())
+        self.assertTrue(overall.positive_truth_n.eq(2).all())
+        self.assertTrue(overall.scored_positive_truth_n.eq(1).all())
         self.assertTrue((overall.hit_count+overall.miss_count+overall.unjudged_count).eq(2).all())
         curves, growth = curve_diagnostics(scores)
         self.assertEqual(len(curves), 10)
