@@ -32,4 +32,3 @@ python -m unittest tests.test_shadow_archive_contract tests.test_a16_shadow_once
 ```
 These tests verify synthetic contracts and source fingerprints, not successful
 future collection or an actual shadow run. A new batch needs separate approval.
-
