@@ -109,6 +109,27 @@ def run(data,validation,out):
             actual_units=q.actual_units.sum(),absolute_error=q.absolute_error.sum(),
             full_core_records=all_n,full_actual_units=o.a60.sum()))
     tables["ranking_support_coverage.csv"]=pd.DataFrame(coverage)
+    # Report label screening separately from loss of common-stratum overlap.
+    conditional_scope=[]
+    dimensions={"category":"current_category","season":"current_season",
+                "issue":"issue_month","calendar":"calendar_month"}
+    rawpair=b[b.calendar_mature & b.paired & b.window.eq("d01_60")]
+    for r in cond.itertuples():
+        for side in ["a","b"]:
+            value=getattr(r,"group_"+side)
+            g=rawpair[rawpair[dimensions[r.comparison]].astype(str).eq(str(value))]
+            raw_n=len(g);raw_units=g.actual.sum()
+            eligible_n=getattr(r,"full_"+side+"_n");eligible_units=getattr(r,"full_"+side+"_units")
+            kept_n=getattr(r,"kept_"+side+"_n");kept_units=getattr(r,"kept_"+side+"_units")
+            conditional_scope.append(dict(comparison=r.comparison,group_a=r.group_a,group_b=r.group_b,
+                side=side,group_value=value,raw_pair_n=raw_n,raw_pair_units=raw_units,
+                label_eligible_n=eligible_n,label_eligible_units=eligible_units,
+                label_excluded_n=raw_n-eligible_n,label_excluded_units=raw_units-eligible_units,
+                overlap_kept_n=kept_n,overlap_kept_units=kept_units,
+                overlap_excluded_n=eligible_n-kept_n,overlap_excluded_units=eligible_units-kept_units,
+                coverage_of_raw_pair=kept_units/raw_units if raw_units>0 else np.nan,
+                coverage_of_label_eligible=kept_units/eligible_units if eligible_units>0 else np.nan))
+    tables["conditional_scope_coverage.csv"]=pd.DataFrame(conditional_scope)
     # Same-product survivors: all pairs retained, not claimed to remove all confounding.
     surv=pd.read_parquet(data/"survivor_details.parquet")
     sr=[]
@@ -126,6 +147,9 @@ def run(data,validation,out):
                     cond.group_b.isin(["T恤","背心/吊带","连体衣"])]
     seasons=cond[cond.comparison.eq("season")]
     season_main=seasons[seasons.group_a.eq("春夏")&seasons.group_b.eq("秋冬")].iloc[0]
+    season_scope=tables["conditional_scope_coverage.csv"]
+    season_scope=season_scope[season_scope.comparison.eq("season")&season_scope.group_a.eq("春夏")&season_scope.group_b.eq("秋冬")]
+    raw_season_coverage=season_scope.set_index("side").coverage_of_raw_pair
     categoryraw=p60[p60.level.eq("category")].sort_values("direct_ae",ascending=False).head(8)
     seasonraw=p60[p60.level.eq("season")]
     rawmonth=p60[p60.level.eq("issue")]
@@ -151,7 +175,7 @@ def run(data,validation,out):
         "# DIRECT与F28：季节、品类交叉诊断及优化优先级",
         "## 首页：五个问题的回答",
         f"1. **品类与签发月份有明确的描述性差异，不能把它们排成因果影响力。** 同对象配对下，DIRECT的主要品类WAPE见下表；控制店铺、签发年月和货龄后的具体差异见共同层结果。季节与品类的重合程度见第4节实数表，不能把两个标签当成独立因素。所有标签均为CURRENT_NOT_POINT_IN_TIME。",
-        f"2. **可以识别同条件下的差异，不能独立分出季节、品类、经营的主次。** 春夏/秋冬在同店铺、年月、货龄及品类的共同层内，DIRECT加权WAPE分别为{season_main.direct_wape_a:.2%}和{season_main.direct_wape_b:.2%}；但只保留两组原配对实销的{season_main.a_unit_coverage:.2%}/{season_main.b_unit_coverage:.2%}。存在单条记录的小层，权重调整不是因果消混；年份、训练历史和商品构成仍共同变化。",
+        f"2. **可以识别同条件下的差异，不能独立分出季节、品类、经营的主次。** 春夏/秋冬在同店铺、年月、货龄及品类的共同层内，DIRECT加权WAPE分别为{season_main.direct_wape_a:.2%}和{season_main.direct_wape_b:.2%}；但只保留两组全部原配对实销的{raw_season_coverage['a']:.2%}/{raw_season_coverage['b']:.2%}。存在单条记录的小层，权重调整不是因果消混；年份、训练历史和商品构成仍共同变化。",
         f"3. **按互不重叠的店铺×品类×签发年月，DIRECT最大剩余60天绝对误差三组为：** {top_description}。这些是误差件数，不是独立采购损失。合并期间的{pooled_description}另构成主要研究范围，不能与月份单元重复累计。",
         f"4. **当前首要仍是总量偏差，分段分配也不能忽略。** DIRECT累计未命中的三类共{int(totalmiss.n.sum()):,}条，占其已知60天绝对误差{totalmiss.ae60.sum()/total_ae:.2%}；累计命中但分段不同时命中有{int(allocation.n):,}条，承载完整核心实销{allocation.actual_share:.2%}，分段绝对误差合计{allocation.ae_segments:,.0f}件。缺输出另有{int(unpred.n)}条、{unpred.actual_units:,.0f}件实销，不能当0误差。",
         "5. **下一次只优先测试：在DIRECT中受控加入签发前56/90天销量水平及其与近28天的变化信息，检验换季前后总量转折识别。** 不是给特定SPU抬高预测，也不是按当前季节标签加系数。冻结源码当前只显式使用28天内销量滞后、7/28天均值和日历；需要预登记单一输入增量、保留原DIRECT/F28及全核心范围，尤其保护真实衰退款。该方向是待验证假设，不是本轮已证明收益。",
@@ -178,6 +202,8 @@ def run(data,validation,out):
         "比较品类时保持店铺×签发年月×货龄相同；比较季节时再保持品类相同。只使用两组实际存在、实际销量分母为正的共同层。每层权重为两组该层实销之和÷全部共同层合计，两组及两模型用相同权重；没有补空单元，也没有按好坏选择层。",
         table(known_cond,["group_a","group_b","strata_n","kept_a_n","kept_b_n","a_unit_coverage","b_unit_coverage","direct_wape_a","direct_wape_b","f28_wape_a","f28_wape_b"],["a_unit_coverage","b_unit_coverage","direct_wape_a","direct_wape_b","f28_wape_a","f28_wape_b"]),
         table(seasons,["group_a","group_b","status","strata_n","kept_a_n","kept_b_n","a_products","b_products","a_unit_coverage","b_unit_coverage","direct_wape_a","direct_wape_b","support"],["a_unit_coverage","b_unit_coverage","direct_wape_a","direct_wape_b"]),
+        "上表a_unit_coverage/b_unit_coverage以标签足够完成分层的配对实销为分母，不等于排除标签前的全部配对实销。以下逐步对账；完整的各条件比较见conditional_scope_coverage.csv。未知标签对象仍在原始分层与完整核心中，没有被删除。",
+        table(season_scope,["group_value","raw_pair_n","raw_pair_units","label_excluded_n","label_excluded_units","label_eligible_n","overlap_kept_n","overlap_kept_units","coverage_of_raw_pair","coverage_of_label_eligible"],["coverage_of_raw_pair","coverage_of_label_eligible"]),
         "全年标签样本很少，与秋冬没有正分母共同层，不外推。春夏与秋冬虽达到展示支持筛查，但仅少量原样本实销进入共同层，最小层只有1条；不能将局部标准化差异推广到全部商品。",
         table(overlap[overlap.overlap.eq("category_season")&overlap.current_category.isin(["T恤","背心/吊带","连体衣"])],
               ["current_category","current_season","n","products","object_share","actual_share"],["object_share","actual_share"]),
@@ -204,7 +230,7 @@ def run(data,validation,out):
         table(known_m1,["issue_date","m1_train_dates","m1_train_span_days","m2_train_dates","m2_train_span_days"]),
         "训练跨度、样本商品和年份同步变化；同商品跨年或同货龄比较不能完全分离这些因素。未做新的解释模型、SHAP、显著性筛选或固定训练长度网格。",
         "## 7. 后续实验方向（本轮不执行）",
-        "**第一优先：签发前更长销量背景的单一输入增量。** 优先关注上述高贡献单元，同时保持全核心评价，不裁成这些成功/失败样本。第6节逐款记录提供总量偏差与经营变化的线索，不证明因果。原DIRECT仅有28天内信息，拟在不改变资格、训练标签和损失的条件下加入56/90天水平及相对28天的变化，事前固定定义；不把未来流量增长当输入，不先规定抬高或压低系数。",
+        "**第一优先：签发前更长销量背景的单一输入增量。** 优先关注上述高贡献单元，同时保持全核心评价，不裁成这些成功/失败样本。第6节逐款记录提供总量偏差与经营变化的线索，不证明因果。原DIRECT每次签发所用的销量滞后与均值特征只覆盖最近28天，训练样本另有较长历史；拟在不改变资格、训练标签和损失的条件下加入56/90天水平及相对28天的变化，事前固定定义。不把未来流量增长当输入，不先规定抬高或压低系数。",
         "签发前销量日期可由归档构造，但本轮档案没有当时实际获取证明，只能做重建验证；若进入前瞻实验，须冻结真实获取时间与修订版本。可能伤害近期持续衰退、历史高位刚回落的商品，尤其已经减少高估的T恤/秋冬样本。必须同时检查高估增加、低估减少、分段和累计±20%、零值及缺输出，不以只修好重点款为成功。当前数据不能证明56/90天特征一定有效，也不能证明它能预测尚未计划的活动或供给变化。",
         f"**第二优先：总量与两个分段的联合约束诊断。** 面向累计命中但分段未同时命中的对象，下一轮可事前定义总量与分段比例的联合训练/评价方案；必须保持原两段真实日期、禁止用目标期shape_ratio进行路由。此问题承载较多销量，但60天绝对误差占比低于总量未命中，因此排在第二。可能损害现已同时命中的{int(o.direct_joint_hit.sum())}条或真实突变商品，不能把F28平坦分段当答案。具体机制和预算需另行预登记，本轮不拟合。",
         f"{int(unpred.n)}条原资格不足对象属于全店目标的覆盖缺口，需与既有新品范围单列后续验收，不擅自改DIRECT资格或更改NEW_VISIBLE。它们并未从名单消失。",

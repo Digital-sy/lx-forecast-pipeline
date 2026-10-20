@@ -107,7 +107,7 @@ The report generator statically parses the frozen DIRECT feature declaration;
 it never imports or runs the forecasting entry point. The independent validator
 reads the original score records and checks the derived base and all metric
 cells through separate arithmetic. The supplementary checker verifies the
-eight report tables and source hashes again. This is a separate computation
+nine report tables and source hashes again. This is a separate computation
 path by the same executor, not a claim of second-person peer review.
 
 ### File dictionary
@@ -122,6 +122,10 @@ path by the same executor, not a claim of second-person peer review.
 - `layer_joint_once`: three-window joint hit once per object, not per window.
 - `conditional_comparisons` / `conditional_weights`: observed overlap only,
   explicit retained/excluded coverage and identical weights.
+- `report/conditional_scope_coverage`: separates the raw model-common population,
+  label-eligible population and retained common-stratum population. The original
+  conditional table's `full_*` denotes label-eligible rows, not all original
+  paired rows. Both unit-coverage denominators are exported explicitly.
 - `ranking_1_supported_error_rates`: supported pooled shop/category; duplicated
   `pair_n_x`/`pair_n_y` refer to metric/support joins and must match exactly.
 - `ranking_1_low_support_retained`: no small group is silently removed.

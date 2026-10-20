@@ -140,6 +140,35 @@ def run(data, report, receipt):
                 ae = sum(abs(p - a) for p, a in zip(g[predcol], g[truthcol]))
                 equal(getattr(r, model + "_" + period + "_wape"), ae / denom if denom > 0 else np.nan)
     checks["survivor_comparisons"] = len(survivor_metrics)
+    scopes = pd.read_csv(report / "conditional_scope_coverage.csv", dtype={
+        "group_a": str, "group_b": str, "group_value": str})
+    conditional = pd.read_csv(data / "conditional_comparisons.csv", dtype={
+        "group_a": str, "group_b": str})
+    dimensions = {"category": "current_category", "season": "current_season",
+                  "issue": "issue_month", "calendar": "calendar_month"}
+    for r in scopes.itertuples():
+        raw = pair[pair[dimensions[r.comparison]].astype(str).eq(r.group_value)]
+        eligible = raw
+        if r.comparison != "category":
+            eligible = raw[~raw.current_category.isin(["UNKNOWN", "CONFLICT", "", "未映射"])]
+        equal(r.raw_pair_n, len(raw))
+        equal(r.raw_pair_units, raw.a60.sum())
+        equal(r.label_eligible_n, len(eligible))
+        equal(r.label_eligible_units, eligible.a60.sum())
+        equal(r.label_excluded_n + r.label_eligible_n, r.raw_pair_n)
+        equal(r.label_excluded_units + r.label_eligible_units, r.raw_pair_units)
+        equal(r.overlap_kept_n + r.overlap_excluded_n, r.label_eligible_n)
+        equal(r.overlap_kept_units + r.overlap_excluded_units, r.label_eligible_units)
+        c = conditional[conditional.comparison.eq(r.comparison) &
+                        conditional.group_a.eq(r.group_a) & conditional.group_b.eq(r.group_b)]
+        assert len(c) == 1
+        equal(r.overlap_kept_n, c.iloc[0]["kept_" + r.side + "_n"])
+        equal(r.overlap_kept_units, c.iloc[0]["kept_" + r.side + "_units"])
+        for field, denominator in [("coverage_of_raw_pair", r.raw_pair_units),
+                                   ("coverage_of_label_eligible", r.label_eligible_units)]:
+            equal(getattr(r, field), r.overlap_kept_units / denominator if denominator > 0 else np.nan)
+    assert len(scopes) == 2 * len(conditional)
+    checks["conditional_full_scope_sides"] = len(scopes)
     checks["report_tables_verified"] = len(list(report.glob("*.csv")))
     result = {
         "status": "PASS_SUPPLEMENTARY_REPORT_TABLES",
