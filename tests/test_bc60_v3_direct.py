@@ -1,6 +1,8 @@
 """No-fit synthetic guards for the frozen direct cumulative experiment."""
 import unittest
 import tempfile
+import ast
+import inspect
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -17,6 +19,13 @@ def fixture():
 
 
 class DirectTests(unittest.TestCase):
+    def test_json_reads_are_explicit_utf8(self):
+        import scripts.bc60_v3_direct as module
+        tree=ast.parse(inspect.getsource(module))
+        calls=[n for n in ast.walk(tree) if isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and n.func.attr=='read_text']
+        self.assertGreaterEqual(len(calls),6)
+        for call in calls:self.assertTrue(any(k.arg=='encoding' and isinstance(k.value,ast.Constant) and k.value.value=='utf-8' for k in call.keywords))
+
     def test_no_repeat_formal_fit_reservation(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger=Path(tmp)/'ledger.json'

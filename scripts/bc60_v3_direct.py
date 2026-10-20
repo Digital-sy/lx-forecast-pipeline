@@ -138,7 +138,7 @@ class Context:
 
 def prepare(v1,v2,config,out):
     v1,v2,config,out=map(Path,(v1,v2,config,out))
-    lock=json.loads(config.read_text());base=Path(lock['base_config'])
+    lock=json.loads(config.read_text(encoding='utf-8'));base=Path(lock['base_config'])
     if sha(base)!=lock['base_config_sha256']:raise ValueError('BASE_CONFIG_HASH')
     if sha(Path('scripts/bc60_experiment.py'))!=lock['original_source_sha256']:raise ValueError('BASE_SOURCE_HASH')
     paths=[v1/'inputs_v1_final/daily.parquet',v1/'inputs_v1_final/monthly_reference.parquet',
@@ -146,7 +146,7 @@ def prepare(v1,v2,config,out):
            v2/'a_diagnostic_final/stage_scores.csv',v2/'a_diagnostic_final/daily_d0_d1.parquet',v2/'a_diagnostic_final/diagnostic_manifest.json']
     sources={str(p.resolve()):sha(p) for p in paths}
     if sha(paths[0])!=lock['daily_sha256'] or sha(paths[2])!=lock['core_sha256']:raise ValueError('INPUT_HASH')
-    baseconf=json.loads(base.read_text())
+    baseconf=json.loads(base.read_text(encoding='utf-8'))
     runtime={p:importlib.metadata.version(p) for p in baseconf['candidate_libraries']}
     if runtime!=baseconf['candidate_libraries']:raise ValueError('RUNTIME_MISMATCH')
     out.mkdir(exist_ok=False);(out/'train').mkdir();(out/'inference').mkdir()
@@ -219,7 +219,7 @@ def summarize(scores):
 
 
 def evaluate(prepared,predictions,out):
-    manifest=json.loads((prepared/'prepare_manifest.json').read_text());paths=list(manifest['sources'])
+    manifest=json.loads((prepared/'prepare_manifest.json').read_text(encoding='utf-8'));paths=list(manifest['sources'])
     d=pd.read_parquet(next(p for p in paths if p.endswith('daily.parquet')))
     core=pd.read_csv(prepared/'fixed_core.csv')
     orig=pd.read_csv(next(p for p in paths if p.endswith('effects_v1\\scores.csv') or p.endswith('effects_v1/scores.csv')))
@@ -301,12 +301,12 @@ def reserve_fit_run(ledger,out):
 
 def run(prepared,out,models_from=None):
     from lightgbm import LGBMRegressor, Booster
-    prepared,out=map(Path,(prepared,out));manifest=json.loads((prepared/'prepare_manifest.json').read_text())
+    prepared,out=map(Path,(prepared,out));manifest=json.loads((prepared/'prepare_manifest.json').read_text(encoding='utf-8'))
     for rel,digest in manifest['files'].items():
         if sha(prepared/rel)!=digest:raise ValueError('PREPARED_FILE_CHANGED:'+rel)
     for path,digest in manifest['sources'].items():
         if sha(path)!=digest:raise ValueError('ORIGINAL_FILE_CHANGED')
-    conf=json.loads((prepared/'frozen_config.json').read_text());lock=conf['v3']
+    conf=json.loads((prepared/'frozen_config.json').read_text(encoding='utf-8'));lock=conf['v3']
     core=pd.read_csv(prepared/'fixed_core.csv')
     for issue in lock['issue_dates']:
         for segment in ('M1','M2'):
@@ -318,7 +318,7 @@ def run(prepared,out,models_from=None):
     if models_from:
         models_from=Path(models_from)
         if not ledger.exists():raise ValueError('NO_PRIOR_FIT_LEDGER')
-        for f in json.loads((models_from/'fits.json').read_text()):recovery[(f['issue_date'],f['segment'])]=f
+        for f in json.loads((models_from/'fits.json').read_text(encoding='utf-8')):recovery[(f['issue_date'],f['segment'])]=f
     elif ledger.exists():raise RuntimeError('FORMAL_FITS_ALREADY_RESERVED_USE_CHECKPOINT_RECOVERY')
     out.mkdir(exist_ok=False);(out/'models').mkdir();start=now();clock=time.monotonic();fits=[];predictions=[]
     if not models_from:reserve_fit_run(ledger,out)
