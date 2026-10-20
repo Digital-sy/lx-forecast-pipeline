@@ -29,7 +29,8 @@ def metric(g):
     total=float(z.actual.sum());known=float(g.actual.sum());hit=g.decision.eq('HIT')
     pos=int(g.actual.gt(0).sum());zero=z.actual.eq(0)
     return dict(core_n=len(g),output_n=int(g.prediction.notna().sum()),truth_n=int(g.actual.notna().sum()),
-        missing_output_n=int(g.prediction.isna().sum()),unknown_truth_n=int(g.actual.isna().sum()),
+        missing_output_n=int(g.prediction.isna().sum()),missing_truth_n=int(g.actual.isna().sum()),
+        unknown_truth_n=int((g.actual.isna() & g.truth_status.ne('NOT_MATURED')).sum()) if 'truth_status' in g else int(g.actual.isna().sum()),
         not_matured_n=int(g.truth_status.eq('NOT_MATURED').sum()) if 'truth_status' in g else 0,
         scored_n=len(z),positive_truth_n=pos,hit_n=int(hit.sum()),miss_n=int(g.decision.eq('MISS').sum()),
         unjudged_n=int(g.decision.eq('UNJUDGED').sum()),hit_rate=hit.sum()/pos if pos else np.nan,
@@ -126,6 +127,9 @@ def run(inputs,prepared,effects,out,monthly_archive=None,v2=None):
             (['cohort_id','issue_month','lifecycle','model','window'],'qualification_issue'),
             (['cohort_id','issue_month','category','model','window'],'category_issue')]:
         for keys,g in scores.groupby(dims,dropna=False):metrics.append({'slice':label,**dict(zip(dims,keys)),**metric(g)})
+    mature=scores[pd.to_datetime(scores.target_end).le(truth_end)]
+    for keys,g in mature.groupby(['cohort_id','model','window'],dropna=False):
+        metrics.append({'slice':'overall_mature_overlapping_issue_records',**dict(zip(['cohort_id','model','window'],keys)),**metric(g)})
     csv(out/'metrics.csv',pd.DataFrame(metrics))
     joint=[]
     for keys,g in scores.groupby(KEY+['model'],dropna=False):
@@ -188,6 +192,21 @@ def run(inputs,prepared,effects,out,monthly_archive=None,v2=None):
                 after=float(y.mean()) if len(y)==60 and y.notna().all() else np.nan
                 o[col+'_input_daily_mean']=before;o[col+'_target_daily_mean']=after
                 o[col+'_ratio']=after/before if before>0 and np.isfinite(after) else np.nan
+            for prefix,frame in [('input',recent),('target',future)]:
+                expected=28 if prefix=='input' else 60
+                def total(field):
+                    v=frame[field] if field in frame else pd.Series(dtype=float)
+                    return float(v.sum()) if len(v)==expected and np.isfinite(v).all() and v.ge(0).all() else np.nan
+                def ratio(numerator,denominator):
+                    n=total(numerator);den=total(denominator)
+                    return n/den if np.isfinite(n) and den>0 else np.nan
+                o[prefix+'_order_session_ratio']=ratio('order_qty','listing_sessions_sum')
+                o[prefix+'_ad_cost_sales_ratio']=ratio('ad_spend','ad_sales_amt')
+                o[prefix+'_revenue_per_sold_unit_proxy']=ratio('sales_amt','y')
+                o[prefix+'_volume_weighted_price']=ratio('volume_weighted_price_numerator','priced_units')
+                o[prefix+'_zero_inventory_row_observations']=total('zero_inventory_observation_rows')
+            o['price_definition']='weighted available source prices; revenue/unit is only a proxy, neither proves a historical price decision'
+            o['inventory_definition']='zero row observations, not confirmed stockout duration; unknown historical coverage retained'
             oper.append(o)
     shape=pd.DataFrame(shapes);csv(out/'f28_shape_details.csv',shape);csv(out/'operating_indicators_diagnostic.csv',pd.DataFrame(oper))
     ss=[]
@@ -233,7 +252,7 @@ def run(inputs,prepared,effects,out,monthly_archive=None,v2=None):
                         fit_status='BASELINE_NO_FIT' if model in ['F28','WEEKDAY4'] else '|'.join(sorted(fs.status.unique())))
                     if g is not None:rec.update(metric(g))
                     else:rec.update({k:np.nan for k in metric(scores.iloc[:0])});rec['core_n']=qr.core_n
-                    rec['cell_status']='NOT_MATURED' if pd.Timestamp(rec['target_end'])>truth_end else qr.selection_status if g is None else 'HAS_SCORES' if g.prediction.notna().any() and g.actual.notna().any() else 'NO_PAIRED_OUTPUT_OR_TRUTH'
+                    rec['cell_status']='NOT_MATURED' if pd.Timestamp(rec['target_end'])>truth_end else qr.selection_status if g is None else 'HAS_SCORES' if (g.prediction.notna() & g.actual.notna()).any() else 'NO_PAIRED_OUTPUT_OR_TRUTH'
                     gridrows.append(rec)
     csv(out/'full_issue_status_grid.csv',pd.DataFrame(gridrows))
     make_side_panels(out,monthly_archive,v2)

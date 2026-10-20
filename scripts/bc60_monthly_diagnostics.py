@@ -44,7 +44,9 @@ def run(root,out,current_metadata=None):
         previous['later_issue_month']=(pd.PeriodIndex(previous.issue_month,freq='M')+lag).astype(str)
         previous=previous.rename(columns={x:'previous_'+x for x in ['issue_month','prediction','actual','absolute_error','decision']})
         z=s.merge(previous,left_on=['issue_month','shop','spu','model','window'],right_on=['later_issue_month','shop','spu','model','window'],validate='one_to_one')
-        z['comparison']=label
+        z['comparison']=label;z['scope']='DESCRIPTIVE_SURVIVOR_SELECTED_NOT_CAUSAL'
+        z['paired_known_truth']=z.actual.notna()&z.previous_actual.notna()
+        z['paired_output']=z.prediction.notna()&z.previous_prediction.notna()
         adjacent.append(z)
     pd.concat(adjacent,ignore_index=True).to_parquet(out/'survivor_adjacent_yoy.parquet',index=False)
     m=pd.read_csv(root/'scoring/metrics.csv');m=m[m.cohort_id.eq('monthly_core')&m.slice.eq('issue')]
@@ -56,7 +58,7 @@ def run(root,out,current_metadata=None):
             best=z[field].min() if field=='wape' else z[field].max();worst=z[field].max() if field=='wape' else z[field].min()
             for kind,value in [('BEST',best),('WORST',worst)]:
                 for r in z[z[field].eq(value)].itertuples():
-                    extremes.append(dict(model=model,window=window,criterion=field,kind=kind,issue_month=r.issue_month,value=value,core_n=r.core_n,scored_n=r.scored_n,hit_n=r.hit_n))
+                    extremes.append(dict(model=model,window=window,criterion=field,kind=kind,issue_month=r.issue_month,value=value,core_n=r.core_n,scored_n=r.scored_n,hit_n=r.hit_n,scope='DESCRIPTIVE_EXTREMES_NOT_A_ROUTING_STRATEGY'))
     csv(out/'best_worst_months.csv',pd.DataFrame(extremes))
     # Same-source day/month reconciliation: no filling absent source months with 0.
     daily=d[d.mapped&d.sales_state.isin(['OBSERVED','EXPLICIT_ZERO'])&np.isfinite(d.y)&d.y.ge(0)].copy()
@@ -68,7 +70,10 @@ def run(root,out,current_metadata=None):
     rec['difference']=rec.daily_units-rec.qty
     rec['status']=np.select([rec._merge.eq('left_only'),rec._merge.eq('right_only'),rec.known_days.ne(rec.expected_days),rec.difference.ne(0)],['MONTHLY_REFERENCE_ABSENT','DAILY_ABSENT','DAILY_PARTIAL_MONTH','SOURCE_DIFFERENCE'],default='EXACT')
     csv(out/'daily_monthly_reconciliation.csv',rec)
-    csv(out/'daily_monthly_reconciliation_summary.csv',rec.groupby(['month','status'],dropna=False).agg(objects=('spu','size'),daily_units=('daily_units','sum'),monthly_units=('qty','sum'),difference=('difference','sum')).reset_index())
+    csv(out/'daily_monthly_reconciliation_summary.csv',rec.groupby(['month','status'],dropna=False).agg(
+        objects=('spu','size'),known_daily_n=('daily_units','count'),known_monthly_n=('qty','count'),
+        comparable_n=('difference','count'),daily_units=('daily_units',lambda v:v.sum(min_count=1)),
+        monthly_units=('qty',lambda v:v.sum(min_count=1)),difference=('difference',lambda v:v.sum(min_count=1))).reset_index())
     # Ex-post operating signals are not pre-cutoff features or proof of decisions.
     oper=pd.read_csv(root/'scoring/operating_indicators_diagnostic.csv')
     bad=s[s.window.eq('d01_60')].merge(oper,on=KEY,validate='many_to_one')
