@@ -260,6 +260,7 @@ def run(root, validation, out):
     import pandas as pd
     import matplotlib.pyplot as plt
     from matplotlib.ticker import PercentFormatter
+    from matplotlib.dates import DateFormatter
     from IPython.display import display, Markdown
     for source, digest in PARAMETERS['hashes'].items():
         assert hashlib.sha256(Path(source).read_bytes()).hexdigest() == digest, source
@@ -277,6 +278,12 @@ def run(root, validation, out):
     pd.set_option('display.max_columns',16)
     FIGURES = Path(PARAMETERS['output']) / 'figures'
     FIGURES.mkdir(exist_ok=True)
+    def month_ticks(axis, dates):
+        unique = sorted(pd.to_datetime(pd.Series(dates).dropna()).unique())
+        if unique:
+            positions = np.unique(np.linspace(0, len(unique)-1, min(5,len(unique))).round().astype(int))
+            axis.set_xticks([unique[position] for position in positions])
+            axis.xaxis.set_major_formatter(DateFormatter('%Y-%m'))
     quality = frames['input_quality']
     grid = frames['grid']
     matured = grid.calendar_mature.astype(str).str.lower().eq('true')
@@ -378,6 +385,7 @@ def run(root, validation, out):
     axes[1].set_title('DIRECT label-window breadth');axes[1].set_ylabel('Maximum non-overlapping label windows')
     for axis in axes:
         axis.set_ylim(bottom=0);axis.grid(alpha=.18);axis.legend();axis.set_xlabel('Issue date')
+        month_ticks(axis, training.loc[training.train_span_days.notna(),'issue_date'])
     fig.savefig(FIGURES/'training_time_support.png',bbox_inches='tight');plt.show()
     ''')
     md('''
@@ -396,6 +404,7 @@ def run(root, validation, out):
     axis.set_xlabel('Issue date');axis.set_ylabel('Share within stated positive-pair denominator')
     axis.set_title('F28 equal-segment incompatibility · actual segment ratio > 1.5')
     axis.grid(alpha=.18);axis.legend(loc='upper left',bbox_to_anchor=(0,1.02),frameon=False)
+    month_ticks(axis, shape.loc[shape.object_share.notna() | shape.sales_share_positive_both.notna(),'issue_date'])
     fig.savefig(FIGURES/'f28_shape_limits.png',bbox_inches='tight');plt.show()
     display(shape[['issue_month','core_n','positive_both_n','incompatible_shape_n','object_share',
                    'sales_share_positive_both','zero_or_unknown_n']])
