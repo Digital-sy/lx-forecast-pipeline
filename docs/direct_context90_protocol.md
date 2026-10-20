@@ -106,7 +106,8 @@ The five screens versus frozen DIRECT, with unrounded values:
 2. Joint-hit count strictly higher.
 3. Joint-hit actual sales share not lower, identical denominator.
 4. Decline-proxy high-error rate not higher; denominator is same-group actual
-   units, not bias and not a selected positive-error subset.
+   60-day units, not bias and not a selected positive-error subset. The 60-day
+   rate is the primary screen; both 30-day rates remain mandatory disclosures.
 5. Output coverage and full-core retention not reduced.
 
 All conflicts remain visible. No threshold relaxation after results. An unknown
