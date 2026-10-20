@@ -71,6 +71,13 @@ class YearAgoTests(unittest.TestCase):
         q = e.contrast([0, 1, 0, np.nan, 4], [0, 0, 1, 0, 6])
         np.testing.assert_allclose(q, [0, 1, -1, np.nan, -.2], equal_nan=True)
 
+    def test_csv_round_trip_preserves_unchanged_predictions(self):
+        import io
+        values = [np.nextafter(.1, 1.), np.nextafter(1000., 0.), 12345.678901234567]
+        csv = pd.DataFrame({"prediction": values}).to_csv(index=False)
+        got = pd.read_csv(io.StringIO(csv), float_precision="round_trip").prediction.to_numpy()
+        np.testing.assert_array_equal(got, values)
+
     def test_segment_reference_is_distinct(self):
         d = daily(1.)
         t, u = e.annual_bounds("2025-07-02", "M2")[2:]

@@ -190,6 +190,16 @@ def effects(out, reviewed, destination):
     objects = pd.read_parquet(reviewed/"objects.parquet")
     detail = pd.read_parquet(reviewed/"paired_details.parquet")
     summary = e.read_json(reviewed/"summary.json")
+    baseline_exact = 0
+    for issue in detail.issue_date.unique():
+        parts = {s: pd.read_parquet(archive/"effects/slots"/f"{issue}_{s}"/"segment_predictions.parquet").set_index(["shop", "spu"])
+                 for s in ["M1", "M2"]}
+        for row in scores[scores.model.eq("DIRECT30x2") & scores.issue_date.eq(issue)].itertuples():
+            p1 = parts["M1"].loc[(row.shop, row.spu), "prediction"]
+            p2 = parts["M2"].loc[(row.shop, row.spu), "prediction"]
+            canonical = p1 if row.window == "d01_30" else p2 if row.window == "d31_60" else p1+p2
+            np.testing.assert_allclose(canonical, row.prediction, rtol=0, atol=0, equal_nan=True)
+            baseline_exact += 1
     joint_checks = 0
     for (issue, shop, spu, model), g in scores.groupby(KEY+["model"]):
         q = g.set_index("window")
@@ -237,6 +247,13 @@ def effects(out, reviewed, destination):
         assert len(g) == row.fixed_n
         np.testing.assert_allclose(delta.abs().sum(), row.ae, rtol=1e-13, atol=1e-8)
         np.testing.assert_allclose(delta.abs().sum()/denom if denom else np.nan, row.wape, equal_nan=True)
+        np.testing.assert_allclose(delta.sum()/denom if denom else np.nan, row.bias, equal_nan=True)
+        np.testing.assert_allclose(delta.clip(lower=0).sum(), row.over_units, rtol=1e-13, atol=1e-8)
+        np.testing.assert_allclose((-delta).clip(lower=0).sum(), row.under_units, rtol=1e-13, atol=1e-8)
+        hit = g.actual.gt(0) & g.prediction.notna() & ((g.prediction-g.actual).abs() <= .2*g.actual)
+        assert int(hit.sum()) == row.hit_n
+        np.testing.assert_allclose(g.loc[hit, "actual"].sum(), row.hit_actual, rtol=0, atol=0)
+        np.testing.assert_allclose(delta[g.loc[valid, "actual"].eq(0)].abs().sum(), row.zero_truth_ae, rtol=1e-13, atol=1e-8)
     e.verify_hashes(pm["sources"])
     dest.mkdir(exist_ok=False)
     e.dump(dest/"validation.json", {
@@ -244,6 +261,7 @@ def effects(out, reviewed, destination):
         "fallback_values_exact": fallback_values, "annual_values_exact": annual_values,
         "raw_truth_windows": truth_n, "joint_objects": joint_checks, "metric_rows": len(metrics),
         "actual_future_prediction_checks": future_predictions,
+        "baseline_archive_values_exact": baseline_exact,
         "gates_independently_reconciled": independently, "old_hashes_unchanged": True,
         "script_sha256": e.sha(__file__), "score_manifest_sha256": e.sha(reviewed/"score_manifest.json")})
     print("INDEPENDENT_EFFECT_VALIDATION_PASS", flush=True)

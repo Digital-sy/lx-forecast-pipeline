@@ -41,7 +41,9 @@ def score(out, diagnostic, destination):
     grid = pd.read_csv(out/"prepared/issue_grid.csv")
     issues = grid[grid.calendar_mature].issue_date.tolist()
     truth = original_score.daily_truth(pd.read_parquet(archive/"inputs/daily.parquet"), core, grid)
-    old = pd.read_csv(archive/"scoring/scores.csv")
+    # Preserve every archived floating prediction exactly; default CSV parsing
+    # can turn unchanged fallback rows into tiny artificial improvement/decline.
+    old = pd.read_csv(archive/"scoring/scores.csv", float_precision="round_trip")
     old = old[old.cohort_id.eq("monthly_core") & old.model.isin([BASE, "F28"])]
     chk = truth.merge(old[old.model.eq(BASE)][KEY+["window", "actual", "truth_status"]],
                       on=KEY+["window"], suffixes=("", "_old"), validate="one_to_one")
