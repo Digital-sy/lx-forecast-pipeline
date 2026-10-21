@@ -10,11 +10,12 @@ try:
 except ModuleNotFoundError:
     from blend50_prospective import read,sha,clock,dump_new
 
-def acquire(root,name,sql_file=None,plan_only=False):
+def acquire(root,name,sql_file=None,plan_only=False,proof_root=None):
     root=Path(root).resolve()
-    proof=read(root/'reproduction/reproduction_receipt.json')
+    proof_base=Path(proof_root).resolve() if proof_root else root
+    proof=read(proof_base/'reproduction/reproduction_receipt.json')
     if proof['status']!='PASS':raise ValueError('REPRODUCTION_REQUIRED')
-    if sha(root/'reproduction/prediction_seal.json')!=proof['generation_seal_sha256']:raise ValueError('REPRODUCTION_TAMPERED')
+    if sha(proof_base/'reproduction/prediction_seal.json')!=proof['generation_seal_sha256']:raise ValueError('REPRODUCTION_TAMPERED')
     for rel in ['source','source/attempts','source/receipts','source/raw']:(root/rel).mkdir(exist_ok=True)
     ev=root/'source/receipts';attempts=root/'source/attempts'
     if not name.replace('_','').replace('-','').isalnum():raise ValueError('NAME')
@@ -30,6 +31,8 @@ def acquire(root,name,sql_file=None,plan_only=False):
     if req['mode']=='metadata' and any(r['mode']=='metadata' and r.get('metadata_count',0)>0 for r in receipts):raise ValueError('METADATA_ALREADY_READ')
     probe=Path(__file__).with_name('blend50_source_probe.py').read_bytes()
     reservation={'at':clock(),'mode':req['mode'],'request':req,'probe_sha256':hashlib.sha256(probe).hexdigest(),
+                 'reproduction_receipt':str(proof_base/'reproduction/reproduction_receipt.json'),
+                 'reproduction_receipt_sha256':sha(proof_base/'reproduction/reproduction_receipt.json'),
                  'previous_selects':business,'previous_estimated_scan':spent}
     dump_new(attempts/(name+'.json'),reservation)
     receipt=dict(reservation,status='TRANSPORT_FAILED')
@@ -58,4 +61,4 @@ def acquire(root,name,sql_file=None,plan_only=False):
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--root',required=True);p.add_argument('--name',required=True)
-    p.add_argument('--sql-file');p.add_argument('--plan-only',action='store_true');acquire(**vars(p.parse_args()))
+    p.add_argument('--sql-file');p.add_argument('--proof-root');p.add_argument('--plan-only',action='store_true');acquire(**vars(p.parse_args()))
