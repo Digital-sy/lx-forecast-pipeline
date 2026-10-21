@@ -1,0 +1,19 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src 'none'; connect-src 'none'; object-src 'none'; base-uri 'none'">
+<title>销量预测误差方块图</title><style>/*__STYLE__*/</style></head><body>
+<header><h1>销量预测误差方块图</h1><p class="subtitle">按签发月份查看｜面积=实际销量｜颜色=绝对预测误差</p><div id="version" class="muted"></div><p class="notice">历史重建回放，非独立前瞻验证。图中已隐藏低销量记录，图内指标不是原全量验收成绩。跨期销量为“评估窗口实销权重”，不是去重经营销量。</p></header>
+<main><section class="controls" aria-label="统一筛选"><div class="filter-grid">
+<label>评价窗口<select id="window"></select></label><label>签发起月<select id="monthStart"></select></label><label>签发止月<select id="monthEnd"></select></label><label>店铺<select id="shop"></select></label><label>当前品类（描述性）<select id="category"></select></label><label>原货龄组<select id="maturity"></select></label>
+<label class="search-label">店铺×SPU搜索（仅高亮，不删除）<input id="search" type="search" placeholder="输入店铺名称或SPU" autocomplete="off"></label><label>统一显示缩放<select id="zoom"><option value="1">100%</option><option value="1.5">150%</option><option value="2">200%</option></select></label><button id="reset">重置筛选</button><button id="exportCSV">导出当前明细 CSV</button></div>
+<fieldset><legend>模型多选</legend><div id="models" class="model-picks"></div></fieldset></section>
+<section class="legend-panel"><div id="colorLegend"></div><div id="areaLegend"></div><p id="scopeNote" class="muted"></p><div id="filterAudit" class="audit-strip"></div><div id="searchInfo" role="status"></div></section>
+<details class="compare-wrap"><summary>同月份两模型并排比较</summary><div class="compare-controls"><label>左侧模型<select id="compareLeft"></select></label><label>右侧模型<select id="compareRight"></select></label><label>签发月份<select id="compareMonth"></select></label><button id="compareShow">查看并排图</button><button id="compareExport">导出并排 SVG</button></div><div id="comparison" class="compare-grid"></div></details>
+<details class="common-section"><summary>同样本比较 <small>仅汇总，主图缺预测占位不删除</small></summary><p id="commonNote" class="muted"></p><div id="commonTable" class="table-scroll"></div></details>
+<div id="charts"></div>
+<details id="unavailable"><summary>不可评价记录、未成熟与异常</summary><p class="muted">实销未知或未成熟不分配虚假面积；负预测、非数值及来源冲突单列，不补0。下表随当前窗口和分类筛选更新。</p><div id="unavailableTable" class="table-scroll"></div><button id="unavailableMore">显示更多记录</button></details>
+<details id="originalAudit"><summary>未过滤校验模式｜原全量口径（不改变上方图中范围）</summary><p class="muted">此区只复核20个成熟期全部核心对象，不应用低销量门槛或上方筛选。缺输出保留，WAPE只用实际可评分分母。原验收结论未被修改。</p><div id="auditTable" class="table-scroll"></div></details>
+<details><summary>数据来源、模型版本与定义</summary><div id="sources"></div><p>WAPE = Σ|预测−实销| / Σ实销，仅预测与实销均有效对象参与。完整展示命中率 = 未舍入误差≤20%的记录 / 当前满足门槛、实销已知的全部记录。缺预测不算命中，也不等于误差100%。颜色仅表达绝对误差；↑高估、↓低估。当前品类/季节仅为描述性标签，不代表历史属性。</p><p>面积 = k × 实销；边长 = √(k × 实销)。每个窗口统一k，跨月份、模型一致；筛选只隐藏，不重新装箱。窗口切换尺度可能变化，请看面积图例。60天除以2只用于门槛判断，不是自然月分摊。</p><p>无需网络、服务器、账户或安装软件。HTML内含真实业务数据，请勿上传公网。</p></details>
+</main><div id="tooltip" class="tooltip" role="tooltip" hidden></div><aside id="detail" hidden aria-label="对象详情"><button id="closeDetail">关闭详情 ×</button><div id="detailContent"></div></aside>
+<dialog id="monthDialog"><div class="dialog-head"><h2 id="dialogTitle"></h2><button id="closeDialog">关闭 ×</button></div><div id="dialogContent"></div></dialog>
+<footer>仅复用已验收预测。新训练0次 · 新推理0次 · 数据库查询0次 · 生产变更0项。</footer>
+<script id="reviewed-data" type="application/json">__REVIEWED_JSON__</script><script>/*__APP__*/</script></body></html>
