@@ -34,6 +34,7 @@ def validate(out):
         if not p.endswith('scores.parquet'): continue
         original = pd.read_parquet(p)
         for row in original.to_dict('records'):
+            if 'direct_context90_' in p and row['model']!='DIRECT_CONTEXT90':continue
             date = str(row['issue_date'])[:10]
             if not '2025-01-01' <= date < '2026-09-01': continue
             k=(date,row['shop'],row['spu'],aliases[row['model']],row['window'])

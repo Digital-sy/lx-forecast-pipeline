@@ -88,7 +88,9 @@ def load_sources(root):
         paths += [m, v, verify_file(m, 'scores.parquet')]
     core_p = verify_file(replay / 'prepared/prepare_manifest.json', 'core.parquet')
     truth_p = verify_file(context / 'scoring/score_manifest.json', 'independent_daily_truth.csv')
-    paths += [core_p, truth_p, replay / 'prepared/prepare_manifest.json']
+    old_csv = verify_file(replay / 'scoring/score_manifest.json', 'scores.csv')
+    paths += [core_p, truth_p, replay / 'prepared/prepare_manifest.json', old_csv,
+              replay / 'scoring/score_manifest.json', context / 'configuration.json']
     bv = read(blend / 'validation/validation.json')['truth_chain']
     chain = Path(bv['source_validation_path'])
     if sha(chain) != bv['source_validation_sha256']: raise ValueError('TRUTH_CHAIN_CHANGED')
@@ -98,6 +100,11 @@ def load_sources(root):
     c = mature(pd.read_parquet(context / 'scoring/scores.parquet'))
     core = mature(pd.read_parquet(core_p)); unique(core, KEY)
     truth = mature(pd.read_csv(truth_p, float_precision='round_trip')); unique(truth, KEY + ['window'])
+    old_exact = mature(pd.read_csv(old_csv, float_precision='round_trip'))
+    old_legacy = mature(pd.read_csv(old_csv))
+    old_exact = old_exact[old_exact.cohort_id.eq('monthly_core')]
+    old_legacy = old_legacy[old_legacy.cohort_id.eq('monthly_core')]
+    float_copy_audit = []
     # Confirm previously frozen baseline copies before combining archives.
     compare_cols = ['prediction', 'actual', 'target_start', 'target_end']
     for model in ['DIRECT30x2', 'F28']:
@@ -107,7 +114,20 @@ def load_sources(root):
         for col in compare_cols:
             x, y = l[col], r[col]
             if col.startswith('target_'): x, y = pd.to_datetime(x), pd.to_datetime(y)
-            if not ((x == y) | (x.isna() & y.isna())).all(): raise ValueError('BASELINE_COPY_CHANGED:' + col)
+            exact = (x == y) | (x.isna() & y.isna())
+            if not exact.all():
+                if col != 'prediction': raise ValueError('BASELINE_COPY_CHANGED:' + col)
+                raw = old_exact[old_exact.model.eq(model)].set_index(KEY + ['window']).sort_index().prediction
+                legacy = old_legacy[old_legacy.model.eq(model)].set_index(KEY + ['window']).sort_index().prediction
+                if not ((x == raw) | (x.isna() & raw.isna())).all(): raise ValueError('CANONICAL_FLOAT_COPY_CHANGED')
+                if not ((y == legacy) | (y.isna() & legacy.isna())).all(): raise ValueError('LEGACY_PARSER_NOT_EXPLANATION')
+                hx = l.actual.gt(0) & ((x-l.actual).abs()/l.actual).le(.2)
+                hy = r.actual.gt(0) & ((y-r.actual).abs()/r.actual).le(.2)
+                if not hx.eq(hy).all(): raise ValueError('COPY_PRECISION_CHANGES_HIT')
+                float_copy_audit.append(dict(model=model, changed_float_copies=int((~exact).sum()),
+                    max_absolute_difference=float((x-y).abs().max()), hit_changes=int((hx!=hy).sum()),
+                    cause='Exact reproduction of legacy default CSV parser versus round_trip; no tolerance-based hit change',
+                    selected='canonical round_trip baseline retained; only CONTEXT90 candidate read from context archive'))
     s = pd.concat([b, c[c.model.eq('DIRECT_CONTEXT90')]], ignore_index=True)
     s['model'] = s.model.map(ALIASES); unique(s, KEY + ['model', 'window'])
     if s.model.isna().any() or set(s.model) != set(MODELS): raise ValueError('MODEL_SET_CHANGED')
@@ -129,7 +149,7 @@ def load_sources(root):
     # Do not recompute or round archived 60-day predictions.
     if not ((p.d01_30 + p.d31_60).eq(p.d01_60) | p.isna().all(axis=1)).all(): raise ValueError('SEGMENT_SUM_CHANGED')
     if len(core) != 2820 or core.issue_date.nunique() != 20: raise ValueError('EXPECTED_ARCHIVE_SCOPE_CHANGED')
-    return s, core, before
+    return s, core, before, float_copy_audit
 
 
 def protect_shadow(path):
@@ -296,12 +316,13 @@ def run(root, output, shadow):
     if output.exists(): raise ValueError('OUTPUT_ALREADY_EXISTS')
     if root.resolve() not in output.resolve().parents: raise ValueError('OUTPUT_OUTSIDE_APPROVED_WORKSPACE')
     started = now()
-    s, core, sources = load_sources(root)
+    s, core, sources, float_copy_audit = load_sources(root)
     shadow_hashes = protect_shadow(shadow)
     objects = build_objects(s)
     if int(objects.paired.sum()) != 2579: raise ValueError('ORIGINAL_PAIR_SCOPE_CHANGED')
     tables = analyze(objects)
     output.mkdir(parents=False, exist_ok=False)
+    dump(output / 'float_copy_audit.json', float_copy_audit)
     objects.to_parquet(output / 'objects.parquet', index=False)
     objects.to_csv(output / 'objects.csv', index=False, encoding='utf-8-sig')
     s.to_parquet(output / 'historical_windows.parquet', index=False)

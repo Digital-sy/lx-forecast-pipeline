@@ -60,3 +60,30 @@ missing/zero, boundaries, segment stitching and duplicate keys.
 Only source, tests and this sanitized protocol enter an independent Git branch.
 Business inputs, results, models, source paths containing credentials, and
 prospective artifacts do not enter Git. Stop after this diagnostic.
+
+## Archive serialization finding
+
+The CONTEXT90 scoring code read old DIRECT/F28 CSV copies using pandas' default
+float parser. The later reviewed YEARAGO/GATE/BLEND50 archives retained the
+round-trip values. This diagnostic verifies both copies against their EXACT
+respective parses of the same hash-verified CSV, and verifies no hit changed.
+It selects the canonical round-trip baselines and only CONTEXT90's own candidate
+from that archive. No predictions are rounded, repaired, or tolerance-scored.
+
+## Reproduce in the existing isolated analytics environment
+
+Use the previously validated environment (pandas 2.2.3, numpy 2.2.6 and its
+existing pyarrow version); do not install into production. Run from this checkout:
+
+```powershell
+python -B -m unittest tests.test_core_model_complementarity -v
+python -B scripts/core_model_complementarity.py --archive-root '<local-archive-root>' --output '<new-exclusive-output>' --protected-shadow '<immutable-issued-batch>'
+python -B scripts/core_model_complementarity_validate.py --output '<new-exclusive-output>'
+python -B scripts/core_model_complementarity_report.py --output '<new-exclusive-output>'
+```
+
+The main computation refuses an existing output directory. Validation and report
+also refuse overwriting their respective existing artifacts. Reproduction creates
+no model forecasts and does not call a database, API, training or inference entry.
+The analyst must retain the frozen source tree. Output tables contain business
+data and must remain local, outside the source checkout.
