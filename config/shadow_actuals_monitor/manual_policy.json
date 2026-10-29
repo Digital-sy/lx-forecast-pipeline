@@ -1,0 +1,23 @@
+{
+  "schema_version": "shadow_actuals_monitor_v1",
+  "enabled_automation": false,
+  "execution_mode": "MANUAL_ONLY",
+  "business_timezone": "Asia/Shanghai",
+  "source_delay_days": 2,
+  "target_windows": "READ_FROM_IMMUTABLE_ISSUE_SEAL",
+  "revision_overlap_days": 1,
+  "source_query_chunk_days": 2,
+  "source_max_business_selects_per_manual_run": 30,
+  "source_max_estimated_scan_per_query": 1000000,
+  "source_max_estimated_scan_per_manual_run": 10000000,
+  "source_query_timeout_ms": 10000,
+  "recommendation_only": "One manual check daily after existing normal synchronization has completed. No fixed completion promise and no installed schedule.",
+  "score_requires": [
+    "complete_immutable_original_cohort",
+    "elapsed_full_target_window_plus_source_delay",
+    "verified_daily_source_and_mapping",
+    "complete_four_shop_sales_denominator"
+  ],
+  "unknown_policy": "RETAIN_UNKNOWN_NEVER_FILL_ZERO",
+  "manual_journal": "APPEND_ONLY_REAL_INGESTION_TIME_NOT_PROCUREMENT_APPROVAL"
+}
