@@ -105,6 +105,19 @@ class ShadowReviewTests(unittest.TestCase):
     def test_production_missing_is_explicit(self):
         self.assertEqual(review.production_reference(None,self.rows())['status'],'NOT_AVAILABLE')
 
+    def test_production_snapshot_time_not_published(self):
+        doc={'status':'NOT_COMPARABLE','records':[dict(shop='A',spu='S',target_month='2030-01',
+             forecast_qty=300,issue_date='2029-12-29',captured_at='2029-12-29 19:12:00',
+             published_at=None,input_cutoff=None)]}
+        ref=review.production_reference(doc,self.rows())['records'][0]
+        self.assertEqual(ref['captured_at'],'2029-12-29 19:12:00')
+        self.assertEqual(ref['issue_date'],'2029-12-29')
+        self.assertIsNone(ref['published_at'])
+        self.assertIn("['issue_date','快照日期']",review.SCRIPT)
+        self.assertIn("['captured_at','快照写入时间']",review.SCRIPT)
+        self.assertIn("?'UNKNOWN':r[k]",review.SCRIPT)
+        self.assertNotIn("['issue_date','签发日']",review.SCRIPT)
+
     def test_multiple_comparable_production_batches_rejected(self):
         row=self.rows().iloc[0]
         record=dict(shop=row.shop,spu=row.spu,target_start=row.target_start,target_end=row.target_end,
