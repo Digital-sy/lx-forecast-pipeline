@@ -1,0 +1,33 @@
+{
+  "runtime": {
+    "mlforecast": "1.0.2",
+    "lightgbm": "4.6.0",
+    "pandas": "2.2.3",
+    "numpy": "2.2.6",
+    "scikit-learn": "1.6.1"
+  },
+  "original": {
+    "lightgbm": {
+      "objective": "poisson",
+      "n_estimators": 200,
+      "learning_rate": 0.05,
+      "num_leaves": 31,
+      "min_child_samples": 40,
+      "reg_lambda": 1.0,
+      "random_state": 20261019,
+      "n_jobs": 2,
+      "deterministic": true,
+      "force_col_wise": true,
+      "verbosity": -1
+    }
+  },
+  "source_commit": "30115b38a6e8a38d95d28e425f202455e21feab3",
+  "l1_commit": "5168cbef58ea7ceaae894e4ba16b42872c4eb2ee",
+  "mean_commit": "b795e4a65d98a9311793c42cb22cefd0e18c9070",
+  "maximum_fits": 6,
+  "weights": {
+    "blend50": 0.5,
+    "l1": 0.5
+  },
+  "description": "研究影子预测；不用于自动采购；不替换生产"
+}
