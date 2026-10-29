@@ -119,7 +119,7 @@ def verify_fixture(fixture,out,release_manifest):
         # model_str avoids platform-specific filesystem path encoding behavior.
         booster=Booster(model_str=(folder/'model.txt').read_text(encoding='utf-8'))
         if booster.feature_name()!=slot['features']:raise ValueError('MODEL_FEATURE_ORDER')
-        raw=np.full(len(inf),np.nan);good=inf.input_status.eq('OK');raw[good]=booster.predict(inf.loc[good,slot['features']]);calls+=1
+        raw=np.full(len(inf),np.nan);good=inf.input_status.eq('OK');raw[good]=booster.predict(inf.loc[good,slot['features']],num_threads=2);calls+=1
         clipped=np.maximum(raw,0)
         checks.append(compare(clipped,ref.reference_prediction,slot['path']+':clipped'))
         if slot['raw_reference_available']:checks.append(compare(raw,ref.reference_raw,slot['path']+':raw'))
