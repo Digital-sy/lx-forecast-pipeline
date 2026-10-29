@@ -28,6 +28,21 @@ def exact(a,b,label):
 def verify_files(base,files):
     for name,h in files.items():
         if sha(Path(base)/name)!=h:raise ValueError('FILE_CHANGED:'+name)
+def release_binding(conf,validation_release_manifest=None,validator_path=None):
+    """Keep the immutable compute release; independently pin an optional validator release."""
+    code_path=Path(validator_path or __file__).resolve();compute_path=Path(conf['release_manifest']).resolve()
+    compute=read(compute_path);verify_files(compute_path.parent,compute['files'])
+    if sha(compute_path)!=conf['release_manifest_sha256']:raise ValueError('RELEASE_HASH')
+    if not compute.get('code_commit') or compute['code_commit']!=conf['code_commit']:raise ValueError('COMPUTE_COMMIT')
+    validation_path=Path(validation_release_manifest).resolve() if validation_release_manifest else compute_path
+    validation=read(validation_path);verify_files(validation_path.parent,validation['files'])
+    name='scripts/blend50_l1_server_validate.py'
+    if not validation.get('code_commit') or validation['files'].get(name)!=sha(code_path):raise ValueError('VALIDATOR_NOT_PINNED')
+    if (validation_path.parent/name).resolve()!=code_path:raise ValueError('VALIDATOR_LOCATION_NOT_PINNED')
+    return dict(compute_code_commit=compute['code_commit'],compute_release_manifest_sha256=sha(compute_path),
+        validator_code_commit=validation['code_commit'],validation_release_manifest=str(validation_path),
+        validation_release_manifest_sha256=sha(validation_path),separate_validation_release=validation_path!=compute_path,
+        validator_sha256=sha(code_path))
 def before_target(issue,at):
     z=pd.Timestamp(at)
     if z.tz is None:raise ValueError('TIMEZONE_REQUIRED')
@@ -40,8 +55,14 @@ def expected_values(d,y,l,gate):
     if (g&(~np.isfinite(d)|~np.isfinite(y))).any():raise ValueError('MISSING_GATE_TRUE_ENDPOINT')
     b=d.copy();b[g]=d[g]+.5*(y[g]-d[g]);return b,.5*b+.5*l
 def core_keys(daily,cutoff):
-    cutoff=pd.Timestamp(cutoff);start=cutoff-pd.Timedelta(days=89);d=daily[pd.to_datetime(daily.ds).between(start,cutoff)].copy()
-    unique(d,KEY+['ds']);keys=[];stats=[]
+    if daily[['shop','ds']].isna().any().any() or daily.shop.astype(str).str.strip().eq('').any():raise ValueError('UNKNOWN_SHOP_OR_DATE')
+    dates=pd.to_datetime(daily.ds,errors='raise')
+    if dates.isna().any():raise ValueError('UNKNOWN_SHOP_OR_DATE')
+    # Unmapped NULL SPU records remain in the whole-shop denominator, never in the ranked pool.
+    if (daily.spu.isna()&~daily.mapped.eq(False).fillna(False)).any():raise ValueError('MAPPED_OR_UNCONFIRMED_NULL_SPU')
+    cutoff=pd.Timestamp(cutoff);start=cutoff-pd.Timedelta(days=89);d=daily[dates.between(start,cutoff)].copy()
+    if d.duplicated(KEY+['ds']).any():raise ValueError('DUPLICATE_DAILY_KEY')
+    keys=[];stats=[]
     for shop in sorted(SHOPS):
         z=d[d.shop.eq(shop)];valid=z.sales_state.isin(['OBSERVED','EXPLICIT_ZERO'])&np.isfinite(z.y)&z.y.ge(0)
         if z.ds.nunique()!=90 or not valid.all():raise ValueError('CORE_SELECTION_SOURCE')
@@ -52,16 +73,14 @@ def core_keys(daily,cutoff):
         stats.append(dict(shop=shop,full_shop_units=total,selected_units=float(selected.y.sum()),core_n=len(selected),selection_coverage=float(selected.y.sum()/total),unmapped_units=float(z.loc[~z.mapped.eq(True),'y'].sum())))
     return pd.DataFrame(keys).sort_values(KEY).reset_index(drop=True),stats
 
-def run(root):
+def run(root,validation_release_manifest=None):
     root=Path(root).resolve();prep=root/'prepared';stage=root/'staging';target=stage/'independent_validation.json'
     if target.exists():raise ValueError('NO_VALIDATION_OVERWRITE')
     started=dt.datetime.now(dt.timezone.utc).isoformat();conf=read(prep/'config.json');before_target(conf['issue'],started)
     cutoff=pd.Timestamp(conf['issue'])-pd.Timedelta(days=2)
     if str(cutoff.date())!=conf['cutoff'] or conf['maximum_fits']!=6 or conf['future_truth_read'] is not False:raise ValueError('RUN_CONTRACT')
-    release=read(conf['release_manifest']);verify_files(Path(conf['release_manifest']).parent,release['files'])
+    binding=release_binding(conf,validation_release_manifest)
     if {name:importlib.metadata.version(name) for name in conf['runtime']}!=conf['runtime']:raise ValueError('RUNTIME_VERSION')
-    if sha(conf['release_manifest'])!=conf['release_manifest_sha256']:raise ValueError('RELEASE_HASH')
-    if release['files'].get('scripts/blend50_l1_server_validate.py')!=sha(__file__):raise ValueError('VALIDATOR_NOT_PINNED')
     for p,h in conf['sources'].items():
         if sha(p)!=h:raise ValueError('SOURCE_CHANGED:'+p)
     parity=read(conf['parity_receipt'])
@@ -154,8 +173,10 @@ def run(root):
     completed=dt.datetime.now(dt.timezone.utc).isoformat();before_target(conf['issue'],completed)
     for p,h in conf['sources'].items():
         if sha(p)!=h:raise ValueError('SOURCE_CHANGED_AT_END')
+    if sha(conf['release_manifest'])!=binding['compute_release_manifest_sha256'] or sha(binding['validation_release_manifest'])!=binding['validation_release_manifest_sha256']:raise ValueError('RELEASE_CHANGED_AT_END')
     out=dict(status='PASS',started_at=started,completed_at=completed,issue_date=conf['issue'],input_cutoff=conf['cutoff'],core_n=len(core),core_selection=coverage,formal_fits=fit_count,native_prediction_calls=native,reload_prediction_calls=reloads,training_rows_two_segments=training_rows,gate_true_n=int(gate.sum()),model_totals=totals,staging_manifest_sha256=sha(stage/'manifest.json'),prediction_sha256=sha(stage/'predictions.parquet'),release_manifest_sha256=conf['release_manifest_sha256'],validator_sha256=sha(__file__),validator_fits=0,validator_predictions=0,production_writes=0,future_actuals_read=False)
+    out.update(binding)
     write_new(target,out);print(json.dumps({k:out[k] for k in ['status','core_n','formal_fits','native_prediction_calls','reload_prediction_calls','gate_true_n']}));return out
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--root',required=True);a=p.parse_args();run(a.root)
+    p=argparse.ArgumentParser();p.add_argument('--root',required=True);p.add_argument('--validation-release-manifest');a=p.parse_args();run(a.root,a.validation_release_manifest)
