@@ -1,7 +1,7 @@
 """Export truth-free archived fixtures and verify six saved models; never fits."""
 from __future__ import annotations
 import argparse, datetime as dt, hashlib, importlib.metadata, json, shutil, sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import numpy as np
 import pandas as pd
 
@@ -21,6 +21,14 @@ def sha(p):
     with Path(p).open('rb') as f:
         for b in iter(lambda:f.read(4*1024*1024),b''):h.update(b)
     return h.hexdigest()
+def fixture_path(base,relative):
+    """Normalize archived Windows separators without allowing path escape."""
+    if not isinstance(relative,str) or not relative or '\x00' in relative:raise ValueError('INVALID_FIXTURE_PATH')
+    normalized=relative.replace('\\','/');parts=PurePosixPath(normalized)
+    if parts.is_absolute() or PureWindowsPath(relative).drive or '..' in normalized.split('/') or ':' in normalized:raise ValueError('UNSAFE_FIXTURE_PATH')
+    base=Path(base).resolve();target=base.joinpath(*parts.parts).resolve()
+    if target==base or base not in target.parents:raise ValueError('FIXTURE_PATH_ESCAPE')
+    return target
 def unique(d,k):
     if d[k].isna().any().any() or d.duplicated(k).any():raise ValueError('DUPLICATE_OR_UNKNOWN_KEY')
 def compare(a,b,label):
@@ -110,7 +118,7 @@ def verify_fixture(fixture,out,release_manifest):
     if manifest['absolute_tolerance']!=ABS_TOL or manifest['relative_tolerance']!=REL_TOL:raise ValueError('TOLERANCE_CHANGED')
     if importlib.metadata.version('lightgbm')!='4.6.0':raise ValueError('LIGHTGBM_VERSION')
     for p,h in manifest['files'].items():
-        if sha(fixture/p)!=h:raise ValueError('FIXTURE_HASH:'+p)
+        if sha(fixture_path(fixture,p))!=h:raise ValueError('FIXTURE_HASH:'+p)
     out.mkdir();started=now();checks=[];results={};calls=0
     for slot in manifest['slots']:
         folder=fixture/slot['path'];inf=pd.read_parquet(folder/'inference.parquet');ref=pd.read_parquet(folder/'reference.parquet');unique(inf,KEY);unique(ref,KEY)
@@ -152,7 +160,7 @@ def verify_fixture(fixture,out,release_manifest):
     pd.concat(pieces+[total],ignore_index=True).to_parquet(out/'combined_predictions.parquet',index=False)
     deployed_wide.to_parquet(out/'deployed_combination.parquet',index=False)
     for p,h in manifest['files'].items():
-        if sha(fixture/p)!=h:raise ValueError('FIXTURE_CHANGED')
+        if sha(fixture_path(fixture,p))!=h:raise ValueError('FIXTURE_CHANGED')
     result=dict(status='PASS',started_at=started,completed_at=now(),issue_date=manifest['issue_date'],objects=manifest['objects'],historical_fits=0,model_loads=len(manifest['slots']),prediction_calls=calls,checks=checks,discrete_keys_dates_status_gate_exact=True,deployed_pure_composition_verified=True,gate_true_n=int(gate.sum()),gate_false_n=int((~gate).sum()),synthetic_only=manifest['synthetic_required'],fixture_manifest_sha256=sha(fixture/'fixture_manifest.json'),release_manifest_sha256=sha(release_manifest),code_commit=release['code_commit'],python=sys.version,lightgbm=importlib.metadata.version('lightgbm'),numpy=np.__version__,pandas=pd.__version__,script_sha256=sha(__file__),files={p.name:sha(p) for p in out.iterdir() if p.is_file()})
     dump(out/'parity_result.json',result);print(json.dumps({k:result[k] for k in ['status','objects','historical_fits','model_loads','prediction_calls']}));return result
 

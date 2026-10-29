@@ -1,4 +1,4 @@
-import importlib.util, sys, unittest
+import importlib.util, sys, tempfile, unittest
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -7,6 +7,13 @@ P=Path(__file__).resolve().parents[1]/'scripts/blend50_l1_server_parity.py'
 spec=importlib.util.spec_from_file_location('parity',P);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 
 class ParityTests(unittest.TestCase):
+    def test_windows_manifest_paths_normalize_and_cannot_escape(self):
+        with tempfile.TemporaryDirectory() as folder:
+            base=Path(folder);dest=base/'DIRECT_M1'/'inference.parquet';dest.parent.mkdir();dest.write_bytes(b'fixture')
+            self.assertEqual(m.fixture_path(base,r'DIRECT_M1\inference.parquet'),dest.resolve())
+            self.assertEqual(m.sha(m.fixture_path(base,r'DIRECT_M1\inference.parquet')),m.sha(dest))
+            for bad in [r'..\outside',r'DIRECT_M1\..\outside','/etc/passwd',r'C:\outside',r'C:outside',r'\\server\share\outside','.',r'\outside']:
+                with self.subTest(path=bad),self.assertRaises(ValueError):m.fixture_path(base,bad)
     def test_gate_false_still_combines_l1(self):
         b,p=m.combine([10.],[99.],[20.],[False]);self.assertEqual(b[0],10.);self.assertEqual(p[0],15.)
     def test_gate_true_uses_original_blend_arithmetic(self):
