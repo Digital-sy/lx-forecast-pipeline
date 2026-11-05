@@ -1,14 +1,3 @@
-# B2024 中文候选最终展示兜底
+# Superseded: direct B2024 display copy
 
-基线 writer SHA256：39372329a115153bb216cada430a8522e42749242323cd842adad7dcbd766051。
-
-只改变“颜色-领星”的最终展示：
-1. 已验证的库存旧新代码关系与领星来源颜色，优先保留。
-2. 原允许状态下同面料唯一名称匹配，优先保留。
-3. 上述结果最终为空，且 B2024 中文候选为非空文本时，复制候选原文作展示兜底；不创造数字编号。
-4. B2024 候选为空、未知或非文本时保持空白。总量行候选原本为空，保持空白。
-
-该字段因此是参考展示列。无编号的候选兜底不代表领星来源已匹配，也不能证明原颜色体系应改变。代码匹配、唯一名称匹配和 B2024 展示兜底分别计数，后者在日志中明确标记“非已验证领星匹配”。不添加字段或改变字段类型，不改颜色体系、代码、库存、需求或计算。
-
-来源读取的空源、异常、预算门禁保留，不能用展示兜底绕过抓取失败。
-本候选仅做本地 AST 隔离回归，不运行生产入口、不调用真实数据库或飞书，不部署。
+The direct-copy fallback has been withdrawn. A B2024 candidate is a lookup key only; return a unique real Lingxing source value with a source SKU, or leave the reference empty. See b2024_real_source_correction.md. Historical commits remain available for audit.

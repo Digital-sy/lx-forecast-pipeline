@@ -193,3 +193,20 @@ def resolve_name_reference(record: Mapping[str, Any], index: NameIndex) -> dict[
     if not match.get('value'):
         return result('SOURCE_COLOR_UNAVAILABLE', chosen, normalized, match)
     return result('NAME_MATCHED', chosen, normalized, match)
+
+
+def resolve_b2024_name_reference(record: Mapping[str, Any], index: NameIndex) -> dict[str, str]:
+    """Search B2024 alone in the same complete fabric and real source index.
+
+    This is a final lookup, not direct display fallback. Ignore primary/A2023
+    names only in a private copy; reuse all original uniqueness, source-value,
+    terminal-色 and fabric checks. Never change the business record or invent a
+    source number. A conflict in the name index remains a conflict.
+    """
+    fields = record.get('fields', record) if isinstance(record, Mapping) else {}
+    fields = dict(fields) if isinstance(fields, Mapping) else {}
+    fields['中文颜色名称'] = ''
+    fields['A2023中文候选'] = ''
+    result = resolve_name_reference(fields, index)
+    result['reference_basis'] = 'B2024_ONLY'
+    return result

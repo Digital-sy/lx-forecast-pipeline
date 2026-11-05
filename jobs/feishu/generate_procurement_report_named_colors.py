@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """采购建议主入口：颜色名称来自 A2023/B2024 颜色编制表。
 
-颜色-领星优先展示已核验代码/唯一名称匹配；最终空值使用 B2024
-中文候选原文展示兜底。该兜底不是已验证领星匹配，不生成数字编号。
+颜色-领星优先展示代码/唯一名称匹配；最终空值使用 B2024 中文候选
+在同面料真实领星来源内再次查唯一名称。无真实源、歧义或冲突保持空白。
 """
 from __future__ import annotations
 
@@ -17,7 +17,9 @@ from jobs.feishu import generate_procurement_report_lx_color as base
 from jobs.feishu import generate_fabric_forecast_named_colors as named_fabric
 from jobs.feishu.color_mapping_catalog import ColorMappingCatalog
 from jobs.feishu.fabric_lingxing_color_reference import build_aliases, resolve_reference
-from jobs.feishu.fabric_lingxing_name_reference import build_name_index, resolve_name_reference
+from jobs.feishu.fabric_lingxing_name_reference import (
+    build_name_index, resolve_name_reference, resolve_b2024_name_reference,
+)
 
 logger = get_logger("procurement_report_named_colors")
 
@@ -154,7 +156,8 @@ async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
     pending = 0
     name_matched = 0
     code_matched = 0
-    b2024_display_fallback = 0
+    b2024_matched = 0
+    b2024_status_counts = {}
     for record in db_rows:
         system = str(record.get("颜色体系") or "").strip()
         code = str(record.get("颜色缩写") or "").strip()
@@ -184,12 +187,21 @@ async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
             if name_reference["status"] == "NAME_MATCHED":
                 lx_color = name_reference["value"]
                 name_matched += 1
-        # Display-only fallback: do not treat the candidate name as verified
-        # Lingxing identity, infer a number, or change the record color system.
-        b2024_candidate = info.get("B2024中文候选")
-        if not lx_color and isinstance(b2024_candidate, str) and b2024_candidate.strip():
-            lx_color = b2024_candidate
-            b2024_display_fallback += 1
+        # Final fallback still requires a unique real source SKU. The B2024
+        # candidate is a search key, never a value to copy into the output.
+        if not lx_color:
+            b2024_record = dict(record)
+            b2024_record["B2024中文候选"] = info.get("B2024中文候选")
+            b2024_reference = resolve_b2024_name_reference(b2024_record, name_index)
+            b2024_status = b2024_reference["status"]
+            b2024_status_counts[b2024_status] = b2024_status_counts.get(b2024_status, 0) + 1
+            if (b2024_status == "NAME_MATCHED" and b2024_reference.get("source_sku")
+                    and b2024_reference.get("value")):
+                lx_color = b2024_reference["value"]
+                b2024_matched += 1
+                logger.info("B2024候选领星来源匹配：面料=%s，原体系=%s，原码=%s，来源SKU=%s，方法=%s",
+                            record.get("面料编号"), system, code,
+                            b2024_reference["source_sku"], b2024_reference.get("match_method"))
         feishu_records.append({
             "统计类型": record.get("统计类型") or "",
             "面料": record.get("面料") or "",
@@ -224,7 +236,7 @@ async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
 
     logger.info(f"颜色编制表中文名称匹配：{mapped}/{len(db_rows)} 条；体系待定 {pending} 条")
     logger.info("领星颜色参考已核验匹配：代码 %s 条，唯一名称 %s 条", code_matched, name_matched)
-    logger.info("B2024中文候选展示兜底：%s 条；非已验证领星匹配，不生成编号", b2024_display_fallback)
+    logger.info("B2024候选领星来源唯一匹配：%s 条；查找状态=%s", b2024_matched, b2024_status_counts)
     await client.delete_all_records()
     written = await client.write_records(feishu_records, batch_size=500)
     logger.info(f"✓ 飞书面料预估明细写入 {written} 条（中文颜色名称+颜色体系）")

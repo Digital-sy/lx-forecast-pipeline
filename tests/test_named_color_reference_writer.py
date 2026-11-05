@@ -160,6 +160,7 @@ class Harness:
         self.env = dict(base=self.base, db_cursor=self.cursor, re=re,
                         build_name_index=lambda *args: {},
                         resolve_name_reference=lambda *args: {"status":"NAME_UNMAPPED","value":""},
+                        resolve_b2024_name_reference=lambda *args: {"status":"NAME_NOT_FOUND","value":"","source_sku":""},
                         ColorMappingCatalog=SimpleNamespace(from_runtime=lambda:SimpleNamespace(describe=describe)),
                         logger=SimpleNamespace(info=lambda *a, **k:None, warning=lambda *a, **k:None),
                         build_aliases=helper["build_aliases"], resolve_reference=helper["resolve_reference"],
@@ -216,12 +217,10 @@ class NamedReferenceWriterTests(unittest.TestCase):
         self.assertEqual(new.output[0]["颜色-领星"], "101#测试蓝")
         self.assertEqual(new.output[1]["颜色-领星"], "202#测试粉")
 
-    def test_total_blank_and_unresolved_rows_only_get_b2024_display(self):
+    def test_unresolved_rows_remain_blank_without_real_b2024_source(self):
         result = Harness().run()
-        for i in [2, 4, 5, 6]:
-            self.assertEqual(result.output[i]["颜色-领星"], result.output[i]["B2024中文候选"], i)
-            self.assertNotIn("#", result.output[i]["颜色-领星"])
-        self.assertEqual(result.output[3]["颜色-领星"], "")
+        for i in [2, 3, 4, 5, 6]:
+            self.assertEqual(result.output[i]["颜色-领星"], "", i)
         self.assertEqual(result.output[3]["颜色映射状态"], "总量行")
 
     def test_zero_inventory_does_not_remove_reference_or_business_rows(self):
@@ -269,10 +268,10 @@ class NamedReferenceWriterTests(unittest.TestCase):
         with self.assertRaises(RuntimeError): h.run()
         self.assertEqual((h.deleted,h.writes),(0,0))
 
-    def test_partial_reference_missing_uses_only_candidate_display(self):
+    def test_partial_reference_missing_without_source_stays_blank(self):
         available=colors();del available[FABRIC+"-BL"]
         result=Harness(color_map=available).run()
-        self.assertEqual(result.output[0]["颜色-领星"],"B-HP")
+        self.assertEqual(result.output[0]["颜色-领星"],"")
         self.assertEqual(result.output[1]["颜色-领星"],"202#测试粉")
         self.assertEqual(len(result.output),len(business_rows()))
 

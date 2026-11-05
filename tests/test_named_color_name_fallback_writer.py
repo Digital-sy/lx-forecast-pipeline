@@ -71,6 +71,7 @@ class NameHarness(Harness):
         self.names = copy.deepcopy([source()] if names is None else names)
         self.name_requests = []
         self.fallback_calls = []
+        self.b2024_calls = []
         self.name_error = name_error
         self.infos = infos or {}
         helper = pure_name_helper()
@@ -80,6 +81,10 @@ class NameHarness(Harness):
             self.fallback_calls.append(copy.deepcopy(r))
             return helper['resolve_name_reference'](r, idx)
         self.env['resolve_name_reference'] = resolve
+        def resolve_b(r, idx):
+            self.b2024_calls.append(copy.deepcopy(r))
+            return helper['resolve_b2024_name_reference'](r, idx)
+        self.env['resolve_b2024_name_reference'] = resolve_b
         def describe(system, code):
             return copy.deepcopy(self.infos.get((system, code), info()))
         self.env['ColorMappingCatalog'] = SimpleNamespace(from_runtime=lambda:SimpleNamespace(describe=describe))
@@ -112,19 +117,17 @@ class NameWriterTests(unittest.TestCase):
         self.assertEqual(h.output[0]['颜色-领星'], '18#英伦庄园蓝')
         self.assertEqual(h.fallback_calls, [])
 
-    def test_alias_conflict_not_bypassed(self):
+    def test_alias_conflict_requires_independent_unique_b_source(self):
         inv = [inventory('EM','X1','TEST_X1'), inventory('EM','X2','TEST_X2'), inventory()]
         cmap = {FAB+'-EM':'18#英伦庄园蓝', FAB+'-X1':'1#红', FAB+'-X2':'2#绿'}
         h = NameHarness(inv=inv, color_map=cmap).run()
-        self.assertEqual(h.output[0]['颜色-领星'], '英伦庄园蓝')
-        self.assertNotIn('#', h.output[0]['颜色-领星'])
+        self.assertEqual(h.output[0]['颜色-领星'], '18#英伦庄园蓝')
         self.assertEqual(h.fallback_calls, [])
 
-    def test_known_alias_missing_source_not_bypassed(self):
+    def test_known_alias_missing_source_can_use_unique_b_source(self):
         inv = [inventory('EM','MISS','TEST_MISS'), inventory()]
         h = NameHarness(inv=inv).run()
-        self.assertEqual(h.output[0]['颜色-领星'], '英伦庄园蓝')
-        self.assertNotIn('#', h.output[0]['颜色-领星'])
+        self.assertEqual(h.output[0]['颜色-领星'], '18#英伦庄园蓝')
         self.assertEqual(h.fallback_calls, [])
 
     def test_unknown_system_can_use_unambiguous_catalog_candidate(self):
@@ -132,15 +135,13 @@ class NameWriterTests(unittest.TestCase):
         self.assertEqual(h.output[0]['颜色-领星'], '18#英伦庄园蓝')
         self.assertEqual(h.output[0]['颜色体系'], '待定')
 
-    def test_multiple_candidate_names_no_match_but_b_display_only(self):
+    def test_multiple_normal_candidate_names_require_b_only_source_lookup(self):
         h = NameHarness(infos={('A2023','EM'):info('', '红', '英伦庄园蓝')}).run()
-        self.assertEqual(h.output[0]['颜色-领星'], '英伦庄园蓝')
-        self.assertNotIn('#', h.output[0]['颜色-领星'])
+        self.assertEqual(h.output[0]['颜色-领星'], '18#英伦庄园蓝')
 
-    def test_duplicate_name_skus_no_match_but_b_display_only(self):
+    def test_duplicate_name_skus_still_blank_after_b_only_lookup(self):
         h = NameHarness(names=[source(), source('OTHER')]).run()
-        self.assertEqual(h.output[0]['颜色-领星'], '英伦庄园蓝')
-        self.assertNotIn('#', h.output[0]['颜色-领星'])
+        self.assertEqual(h.output[0]['颜色-领星'], '')
 
     def test_total_row_never_gets_name_reference(self):
         h = NameHarness(rows=[row(kind='总量')]).run()
