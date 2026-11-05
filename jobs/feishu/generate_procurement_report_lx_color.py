@@ -29,8 +29,11 @@ def parse_lingxing_color(product_name: str) -> str:
     return re.sub(r"\s+", "", match.group(1).strip()) if match else ""
 
 
-def read_lingxing_color_map() -> Dict[str, str]:
+def read_lingxing_color_map(sku_keys: Sequence[str] = None) -> Dict[str, str]:
     color_map: Dict[str, str] = {}
+    keys = None if sku_keys is None else sorted({str(key).strip() for key in sku_keys if str(key).strip()})
+    if keys == []:
+        return color_map
     try:
         with db_cursor() as cursor:
             cursor.execute("""
@@ -40,13 +43,22 @@ def read_lingxing_color_map() -> Dict[str, str]:
             """)
             if not cursor.fetchone().get("cnt", 0):
                 return color_map
-            cursor.execute("""
+            sql = """
                 SELECT sku, product_name
                 FROM `lxpm_product_category_snapshot`
                 WHERE sku IS NOT NULL AND sku != ''
                   AND product_name IS NOT NULL AND product_name != ''
-            """)
-            for row in cursor.fetchall():
+            """
+            rows = []
+            if keys is None:
+                cursor.execute(sql)
+                rows = cursor.fetchall()
+            else:
+                for offset in range(0, len(keys), 500):
+                    chunk = keys[offset:offset + 500]
+                    cursor.execute(sql + " AND sku IN (" + ",".join(["%s"] * len(chunk)) + ")", chunk)
+                    rows.extend(cursor.fetchall())
+            for row in rows:
                 sku = str(row.get("sku") or "").strip()
                 color = parse_lingxing_color(str(row.get("product_name") or ""))
                 if sku and color:
@@ -266,7 +278,11 @@ async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
 def main() -> None:
     logger.info("=" * 70)
     logger.info("采购建议报告生成（未来月份 + 颜色体系感知）")
-    logger.info("  定制面料覆盖未来3个月 | 现货面料覆盖未来2个月")
+    logger.info(
+        "  自然月计划（含本月）：定制面料覆盖 %s 个月 | 现货面料覆盖 %s 个月",
+        logic.COVERAGE_MONTHS_CUSTOM,
+        logic.COVERAGE_MONTHS_STOCK,
+    )
     logger.info("=" * 70)
     current_date = datetime.now()
     resolver = ColorSystemResolver.from_database()

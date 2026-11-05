@@ -1,0 +1,24 @@
+# AST-selected baseline functions only; no module imports or secret configuration.
+def parse_lingxing_color(product_name: str) -> str:
+    text = (product_name or '').strip()
+    if not text:
+        return ''
+    match = re.search('(\\d+\\s*#\\s*[^#，,;/|]+)', text)
+    return re.sub('\\s+', '', match.group(1).strip()) if match else ''
+
+def read_lingxing_color_map() -> Dict[str, str]:
+    color_map: Dict[str, str] = {}
+    try:
+        with db_cursor() as cursor:
+            cursor.execute("\n                SELECT COUNT(*) AS cnt FROM information_schema.TABLES\n                WHERE TABLE_SCHEMA=DATABASE()\n                  AND TABLE_NAME='lxpm_product_category_snapshot'\n            ")
+            if not cursor.fetchone().get('cnt', 0):
+                return color_map
+            cursor.execute("\n                SELECT sku, product_name\n                FROM `lxpm_product_category_snapshot`\n                WHERE sku IS NOT NULL AND sku != ''\n                  AND product_name IS NOT NULL AND product_name != ''\n            ")
+            for row in cursor.fetchall():
+                sku = str(row.get('sku') or '').strip()
+                color = parse_lingxing_color(str(row.get('product_name') or ''))
+                if sku and color:
+                    color_map[sku] = color
+    except Exception as exc:
+        logger.warning(f'读取颜色-领星映射失败: {exc}')
+    return color_map

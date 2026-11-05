@@ -37,6 +37,7 @@ async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
         {"name": "颜色映射状态", "type": "text"},
         {"name": "颜色汇总代码", "type": "text"},
         {"name": "面料颜色编号", "type": "text"},
+        {"name": "颜色-领星", "type": "text"},
         {"name": "库存归属状态", "type": "text"},
         {"name": "库存量/条", "type": "number", "precision": 2},
         {"name": "库存量/米", "type": "number", "precision": 2},
@@ -73,13 +74,31 @@ async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
         """)
         db_rows = cursor.fetchall()
 
+    # Independent legacy Lingxing SKU-name reference; never replace the standard color mapping.
+    lx_keys = set()
+    for record in db_rows:
+        if record.get("统计类型") == "带颜色":
+            fcc = str(record.get("面料颜色编号") or "").strip()
+            fabric_code = str(record.get("面料编号") or "").strip()
+            color_code = str(record.get("颜色缩写") or "").strip()
+            if fcc:
+                lx_keys.add(fcc)
+            if fabric_code and color_code:
+                lx_keys.add(f"{fabric_code}-{color_code}")
+    lx_color_map = base.read_lingxing_color_map(sorted(lx_keys))
+
     feishu_records: List[Dict[str, Any]] = []
     mapped = 0
     pending = 0
     for record in db_rows:
         system = str(record.get("颜色体系") or "").strip()
         code = str(record.get("颜色缩写") or "").strip()
+        lx_color = ""
         if record.get("统计类型") == "带颜色":
+            fcc = str(record.get("面料颜色编号") or "").strip()
+            fabric_code = str(record.get("面料编号") or "").strip()
+            legacy_fcc = f"{fabric_code}-{code}" if fabric_code and code else fcc
+            lx_color = lx_color_map.get(fcc) or lx_color_map.get(legacy_fcc, "")
             info = catalog.describe(system, code)
             if info["颜色映射状态"] == "颜色编制表主映射":
                 mapped += 1
@@ -106,6 +125,7 @@ async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
             "颜色映射状态": info["颜色映射状态"],
             "颜色汇总代码": record.get("颜色汇总代码") or "",
             "面料颜色编号": record.get("面料颜色编号") or "",
+            "颜色-领星": lx_color,
             "库存归属状态": record.get("库存归属状态") or "",
             "库存量/条": float(record.get("库存量/条") or 0),
             "库存量/米": float(record.get("库存量/米") or 0),
