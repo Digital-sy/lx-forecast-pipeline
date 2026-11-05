@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import re
 from typing import Any, Dict, List
 
 from common import get_logger
@@ -12,6 +13,7 @@ from jobs.feishu import generate_procurement_report_lx_color as base
 from jobs.feishu import generate_fabric_forecast_named_colors as named_fabric
 from jobs.feishu.color_mapping_catalog import ColorMappingCatalog
 from jobs.feishu.fabric_lingxing_color_reference import build_aliases, resolve_reference
+from jobs.feishu.fabric_lingxing_name_reference import build_name_index, resolve_name_reference
 
 logger = get_logger("procurement_report_named_colors")
 
@@ -34,6 +36,34 @@ async def _read_lingxing_reference_aliases():
         raise RuntimeError("颜色参考台账无有效映射，停止写表，保留现有结果")
     logger.info("领星颜色参考：唯一体系别名 %s 个，台账待核查项 %s 个", len(aliases), len(issues))
     return aliases
+
+
+def read_lingxing_name_rows(fabric_codes):
+    """Read complete bounded fabric prefixes for name uniqueness; never write."""
+    if not fabric_codes:
+        return []
+    codes = list(fabric_codes)
+    if any(not isinstance(code, str) or not re.fullmatch(r"FAB-[A-Z0-9-]+", code) for code in codes):
+        raise ValueError("面料名称匹配只允许合法完整FAB编号")
+    codes = sorted(set(codes))
+    rows = []
+    with db_cursor() as cursor:
+        for offset in range(0, len(codes), 20):
+            chunk = codes[offset:offset + 20]
+            sql = (
+                "SELECT sku, product_name, synced_at "
+                "FROM lingxing.lxpm_product_category_snapshot WHERE ("
+                + " OR ".join(["sku LIKE %s"] * len(chunk))
+                + ") ORDER BY sku LIMIT 5001"
+            )
+            cursor.execute(sql, [code + "-%" for code in chunk])
+            batch = cursor.fetchall()
+            if len(batch) > 5000 or len(rows) + len(batch) > 5000:
+                raise RuntimeError("面料名称来源超过5000行预算，停止写表")
+            rows.extend(batch)
+    if not rows:
+        raise RuntimeError("面料名称来源为空，停止写表，保留现有结果")
+    return rows
 
 
 async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
@@ -99,9 +129,26 @@ async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
     if lx_keys and not lx_color_map:
         raise RuntimeError("领星颜色来源未取得有效值，停止写表，保留现有结果")
 
+    fabric_pairs = sorted({
+        (str(record.get("面料编号") or "").strip(), str(record.get("面料") or "").strip())
+        for record in db_rows
+        if record.get("统计类型") == "带颜色"
+        and re.fullmatch(r"FAB-[A-Z0-9-]+", str(record.get("面料编号") or "").strip())
+        and str(record.get("面料") or "").strip()
+    })
+    name_rows = read_lingxing_name_rows(sorted({code for code, _ in fabric_pairs}))
+    name_color_map = {}
+    for name_row in name_rows:
+        name_sku = str(name_row.get("sku") or "").strip()
+        parsed_color = base.parse_lingxing_color(str(name_row.get("product_name") or ""))
+        if name_sku and parsed_color:
+            name_color_map[name_sku] = parsed_color
+    name_index = build_name_index(name_rows, fabric_pairs, name_color_map)
+
     feishu_records: List[Dict[str, Any]] = []
     mapped = 0
     pending = 0
+    name_matched = 0
     for record in db_rows:
         system = str(record.get("颜色体系") or "").strip()
         code = str(record.get("颜色缩写") or "").strip()
@@ -121,6 +168,14 @@ async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
                 "B2024中文候选": "",
                 "颜色映射状态": "总量行",
             }
+        if lx_reference["status"] in {"UNMAPPED_ALIAS", "UNKNOWN_COLOR_SYSTEM"}:
+            name_record = dict(record)
+            for name_field in ("中文颜色名称", "A2023中文候选", "B2024中文候选"):
+                name_record[name_field] = info[name_field]
+            name_reference = resolve_name_reference(name_record, name_index)
+            if name_reference["status"] == "NAME_MATCHED":
+                lx_color = name_reference["value"]
+                name_matched += 1
         feishu_records.append({
             "统计类型": record.get("统计类型") or "",
             "面料": record.get("面料") or "",
@@ -154,6 +209,7 @@ async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
         })
 
     logger.info(f"颜色编制表中文名称匹配：{mapped}/{len(db_rows)} 条；体系待定 {pending} 条")
+    logger.info("领星颜色名称兜底匹配：%s 条；仅更新参考展示", name_matched)
     await client.delete_all_records()
     written = await client.write_records(feishu_records, batch_size=500)
     logger.info(f"✓ 飞书面料预估明细写入 {written} 条（中文颜色名称+颜色体系）")

@@ -6,6 +6,7 @@ import asyncio
 import builtins
 import copy
 import hashlib
+import re
 import unittest
 from contextlib import contextmanager
 from datetime import datetime
@@ -156,7 +157,9 @@ class Harness:
         self.base = SimpleNamespace(
             base=SimpleNamespace(_get_or_create_table=ensure, FEISHU_APP_TOKEN="[TEST_ONLY_APP]"),
             _month_label=label, read_lingxing_color_map=read_colors)
-        self.env = dict(base=self.base, db_cursor=self.cursor,
+        self.env = dict(base=self.base, db_cursor=self.cursor, re=re,
+                        build_name_index=lambda *args: {},
+                        resolve_name_reference=lambda *args: {"status":"NAME_UNMAPPED","value":""},
                         ColorMappingCatalog=SimpleNamespace(from_runtime=lambda:SimpleNamespace(describe=describe)),
                         logger=SimpleNamespace(info=lambda *a, **k:None, warning=lambda *a, **k:None),
                         build_aliases=helper["build_aliases"], resolve_reference=helper["resolve_reference"],
