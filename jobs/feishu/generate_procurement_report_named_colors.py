@@ -1,6 +1,10 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
-"""采购建议主入口：颜色名称来自 A2023/B2024 颜色编制表。"""
+"""采购建议主入口：颜色名称来自 A2023/B2024 颜色编制表。
+
+颜色-领星优先展示已核验代码/唯一名称匹配；最终空值使用 B2024
+中文候选原文展示兜底。该兜底不是已验证领星匹配，不生成数字编号。
+"""
 from __future__ import annotations
 
 from datetime import datetime
@@ -149,11 +153,15 @@ async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
     mapped = 0
     pending = 0
     name_matched = 0
+    code_matched = 0
+    b2024_display_fallback = 0
     for record in db_rows:
         system = str(record.get("颜色体系") or "").strip()
         code = str(record.get("颜色缩写") or "").strip()
         lx_reference = resolve_reference(record, lx_aliases, lx_color_map)
         lx_color = lx_reference["value"]
+        if lx_color:
+            code_matched += 1
         if record.get("统计类型") == "带颜色":
             info = catalog.describe(system, code)
             if info["颜色映射状态"] == "颜色编制表主映射":
@@ -176,6 +184,12 @@ async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
             if name_reference["status"] == "NAME_MATCHED":
                 lx_color = name_reference["value"]
                 name_matched += 1
+        # Display-only fallback: do not treat the candidate name as verified
+        # Lingxing identity, infer a number, or change the record color system.
+        b2024_candidate = info.get("B2024中文候选")
+        if not lx_color and isinstance(b2024_candidate, str) and b2024_candidate.strip():
+            lx_color = b2024_candidate
+            b2024_display_fallback += 1
         feishu_records.append({
             "统计类型": record.get("统计类型") or "",
             "面料": record.get("面料") or "",
@@ -209,7 +223,8 @@ async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
         })
 
     logger.info(f"颜色编制表中文名称匹配：{mapped}/{len(db_rows)} 条；体系待定 {pending} 条")
-    logger.info("领星颜色名称兜底匹配：%s 条；仅更新参考展示", name_matched)
+    logger.info("领星颜色参考已核验匹配：代码 %s 条，唯一名称 %s 条", code_matched, name_matched)
+    logger.info("B2024中文候选展示兜底：%s 条；非已验证领星匹配，不生成编号", b2024_display_fallback)
     await client.delete_all_records()
     written = await client.write_records(feishu_records, batch_size=500)
     logger.info(f"✓ 飞书面料预估明细写入 {written} 条（中文颜色名称+颜色体系）")
