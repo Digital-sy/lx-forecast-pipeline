@@ -11,12 +11,29 @@ from common.database import db_cursor
 from jobs.feishu import generate_procurement_report_lx_color as base
 from jobs.feishu import generate_fabric_forecast_named_colors as named_fabric
 from jobs.feishu.color_mapping_catalog import ColorMappingCatalog
+from jobs.feishu.fabric_lingxing_color_reference import build_aliases, resolve_reference
 
 logger = get_logger("procurement_report_named_colors")
 
 
 def _month_label(current_date: datetime, delta: int) -> str:
     return base._month_label(current_date, delta)
+
+
+async def _read_lingxing_reference_aliases():
+    # Reuse the approved manual inventory source only for its old/new color relationship.
+    from common.feishu import FeishuClient
+    from jobs.feishu.fetch_fabric_inventory_from_feishu import FEISHU_APP_TOKEN, FEISHU_TABLE_ID
+
+    client = FeishuClient(app_token=FEISHU_APP_TOKEN, table_id=FEISHU_TABLE_ID)
+    rows = await client.read_records(page_size=500)
+    if not rows:
+        raise RuntimeError("颜色参考台账为空，停止写表，保留现有结果")
+    aliases, issues = build_aliases(rows)
+    if not aliases:
+        raise RuntimeError("颜色参考台账无有效映射，停止写表，保留现有结果")
+    logger.info("领星颜色参考：唯一体系别名 %s 个，台账待核查项 %s 个", len(aliases), len(issues))
+    return aliases
 
 
 async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
@@ -74,18 +91,13 @@ async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
         """)
         db_rows = cursor.fetchall()
 
-    # Independent legacy Lingxing SKU-name reference; never replace the standard color mapping.
-    lx_keys = set()
-    for record in db_rows:
-        if record.get("统计类型") == "带颜色":
-            fcc = str(record.get("面料颜色编号") or "").strip()
-            fabric_code = str(record.get("面料编号") or "").strip()
-            color_code = str(record.get("颜色缩写") or "").strip()
-            if fcc:
-                lx_keys.add(fcc)
-            if fabric_code and color_code:
-                lx_keys.add(f"{fabric_code}-{color_code}")
-    lx_color_map = base.read_lingxing_color_map(sorted(lx_keys))
+    # Same physical fabric row supplies the A2023 old code and B2024 current SKU.
+    # Never guess cross-system identity by equal abbreviations.
+    lx_aliases = await _read_lingxing_reference_aliases()
+    lx_keys = sorted({item["sku"] for item in lx_aliases.values()})
+    lx_color_map = base.read_lingxing_color_map(lx_keys)
+    if lx_keys and not lx_color_map:
+        raise RuntimeError("领星颜色来源未取得有效值，停止写表，保留现有结果")
 
     feishu_records: List[Dict[str, Any]] = []
     mapped = 0
@@ -93,12 +105,9 @@ async def write_fabric_detail_to_feishu(current_date: datetime) -> None:
     for record in db_rows:
         system = str(record.get("颜色体系") or "").strip()
         code = str(record.get("颜色缩写") or "").strip()
-        lx_color = ""
+        lx_reference = resolve_reference(record, lx_aliases, lx_color_map)
+        lx_color = lx_reference["value"]
         if record.get("统计类型") == "带颜色":
-            fcc = str(record.get("面料颜色编号") or "").strip()
-            fabric_code = str(record.get("面料编号") or "").strip()
-            legacy_fcc = f"{fabric_code}-{code}" if fabric_code and code else fcc
-            lx_color = lx_color_map.get(fcc) or lx_color_map.get(legacy_fcc, "")
             info = catalog.describe(system, code)
             if info["颜色映射状态"] == "颜色编制表主映射":
                 mapped += 1

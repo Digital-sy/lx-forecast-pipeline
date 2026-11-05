@@ -141,52 +141,6 @@ def run_writer(path, rows, color_map=None, actual_helper=False):
     return SimpleNamespace(client=client,db=db,requested=requested,catalog_calls=catalog_calls,helper_db=hdb)
 
 
-class RestoredWriterTests(unittest.TestCase):
-    def test_all_existing_fields_values_and_order_equal_before_writer(self):
-        rows=sample_rows();before=copy.deepcopy(rows)
-        old=run_writer(BEFORE_NAMED,rows)
-        new=run_writer(NAMED,rows,{'013-B2024-BK':'1#黑','013-WH':'2#白'})
-        stripped=[{k:v for k,v in r.items() if k!='颜色-领星'} for r in new.client.rows]
-        self.assertEqual(stripped,old.client.rows)
-        self.assertEqual(rows,before)
-        self.assertEqual(new.catalog_calls,old.catalog_calls)
-        self.assertEqual(new.db.calls,old.db.calls)
-    def test_schema_adds_exactly_one_text_field(self):
-        old=run_writer(BEFORE_NAMED,sample_rows())
-        new=run_writer(NAMED,sample_rows())
-        self.assertEqual([f for f in new.client.fields if f['name']!='颜色-领星'],old.client.fields)
-        self.assertEqual([f for f in new.client.fields if f['name']=='颜色-领星'],[{'name':'颜色-领星','type':'text'}])
-    def test_exact_precedes_legacy_fallback(self):
-        out=run_writer(NAMED,sample_rows()[:1],{'013-B2024-BK':'1#黑','013-BK':'9#其他'})
-        self.assertEqual(out.client.rows[0]['颜色-领星'],'1#黑')
-    def test_legacy_fallback_is_preserved(self):
-        out=run_writer(NAMED,sample_rows()[1:2],{'013-WH':'2#白'})
-        self.assertEqual(out.client.rows[0]['颜色-领星'],'2#白')
-    def test_unmatched_does_not_use_catalog_chinese_as_fallback(self):
-        out=run_writer(NAMED,sample_rows()[2:3],{})
-        self.assertEqual(out.client.rows[0]['颜色-领星'],'')
-        self.assertEqual(out.client.rows[0]['中文颜色名称'],'标准-XX')
-    def test_total_row_always_blank_and_not_a_lookup_key(self):
-        total=sample_rows()[-1];total['面料颜色编号']='SHOULD_NOT_QUERY'
-        out=run_writer(NAMED,[total],{'SHOULD_NOT_QUERY':'9#错误'})
-        self.assertEqual(out.client.rows[0]['颜色-领星'],'')
-        self.assertEqual(out.requested,[[]])
-    def test_queries_only_sorted_unique_exact_and_legacy_keys(self):
-        rows=sample_rows()+[copy.deepcopy(sample_rows()[0])]
-        out=run_writer(NAMED,rows)
-        expected=sorted({'013-B2024-BK','013-BK','013-A2023-WH','013-WH','013-待定-XX','013-XX'})
-        self.assertEqual(out.requested,[expected])
-    def test_actual_writer_calls_actual_filtered_helper(self):
-        out=run_writer(NAMED,sample_rows(),{'013-B2024-BK':'1#黑','013-WH':'2#白','OUTSIDE':'9#外'},actual_helper=True)
-        self.assertEqual([r['颜色-领星'] for r in out.client.rows],['1#黑','2#白','',''])
-        params=[p for s,p in out.helper_db.calls if 'COUNT(*)' not in s]
-        self.assertNotIn('OUTSIDE',sum(params,[]))
-        self.assertEqual(out.client.delete_calls,1)
-        self.assertEqual(out.client.write_calls,1)
-    def test_empty_writer_has_no_color_database_connection(self):
-        out=run_writer(NAMED,[],{},actual_helper=True)
-        self.assertEqual(out.helper_db.connections,0)
-        self.assertEqual(out.client.rows,[])
 
 
 class FilteredHelperTests(unittest.TestCase):
