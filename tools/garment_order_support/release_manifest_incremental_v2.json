@@ -1,0 +1,45 @@
+{
+  "schema": "garment_order_public_increment_release/1",
+  "release": "incremental_append_v2",
+  "created_at_utc": "2026-11-10T04:01:13.134936+00:00",
+  "status": "LOCAL_VERIFIED_NOT_PUSHED",
+  "scope": "Only new sanitized code, synthetic tests and explanatory documentation; earlier public files unchanged",
+  "baseline_release_manifest_sha256": "26942e0c2c872bb0bcbcad94226db7c4822a9c0c981177ab38ac939572886b47",
+  "public_ddl_sha256": "9b59997d300b61b6286487b55dfcaf64b9275fcc5ce6bdc0770518edc510c1d3",
+  "files": {
+    "acquisition/scripts/parse_incremental_refresh.py": "f52f1e332e1b7fc44eb8cafd94fa7a1b51e049f0515375458e32d54a4d1283af",
+    "acquisition/scripts/plan_incremental_refresh.py": "1be05373fbb186b7c2db5ed75f9bce3012cbab4839b26a955bc88484e2d449b9",
+    "acquisition/tests/test_incremental_refresh.py": "c6a2b108b41363ca9fdba5f3ef1ac3ee7c5b1aecdd7ca17faaeef9833cc842af",
+    "database/APPEND_README.md": "7db92c246372584303b667d8b667a02cc08847984f02908b5a08ff0d46c3103c",
+    "database/scripts/append_load_core.py": "196b7d4b8c805bd14dca7531be0c26651853c187697b61abe2e251db5e3b594a",
+    "database/tests/test_append_load_core.py": "d1caaa50b59708057951c59328d7bad8567eb0405e0f7503b8c794e851549900",
+    "docs/incremental_append_progress.md": "90f4f26ba3f99c9190fe98479c245ad554b7107f5c292b5c880729d71449ae8f"
+  },
+  "validation": {
+    "append_synthetic_tests": 39,
+    "existing_core_tests": 20,
+    "public_schema_tests": 4,
+    "incremental_refresh_tests": 20,
+    "cli_help_checks": [
+      {
+        "script": "acquisition/scripts/plan_incremental_refresh.py",
+        "command": "python -B scripts/plan_incremental_refresh.py --help",
+        "exit_code": 0
+      },
+      {
+        "script": "acquisition/scripts/parse_incremental_refresh.py",
+        "command": "python -B scripts/parse_incremental_refresh.py --help",
+        "exit_code": 0
+      }
+    ],
+    "database_connections": 0,
+    "remote_calls": 0,
+    "new_files_scan_hits": 0
+  },
+  "limits": [
+    "No production wrappers, business inputs, instance identities or execution receipts included",
+    "Incremental parser dependencies are supplied separately and must be reviewed and hash-pinned",
+    "Automatic scheduling is not enabled",
+    "Existing release manifests remain historical; this manifest covers only its listed new files"
+  ]
+}
