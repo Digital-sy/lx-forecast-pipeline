@@ -1,0 +1,4 @@
+interface:
+  display_name: "下单表来源查询"
+  short_description: "按款号检索下单文件与原文证据，识别来源版本变化并保留冲突和人工确认"
+  default_prompt: "使用 $garment-order-source 查询指定款号的下单表和来源版本，生成可追溯证据及需要补充的文件清单，先不写回或建表。"

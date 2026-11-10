@@ -1,0 +1,36 @@
+{
+  "status": "PASS",
+  "created_at_utc": "2026-11-10T01:19:57.278326+00:00",
+  "scope": "sanitized publication copies, offline only",
+  "source_skill": {
+    "tests_run": 90,
+    "status": "PASS",
+    "started_at_utc": "2026-11-10T01:15:33.459151+00:00",
+    "finished_at_utc": "2026-11-10T01:15:36.202233+00:00"
+  },
+  "acquisition": {
+    "tests_run": 18,
+    "status": "PASS",
+    "started_at_utc": "2026-11-10T01:15:36.202233+00:00",
+    "finished_at_utc": "2026-11-10T01:15:36.548380+00:00"
+  },
+  "database": {
+    "tests_run": 43,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "finished_at_utc": "2026-11-10T01:18:00.092982+00:00",
+    "status": "PASS",
+    "version": "1.0.1-public1"
+  },
+  "total_tests_run": 151,
+  "test_command": "python -B -m unittest discover -s tests -v (from each module root; temporary directory variables documented in README)",
+  "remote_calls": 0,
+  "database_connections": 0,
+  "database_writes": 0,
+  "notes": [
+    "Existing live database evidence remains private and was not rerun for this GitHub sync.",
+    "Two packaging tests initially depended on private archived packages; replaced by synthetic fixtures and rerun.",
+    "No production compatibility claim for the public wrapper or sanitized artifact binding; DDL statement body is unchanged."
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "release": "garment-order-source-v1",
+  "created_at": "2026-11-09T09:46:47.606638+00:00",
+  "files": {
+    "agents/openai.yaml": "e8ccc4bd508ff79ce9583dc012f341f842b93570884973aa1ccb89e8cb72c662",
+    "references/cell-evidence-contract.md": "7477f6b981e5d7a9ede0240efe363147a38e49c3150b716794aa74b753eb6984",
+    "references/runbook.md": "c5eb32597ee587b7e8293411a1632b5d84d09b354ae85b014d40c0d45a9eb7af",
+    "references/source-contract.md": "198e88f73335fcb3389d1a23b8ebfca934c18041b1071e8e17221727d84cc609",
+    "scripts/discover_order_files.py": "57df68a9f121c37fba5d87d78d1357a717b2dc669c9fc5ee33a85876579798c8",
+    "scripts/order_index.py": "24df5ce201a098760d13d9c6382ac3e3150c0f9ffd75cf8ccbacf3d6bf864602",
+    "scripts/plan_refresh.py": "1f6cf5b5f0aae076f18f38a0742e502e1f39e30b28b84976d7e47c908cab1a44",
+    "scripts/read_order_cells.py": "d086250be1cf86be19dd470e8b2f63dc778e50c3b10eb61404bf3c214f7c7a45",
+    "SKILL.md": "26565dc90f74202337887607844e6be08bfc1e106c0c4544733026bf6dcb7ea0",
+    "tests/test_discover_order_files.py": "c40075375b5c51f303312ef8bba68122d09cd29175a2b03c66fa1899725faa8f",
+    "tests/test_order_index.py": "b26b2cba3336155c0c4fda3a74aed0cf2ea15f1b2d11db76ae26705739aed480",
+    "tests/test_plan_refresh.py": "c261cec094439fe0f6dfc41e45451b37d19a2dd9b444bcf53f0a5d425ef4a49c"
+  },
+  "capabilities": [
+    "bounded_directory_discovery",
+    "archive_index",
+    "evidence_query",
+    "refresh_plan",
+    "explicit_cell_read"
+  ],
+  "database_operations": 0,
+  "schedule_created": false,
+  "semantic_autoconfirmation": false,
+  "remote_commit": null
+}

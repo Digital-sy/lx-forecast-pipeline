@@ -1,0 +1,163 @@
+{
+  "release": "garment-order-support-public-v1",
+  "created_at_utc": "2026-11-10T01:19:57.355074+00:00",
+  "repository": "Digital-sy/lx-forecast-pipeline",
+  "base_commit": "97b868d75cde24e4d408399cdeecc292395d1b4a",
+  "branch": "codex/garment-order-support-progress-20261110",
+  "files": {
+    ".gitignore": {
+      "sha256": "15d37f63f02d1391a0ca7419187b0e34b66bf0e713b27fccda82f62dbc824ec6",
+      "git_blob_sha1": "df9578d8243cbd0598c0a3bc75c60a7b32307176",
+      "bytes": 140
+    },
+    "acquisition/scripts/fetch_increment.py": {
+      "sha256": "4a25049e3fd7dc15a2ca602466ead732c3e7e8d466e2ecd4dc45fb7346ce9b2d",
+      "git_blob_sha1": "89b5d6af102208165823b2eaba4d62bdc7d9db92",
+      "bytes": 11996
+    },
+    "acquisition/tests/test_fetch_increment.py": {
+      "sha256": "a08adcaadd2693523e49d1fb154f23afe122effa53359de8330ba70f466ce6ea",
+      "git_blob_sha1": "7f70fe7f352df478c215030082aac893b282038f",
+      "bytes": 6425
+    },
+    "database/scripts/build_load_package.py": {
+      "sha256": "9da9bc33f0186e46ec428e1ebd2df968f40abeef43128f974603417344636258",
+      "git_blob_sha1": "f98a559fd76bb8ed4ed5055e2eaa3f1133879dcc",
+      "bytes": 25620
+    },
+    "database/scripts/mysql_load_core.py": {
+      "sha256": "9c2878ad8e7c2d3e5d91d9132e824bec54c2ba23e32654a27c96149c97358418",
+      "git_blob_sha1": "df03d1ee12994795fa9ee3da5fbd0e6311a1ac66",
+      "bytes": 18036
+    },
+    "database/scripts/schema_ops.py": {
+      "sha256": "348cca2a6d69fa8a1ce4e348548054d93b8f73aa73c77babd5001555f6fd022d",
+      "git_blob_sha1": "a7f7d26427814d6b83508d1ebb37b4e26df07071",
+      "bytes": 6756
+    },
+    "database/sql/lingxing_garment_order_schema_v1_1.sql": {
+      "sha256": "9b59997d300b61b6286487b55dfcaf64b9275fcc5ce6bdc0770518edc510c1d3",
+      "git_blob_sha1": "6a9698b150ca980d938e533a8351296f7f87382b",
+      "bytes": 24334
+    },
+    "database/tests/test_build_load_package.py": {
+      "sha256": "cb620966926fcdc7cb2a0b3f79f527c4c161f1f56235dfed49303099763c6099",
+      "git_blob_sha1": "970015b4f37ec4bf88c4b793cdd0a0d54fbb0466",
+      "bytes": 9101
+    },
+    "database/tests/test_mysql_load_core.py": {
+      "sha256": "349a3ebf11b88efba14a5d9f901f0ebec5fb7bc8da9702f8d585a3222337af97",
+      "git_blob_sha1": "997a86608edfdefa402f205514ce46b54fb5e093",
+      "bytes": 12105
+    },
+    "database/tests/test_public_schema.py": {
+      "sha256": "651f63bcc85b0b32979a11d4fd72ad955b541531a55a85de7a3d878740bc9031",
+      "git_blob_sha1": "62bf79b56eb261cb9ff10f578e208b6753179c30",
+      "bytes": 1971
+    },
+    "docs/progress.md": {
+      "sha256": "acae756d6f5b59a72216b130676d3b2de3ce3d22cfb6f359cc1dfa7535b0c3e4",
+      "git_blob_sha1": "86fc34ee602442e375cb71625b6a2bada813d60e",
+      "bytes": 3459
+    },
+    "README.md": {
+      "sha256": "f308ca3be1c5f486de8dacdff2bb1be0aa5808632743b6734c4ef4597e00395c",
+      "git_blob_sha1": "e574073725aae030c72db3018489fa7d3b6bbc7a",
+      "bytes": 3335
+    },
+    "source_skill/agents/openai.yaml": {
+      "sha256": "e8ccc4bd508ff79ce9583dc012f341f842b93570884973aa1ccb89e8cb72c662",
+      "git_blob_sha1": "dc1ba6f0a6b9d3ba1fd0212b884b2be027b01ba2",
+      "bytes": 350
+    },
+    "source_skill/references/cell-evidence-contract.md": {
+      "sha256": "7477f6b981e5d7a9ede0240efe363147a38e49c3150b716794aa74b753eb6984",
+      "git_blob_sha1": "54219550328fb11769a52081398400267c389daa",
+      "bytes": 3935
+    },
+    "source_skill/references/runbook.md": {
+      "sha256": "c5eb32597ee587b7e8293411a1632b5d84d09b354ae85b014d40c0d45a9eb7af",
+      "git_blob_sha1": "bea5545f9381a24093d579b253a47c2198af8ae5",
+      "bytes": 2343
+    },
+    "source_skill/references/source-contract.md": {
+      "sha256": "198e88f73335fcb3389d1a23b8ebfca934c18041b1071e8e17221727d84cc609",
+      "git_blob_sha1": "ae982aaf68ff3154f1f2160770d3898098af2539",
+      "bytes": 3198
+    },
+    "source_skill/release_manifest.json": {
+      "sha256": "7c5469c01c261333d08d5c05bfc5e9f377078772f059cd3a6aa779614767b3c1",
+      "git_blob_sha1": "ab2913930e229a15ca7d92525d854d454226c08e",
+      "bytes": 1619
+    },
+    "source_skill/scripts/discover_order_files.py": {
+      "sha256": "57df68a9f121c37fba5d87d78d1357a717b2dc669c9fc5ee33a85876579798c8",
+      "git_blob_sha1": "6b8f165ed129dc4ac79040535166959ede85cbf3",
+      "bytes": 17588
+    },
+    "source_skill/scripts/order_index.py": {
+      "sha256": "24df5ce201a098760d13d9c6382ac3e3150c0f9ffd75cf8ccbacf3d6bf864602",
+      "git_blob_sha1": "6cf044e48b716ce9fb87bb87d228636e4b565a32",
+      "bytes": 28036
+    },
+    "source_skill/scripts/plan_refresh.py": {
+      "sha256": "1f6cf5b5f0aae076f18f38a0742e502e1f39e30b28b84976d7e47c908cab1a44",
+      "git_blob_sha1": "232cc97fc17de05375820ba1f1ba3aaa98a5b8b8",
+      "bytes": 15480
+    },
+    "source_skill/scripts/read_order_cells.py": {
+      "sha256": "d086250be1cf86be19dd470e8b2f63dc778e50c3b10eb61404bf3c214f7c7a45",
+      "git_blob_sha1": "dc1c4fc04223b97c82fad1fcf806622e0756cc98",
+      "bytes": 21507
+    },
+    "source_skill/SKILL.md": {
+      "sha256": "26565dc90f74202337887607844e6be08bfc1e106c0c4544733026bf6dcb7ea0",
+      "git_blob_sha1": "9df3812457124fecef3f0e0435ee756453db1fed",
+      "bytes": 4634
+    },
+    "source_skill/tests/test_discover_order_files.py": {
+      "sha256": "c40075375b5c51f303312ef8bba68122d09cd29175a2b03c66fa1899725faa8f",
+      "git_blob_sha1": "2aa94623230fa8de74e5a9ee1913fa77801429c7",
+      "bytes": 11828
+    },
+    "source_skill/tests/test_order_index.py": {
+      "sha256": "b26b2cba3336155c0c4fda3a74aed0cf2ea15f1b2d11db76ae26705739aed480",
+      "git_blob_sha1": "5d9dc6f5638eaae1077419ff8216f45e0351fae3",
+      "bytes": 15930
+    },
+    "source_skill/tests/test_plan_refresh.py": {
+      "sha256": "c261cec094439fe0f6dfc41e45451b37d19a2dd9b444bcf53f0a5d425ef4a49c",
+      "git_blob_sha1": "a6783e7db93b87b57e075a4b78a417a7623d77de",
+      "bytes": 12371
+    },
+    "validation_summary.json": {
+      "sha256": "5e9a82691caf6734f1237301a59a3c63318e496bec39d51113d96e5ccf4e88b6",
+      "git_blob_sha1": "ccccc4de5931299acadef29fff081036c13469b2",
+      "bytes": 1345
+    }
+  },
+  "file_count_excluding_manifest": 26,
+  "source_skill_release": "garment-order-source-v1",
+  "database_public_version": "1.0.1-public1",
+  "original_executed_ddl_sha256": "20cfeb64ac250bfd9dfc4fc740898bdf3e63a262fbb1d3f039f1e0f84361a4c1",
+  "public_ddl_sha256": "9b59997d300b61b6286487b55dfcaf64b9275fcc5ce6bdc0770518edc510c1d3",
+  "ddl_statement_body_unchanged": true,
+  "database_package_binding": "Public and private execution packages use different DDL-file hashes. Do not rewrite prior packages or use this publication to repeat a production import.",
+  "validation_file": "validation_summary.json",
+  "publication_scope": [
+    "source and bounded acquisition code",
+    "DDL and credential-free load/verification core",
+    "synthetic tests",
+    "sanitized progress and contracts"
+  ],
+  "excluded": [
+    "business rows and quantities",
+    "actual files and resource IDs",
+    "manual decisions",
+    "database connection or SSH wrappers",
+    "credentials",
+    "private archives and real receipts",
+    "isolated MySQL binaries, data and logs"
+  ],
+  "deployment_performed_by_this_sync": false
+}
