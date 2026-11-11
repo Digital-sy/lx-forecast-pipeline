@@ -1,0 +1,71 @@
+{
+  "schema_version": "garment_source_pipeline/1",
+  "task_root": "E:/CodexWork/Tasks/YOUR_NEW_TASK",
+  "python": "ABSOLUTE_PYTHON_PATH",
+  "tools": {
+    "discover_order_files.py": {
+      "path": "ABSOLUTE_APPROVED_PATH/discover_order_files.py",
+      "sha256": "REPLACE_WITH_VERIFIED_SHA256"
+    },
+    "plan_refresh.py": {
+      "path": "ABSOLUTE_APPROVED_PATH/plan_refresh.py",
+      "sha256": "REPLACE_WITH_VERIFIED_SHA256"
+    },
+    "fetch_increment.py": {
+      "path": "ABSOLUTE_APPROVED_PATH/fetch_increment.py",
+      "sha256": "REPLACE_WITH_VERIFIED_SHA256"
+    },
+    "parse_incremental_refresh.py": {
+      "path": "ABSOLUTE_APPROVED_PATH/parse_incremental_refresh.py",
+      "sha256": "REPLACE_WITH_VERIFIED_SHA256"
+    },
+    "order_index.py": {
+      "path": "ABSOLUTE_APPROVED_PATH/order_index.py",
+      "sha256": "REPLACE_WITH_VERIFIED_SHA256"
+    },
+    "build_increment_package.py": {
+      "path": "ABSOLUTE_APPROVED_PATH/build_increment_package.py",
+      "sha256": "REPLACE_WITH_VERIFIED_SHA256"
+    },
+    "build_load_package.py": {
+      "path": "ABSOLUTE_APPROVED_PATH/build_load_package.py",
+      "sha256": "REPLACE_WITH_VERIFIED_SHA256"
+    },
+    "mysql_load_core.py": {
+      "path": "ABSOLUTE_APPROVED_PATH/mysql_load_core.py",
+      "sha256": "REPLACE_WITH_VERIFIED_SHA256"
+    },
+    "append_load_core.py": {
+      "path": "ABSOLUTE_APPROVED_PATH/append_load_core.py",
+      "sha256": "REPLACE_WITH_VERIFIED_SHA256"
+    }
+  },
+  "sources": {
+    "previous_inventory": {
+      "path": "ABSOLUTE_APPROVED_PATH/previous_inventory",
+      "sha256": "REPLACE_WITH_VERIFIED_SHA256"
+    },
+    "publication_receipt": {
+      "path": "ABSOLUTE_APPROVED_PATH/publication_receipt",
+      "sha256": "REPLACE_WITH_VERIFIED_SHA256"
+    },
+    "parser_dependencies": {
+      "path": "ABSOLUTE_APPROVED_PATH/parser_dependencies",
+      "sha256": "REPLACE_WITH_VERIFIED_SHA256"
+    },
+    "ddl": {
+      "path": "ABSOLUTE_APPROVED_PATH/ddl",
+      "sha256": "REPLACE_WITH_VERIFIED_SHA256"
+    }
+  },
+  "discovery": {
+    "root_token": "APPROVED_FOLDER_TOKEN",
+    "cli_executable": "ABSOLUTE_NODE_PATH",
+    "cli_script": "ABSOLUTE_APPROVED_LARK_CLI_SCRIPT",
+    "max_pages": 80,
+    "max_folders": 80,
+    "max_items": 5000,
+    "page_size": 200,
+    "timeout_seconds": 30
+  }
+}
