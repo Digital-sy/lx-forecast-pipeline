@@ -1,0 +1,25 @@
+{
+  "schema_version": "garment_source_date_gate_release/1",
+  "base_commit": "aa14e3e14a3308206d28e9a36aeca8d837161bdc",
+  "local_execution_hashes": {
+    "scripts/source_pipeline_v2.py": "b2a00014de814a92a5926a4a95577f9dd9f5b9135e06423822a00a5b0fdcd972",
+    "scripts/source_date_gate.py": "ef71d52c85e02ebf16e088af6d70b9dafe47027a89aeb1aadc4f4eda61ba3cb7",
+    "scripts/order_date_evidence.py": "f554c46e93b82bee4f8687021b4ba02461f8e54f9cc8a80b61e26171b36bb16c",
+    "scripts/source_material_candidates.py": "d20c2bf18156f6f626596cd779dd878397fc2db9672d7865d725f8860ea57e61",
+    "tests/test_source_date_gate.py": "4f7bcddd8fd5a1535949920159662be6f3105c6c64a135607f53d67590e4e077",
+    "tests/test_source_pipeline_v2.py": "78c9972d25d91b1ad71f0faedc3f8a28cc2a62e2c530ff81bcdbfe54d67e9c71"
+  },
+  "files": {
+    "README.md": "6740df3e43bb71726deec3a5d83a16bb59c22405fd5ba9d3388d99aa0fbf676d",
+    "scripts/order_date_evidence.py": "f554c46e93b82bee4f8687021b4ba02461f8e54f9cc8a80b61e26171b36bb16c",
+    "scripts/source_date_gate.py": "ef71d52c85e02ebf16e088af6d70b9dafe47027a89aeb1aadc4f4eda61ba3cb7",
+    "scripts/source_material_candidates.py": "a3df842bf001dcd0336bde9c40732a30a598a142f7ba57816950b4d83018ef64",
+    "scripts/source_pipeline_v2.py": "b2a00014de814a92a5926a4a95577f9dd9f5b9135e06423822a00a5b0fdcd972",
+    "tests/test_source_date_gate.py": "4f7bcddd8fd5a1535949920159662be6f3105c6c64a135607f53d67590e4e077",
+    "tests/test_source_pipeline_v2.py": "78c9972d25d91b1ad71f0faedc3f8a28cc2a62e2c530ff81bcdbfe54d67e9c71"
+  },
+  "deployment_status": "NOT_DEPLOYED",
+  "production_writes": 0,
+  "normalization": "UTF-8 LF",
+  "business_inputs_included": false
+}
