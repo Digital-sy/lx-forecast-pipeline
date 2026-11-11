@@ -1,0 +1,20 @@
+{
+  "scope": "sanitized code tests and specification only",
+  "source_hashes": {
+    "scripts\\source_pipeline.py": "97516823f6dbe4bbf6659e31a3dfb1780b705e96d3307a87d42b5cfd9bcd3dd0",
+    "scripts\\source_material_candidates.py": "d20c2bf18156f6f626596cd779dd878397fc2db9672d7865d725f8860ea57e61",
+    "scripts\\refresh_fabric14_demand.py": "e00ea6abaf9b3ce7204515e23e2440ff53730294e8f19c1ecee74fc5912ccc47"
+  },
+  "changes": [
+    "Public refresh CLI replaces private path defaults with required parameters; computation unchanged."
+  ],
+  "files": {
+    "README.md": "095400597010728dd6b287af12422d75c53f921383e1325a26659ea84fb6f5c4",
+    "config\\source_pipeline.example.json": "c186052be3f727e2b0ad616d9818281e0e6c83002f0f604db5562f2d8c676654",
+    "scripts\\refresh_fabric14_demand.py": "d11b50cda418075f1c5a69a6f06242d7fffa1ca96edb1de974770064ac830886",
+    "scripts\\source_material_candidates.py": "d20c2bf18156f6f626596cd779dd878397fc2db9672d7865d725f8860ea57e61",
+    "scripts\\source_pipeline.py": "97516823f6dbe4bbf6659e31a3dfb1780b705e96d3307a87d42b5cfd9bcd3dd0",
+    "tests\\test_refresh_fabric14_demand.py": "018db962fe624159439f9bbd7d3f228e074bbea05aa06ba637e5e5b6b87db19f",
+    "tests\\test_source_pipeline.py": "8ad39d7047c6b5ce7d2701518f4f72d4a0a9a190120506c6e0dba7ffa8351477"
+  }
+}
