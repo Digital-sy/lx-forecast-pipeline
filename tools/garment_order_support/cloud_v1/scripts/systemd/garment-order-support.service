@@ -1,0 +1,20 @@
+[Unit]
+Description=Garment order evidence source daily extraction
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/apps/garment-order-support/state
+ExecStart=/opt/apps/pythondata/venv-ml/bin/python -B /opt/apps/garment-order-support/current/scripts/cloud_job.py --config /opt/apps/garment-order-support/config/job.json --execute
+UMask=0077
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+TimeoutStartSec=14400
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/apps/garment-order-support/state
+StandardOutput=journal
+StandardError=journal

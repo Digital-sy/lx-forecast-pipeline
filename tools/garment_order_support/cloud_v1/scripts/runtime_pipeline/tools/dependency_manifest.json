@@ -1,0 +1,32 @@
+{
+  "schema_version": "garment_order_parser_dependencies_v2",
+  "parser_version": "1.1.0-body-yyyymmdd",
+  "binding_contract": "adjacent_helper_v2",
+  "parser_path": "extract_order_lines.py",
+  "parser_sha256": "b229ea732ae8b37ee972752af7cb74203fc3d343d4071374169a96ff455044a0",
+  "helper_path": "extract_fields.py",
+  "helper_sha256": "a0e23a06e9e06f72ad965c26ca71b224b8b8c6c37933a348183ae8684bbd8ef7",
+  "wrapper_path": "parse_incremental_refresh.py",
+  "wrapper_sha256": "f9b0edf70030f6dbb786b636a7641036e31c066d194b1a674f301869f30dcb14",
+  "optional_xls_dependency": {
+    "package": "xlrd",
+    "version": "2.0.2",
+    "source": "copied unchanged from already used local approved helper deps",
+    "runtime_install_performed": false,
+    "required_for": "OLE .xls only; OOXML reader uses standard library",
+    "production_xls_regression_this_change": "NOT_RUN; source bytes unchanged"
+  },
+  "vendored_files": {
+    "deps/xlrd/__init__.py": "926b88133f1cbad6ad1a38d6dc499a0294c481c1e672c628d027161ffb61d8fd",
+    "deps/xlrd/biffh.py": "1a3b41a08f4f34811d6d99864ef7c343c1ee85988b25dda87dda36aa6ba7ce60",
+    "deps/xlrd/book.py": "d4b1f1c9631be74641230525642e14b4815e9b9cbca3c337cc00dc74f085ffce",
+    "deps/xlrd/compdoc.py": "df191fb896cb44644c74f899541b160201a4b70ec99dafb0de9fe5713093e984",
+    "deps/xlrd/formatting.py": "e8c87a18e33b1594e3d1c2781474a5d02568fbc227603bf6288653332704c3a4",
+    "deps/xlrd/formula.py": "72011735609a6152b3219c1aec85b4b43702d485f352f86a25750e2fbe57a1ac",
+    "deps/xlrd/info.py": "030b2f2f9ed9fa598a0c368205f515a24c0cc0fbc92e7f638c6b6a3fd81ebcec",
+    "deps/xlrd/sheet.py": "9a1c04a84b5e508418f632b90b25fceecb6e9363265d444e35ff3a91940c858d",
+    "deps/xlrd/timemachine.py": "ec2b54ec563a9905bb1d23f91633352bda487cd7b1542b7f3c95c6d8cdc51007",
+    "deps/xlrd/xldate.py": "4beb9468b5fc91ab86cb64a45ff33e4be141aaa43a1fd11f4c0569bf914c5f42",
+    "deps/xlrd_LICENSE": "b5a5dbce60265e305a815a6cb83ed07f24519d8ba644f2a307994488bced8815"
+  }
+}

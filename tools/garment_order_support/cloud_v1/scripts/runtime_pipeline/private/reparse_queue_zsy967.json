@@ -1,0 +1,14 @@
+{
+  "schema_version": "garment_reparse_queue/1",
+  "items": [
+    {
+      "source_id": "KemXbG0iLoXbIvxHj0YcF1RLn4c",
+      "resource_type": "file",
+      "status": "PENDING",
+      "content_sha256": "26a96e207ffcd27d1cd5b0954153341623489db7ec4d7c223423f41706822e59",
+      "previous_parser_version": "1.0",
+      "required_parser_version": "1.1.0-body-yyyymmdd",
+      "reason": "ZSY967 explicit body L2 date20260916 conflicts with filename2026-10-21; append a separately reviewed extraction revision, preserve original6rows and2400pieces."
+    }
+  ]
+}

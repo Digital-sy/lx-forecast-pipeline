@@ -1,0 +1,10 @@
+{
+  "source_baseline": "garment_increment_and_fabric14_refresh_20261111_v1",
+  "copied_without_changes": true,
+  "sha256": {
+    "server_db_preflight.py": "7484406ca28a37bef054f2ea480a2646beca9b43b0249bc2282305986098a8ec",
+    "mysql_load_core.py": "9a6d3cd417db9579af24bd353e354a3731f07cf53a6e91665e6543bd3da2957b",
+    "schema_ops.py": "5fedeb8cb12bdec386e8d56701442368c53766f72069e37f2ac8df4d736ffce5",
+    "append_load_core.py": "196b7d4b8c805bd14dca7531be0c26651853c187697b61abe2e251db5e3b594a"
+  }
+}

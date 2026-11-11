@@ -1,0 +1,73 @@
+{
+  "schema_version": "garment_source_pipeline/2",
+  "task_root": "../runtime_work",
+  "python": "<absolute-isolated-python>",
+  "tools": {
+    "discover_order_files.py": {
+      "path": "tools/discover_order_files.py",
+      "sha256": "0684c6bd72fae2f2c7202093804b505df63c41b0d85274dccbbf1fbfe7461fa2"
+    },
+    "plan_refresh.py": {
+      "path": "tools/plan_refresh.py",
+      "sha256": "1f6cf5b5f0aae076f18f38a0742e502e1f39e30b28b84976d7e47c908cab1a44"
+    },
+    "fetch_increment.py": {
+      "path": "tools/fetch_increment.py",
+      "sha256": "36a6ddca3064b8c1d72f00d695b54660fd9329d24cbf1c48b48d6d547871013b"
+    },
+    "parse_incremental_refresh.py": {
+      "path": "tools/parse_incremental_refresh.py",
+      "sha256": "f9b0edf70030f6dbb786b636a7641036e31c066d194b1a674f301869f30dcb14"
+    },
+    "order_index.py": {
+      "path": "tools/order_index.py",
+      "sha256": "24df5ce201a098760d13d9c6382ac3e3150c0f9ffd75cf8ccbacf3d6bf864602"
+    },
+    "build_increment_package.py": {
+      "path": "tools/build_increment_package.py",
+      "sha256": "0d725924a0f774a1e4e166e0b57441060c1a6f83d9231c4bf6e8aa3d941b70e9"
+    },
+    "build_load_package.py": {
+      "path": "tools/build_load_package.py",
+      "sha256": "99641bc9d0c7c0d493b6ae13a6e4ed112e27908bb8ba2e6cb24f53d41cd45c4d"
+    },
+    "mysql_load_core.py": {
+      "path": "tools/mysql_load_core.py",
+      "sha256": "9a6d3cd417db9579af24bd353e354a3731f07cf53a6e91665e6543bd3da2957b"
+    },
+    "append_load_core.py": {
+      "path": "tools/append_load_core.py",
+      "sha256": "196b7d4b8c805bd14dca7531be0c26651853c187697b61abe2e251db5e3b594a"
+    }
+  },
+  "sources": {
+    "previous_inventory": {
+      "path": "<full-inventory.json>",
+      "sha256": "<real-file-sha256>"
+    },
+    "publication_receipt": {
+      "path": "<fresh-publisher-snapshot-receipt.json>",
+      "sha256": "<real-file-sha256>"
+    },
+    "parser_dependencies": {
+      "path": "tools/dependency_manifest.json",
+      "sha256": "7735945b5dc78437b884c5a93a29085baca892eb37213fbc712be9960c3c598b"
+    },
+    "ddl": {
+      "path": "<approved-schema.sql>",
+      "sha256": "20cfeb64ac250bfd9dfc4fc740898bdf3e63a262fbb1d3f039f1e0f84361a4c1"
+    }
+  },
+  "discovery": {
+    "root_token": "<approved-root>",
+    "identity": "bot",
+    "cli_executable": "<absolute-isolated-python>",
+    "cli_script": "<read-only-cloud-shim.py>",
+    "max_pages": 80,
+    "max_folders": 80,
+    "max_items": 5000,
+    "page_size": 200,
+    "timeout_seconds": 30
+  },
+  "reparse_queue": null
+}

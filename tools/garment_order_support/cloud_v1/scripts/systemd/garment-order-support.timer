@@ -1,0 +1,11 @@
+[Unit]
+Description=Garment evidence source at 09:30 Asia/Shanghai
+
+[Timer]
+OnCalendar=*-*-* 09:30:00 Asia/Shanghai
+AccuracySec=60s
+Persistent=false
+Unit=garment-order-support.service
+
+[Install]
+WantedBy=timers.target
